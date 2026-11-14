@@ -84,3 +84,7 @@ Use o botão **Adicionar alergia** no cadastro ou **Cadastrar alergia** no cená
 ## Doenças preexistentes e cirurgias anteriores
 
 O cadastro inclui os tipos Doença preexistente e Cirurgia anterior e botões diretos para cada um. Nome, data do registro e fonte são obrigatórios. Data do diagnóstico ou cirurgia e instituição são opcionais, para evitar inventar informações desconhecidas. Doenças têm situação relatada. Todos permitem observações, anexos e edição. Dados são informados manualmente e não constituem diagnóstico ou validação clínica.
+
+
+### Busca por CPF na demonstração
+O formulário aceita exclusivamente o identificador fictício `000.000.000-00` para localizar o cenário SYN-P01. Outros valores não retornam paciente. O campo não envia requisições, não persiste a entrada e é limpo após a busca. Não consulta instituições nem implementa autenticação ou autorização. A demonstração tem um único paciente; não oferece segregação entre pacientes reais.
