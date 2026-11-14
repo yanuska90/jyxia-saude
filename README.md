@@ -14,11 +14,13 @@ Versão 2.0 — acesso e continuidade do cuidado. Site e demonstração são pub
 
 ## Origem
 
-A ideia nasceu da experiência pessoal de uma pessoa do time que teve câncer há cerca de seis anos. Ela relata exames dispersos, repetição de seu histórico em diferentes consultas e recebimento de medicamento ao qual tinha alergia. A divulgação de câncer e alergia foi autorizada sem identificação de médicos ou serviços. Essa experiência deu origem ao JYXIA e ao desejo de tornar o cuidado mais integrado, ágil e acessível.
+A ideia do JYXIA surgiu quando eu, Yanuska, vivenciei um câncer há cerca de seis anos. Durante os atendimentos, meus exames não estavam reunidos e eu precisava repetir minha história e meus sintomas a cada novo médico. Também recebi um medicamento ao qual tinha alergia. Essa vivência me mostrou a importância de um histórico de saúde integrado e acessível à equipe que cuida do paciente.
+
+Essa experiência deu origem ao desejo de tornar o cuidado mais integrado, ágil e acessível.
 
 ## Nossa parceria
 
-A parceria do JYXIA começou na faculdade, quando a ideia foi compartilhada com João. Ao longo deste ano, os dois aprenderam muito juntos. Hoje, compartilham a responsabilidade e o sonho de fazer o projeto acontecer e contribuir para uma saúde mais ágil e acessível, que chegue a todos os cantos e às pessoas que precisam de cuidado.
+Conheci o João durante a faculdade e compartilhei com ele a ideia do projeto. Ao longo deste ano, aprendemos muito juntos. Hoje, dividimos a responsabilidade e o sonho de fazer o JYXIA acontecer e contribuir para uma saúde mais ágil e acessível, que chegue a todos os cantos e às pessoas que precisam de cuidado.
 
 ## Problema e proposta
 
