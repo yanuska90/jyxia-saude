@@ -1,3 +1,5 @@
+> Versão 3.0.0 — documento histórico. O produto atual é a conferência documental descrita no README. As funções abaixo pertencem à demo 2.3, preservada em demo-v2.html; não são capacidades da demo documental. Acesso a portais de laboratório permanece desativado.
+
 # Teleconsulta JYXIA
 
 ## Entrega atual

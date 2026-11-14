@@ -1,3 +1,5 @@
+> Versão 3.0.0 — documento histórico. O produto atual é a conferência documental descrita no README. As funções abaixo pertencem à demo 2.3, preservada em demo-v2.html; não são capacidades da demo documental. Acesso a portais de laboratório permanece desativado.
+
 # JYXIA — acesso real suspenso nesta etapa
 
 Decisão atualizada em 14/11/2026, por orientação de Yanuska: nesta etapa do projeto não haverá acesso a contas de laboratórios ou hospitais, inclusive à própria conta da titular. A proposta anterior de teste individual fica suspensa. A demonstração utiliza exclusivamente dados inteiramente fictícios.

@@ -1,68 +1,7 @@
-# Integrações JYXIA — ambiente sintético
+# Integrações na versão documental 3.0.0
 
-Esta versão implementa um núcleo de ingestão de um subconjunto FHIR R4, com dois emissores fictícios. Não é servidor FHIR completo, não é certificado e não conecta instituições reais. Os registros manuais continuam separados dos importados.
+A entrada atual é um catálogo sintético de PDF, PNG, CSV e JSON. Não há conexão real com Delboni, Hospital São Luiz, RNDS, gov.br ou sistemas hospitalares. Não se solicita login ou senha de laboratório; a alternativa de acesso por credenciais do paciente está retirada do escopo ativo por decisão de Yanuska.
 
-## O que funciona nesta versão
+O protótipo histórico de normalização FHIR/JSON permanece testado em integration.py, sem caracterizar conector real. Para a próxima fase, escolher uma instituição e obter documentação pública/fornecida, autorização, contrato, responsável e ambiente de testes fictício. Não usar Drive pessoal, dados reais, cookies ou senhas para explorar integrações.
 
-- Busca na interface pelo identificador deliberadamente inválido `000.000.000-00`, retornando somente SYN-P01. Não é autenticação e não consulta CPF real.
-- Importação visual de sete registros de laboratório e hospital fictícios na mesma jornada; reimportação sem duplicação durante a sessão. Esses exemplos somem ao recarregar.
-- Normalização de Bundle `collection` com Observation, DiagnosticReport, AllergyIntolerance, Condition, Procedure, Encounter e MedicationStatement, limitada aos campos implementados em `integration.py`.
-- Correspondência explícita dos identificadores externos Patient/LAB-P01 e Patient/HOSP-P01 com SYN-P01. Nenhuma associação aproximada, por nome ou CPF.
-- Preservação do recurso original, emissor, identificador, versão e hash do conteúdo; preservação de unidade, referência e método de resultados. Não converte unidades nem interpreta valores.
-- Rejeição de paciente não mapeado, fonte não autorizada, tipo não suportado, laudo com referência não resolvida e mudança de conteúdo sem mudança de versão.
-- Nova versão fica junto da anterior. Avisos são pendências de revisão, não conclusões clínicas nem escolha automática da versão mais recente.
-- API Docker: gravação atômica por paciente sintético em um documento MongoDB com revisão otimista e histórico limitado de importações. Limites: 1 MB por lote, 100 recursos por lote, 1.000 versões por paciente e 100 eventos recentes de auditoria. Não representa auditoria clínica imutável.
-
-## Como verificar o núcleo sem dependências externas
-
-Na pasta do projeto, com Python 3.13:
-
-```sh
-python -m unittest test_integration.py -v
-python integration.py
-```
-
-Os testes cobrem duas fontes no mesmo paciente, bloqueio de identidade divergente, origem desconhecida, repetição idempotente, colisão de conteúdo, preservação de versões e do original e referências/tipos não suportados. Não substituem testes de integração com MongoDB e validação de perfis FHIR.
-
-## API de desenvolvimento
-
-Com o ambiente Docker iniciado conforme README, envie `lab-demo.json` como corpo JSON para `POST /api/integrations/lab-demo`, e `hospital-demo.json` para `POST /api/integrations/hospital-demo`, usando o cabeçalho `Authorization: Bearer <chave definida no ambiente local>`. Não coloque chaves no GitHub. `GET /api/integrations` retorna os registros sintéticos e o histórico. Reenvio idêntico retorna duplicatas sem multiplicar registros. Colisão de versão retorna 409; entrada inválida ou identidade não mapeada retorna 422.
-
-A interface pública usa fixtures normalizadas e não chama essa API. O cadastro manual na API continua limitado a SYN-P01. A chave compartilhada é exclusivamente de desenvolvimento; não há identidade individual, consentimento operacional ou autorização clínica. Não exponha essa API com dados reais.
-
-## Integração institucional — fora da etapa atual
-
-Por decisão de Yanuska em 14/11/2026, não haverá acesso a contas ou sistemas reais nesta etapa, inclusive à conta da própria titular. A demonstração utiliza apenas dados fictícios. Os requisitos abaixo são referência para uma etapa futura; não representam uma integração em andamento.
-
-Solicitar ao responsável técnico, sem dados de pacientes:
-
-1. Nome e versão do sistema de laboratório/prontuário e fornecedor responsável pela interface.
-2. Documentação oficial de APIs ou mensagens, versão FHIR/HL7, perfis, terminologias e exemplos sintéticos.
-3. Ambiente de homologação, autenticação prevista, escopos e processo de liberação de acesso por canal seguro.
-4. Identificadores de paciente, exame e atendimento; regras para correção, cancelamento, versão e duplicidade.
-5. Mecanismo de atualização, paginação, limites de uso, confirmação de recebimento e recuperação após falha.
-6. Responsabilidades sobre os dados, base legal aplicável, contratos, retenção, atendimento a titulares e resposta a incidentes.
-
-## Etapas que ainda precisam ser implementadas e validadas
-
-Conector específico autorizado; HL7 v2 (ainda não há parser ou transporte); consulta incremental e filas com retentativa; gestão de identidades e permissões por paciente/instituição; reconciliação clínica assinada; terminologias e perfis brasileiros; auditoria protegida e retenção; backup e recuperação; gestão de segredos; proteção contra abuso; testes de invasão; OCR com conferência; integração pública eventualmente elegível; avaliação de IA e governança clínica. Não há diagnóstico automático, prescrição, agendamento ou decisão terapêutica.
-
-Antes do piloto real, exigir: zero mistura de pacientes no conjunto de validação; original e fonte rastreáveis em todos os registros; reenvio sem duplicação; correção sem apagar história; acesso negado fora do escopo; trilha de acesso verificável; recuperação de falhas demonstrada; aprovação institucional, jurídica, de segurança e clínica. Definir metas de prazo e disponibilidade com o parceiro, sem inventar SLA.
-
-## Referências técnicas
-
-- [HL7 FHIR R4 — Bundle](https://hl7.org/fhir/R4/bundle.html)
-- [HL7 FHIR R4 — Observation](https://hl7.org/fhir/R4/observation.html)
-- [HL7 FHIR R4 — DiagnosticReport](https://hl7.org/fhir/R4/diagnosticreport.html)
-
-FHIR R4 foi escolhido como base do protótipo; a versão, os perfis e as terminologias de cada integração serão confirmados com o parceiro. Preservar recursos não equivale a validar conformidade completa.
-
-## Verificação em 14/11/2026
-Nove testes do núcleo passaram. Ambiente Docker com MongoDB executado: autenticação, ingestão das duas fontes, reenvio idempotente, rejeição de paciente divergente, colisão de conteúdo, nova versão e consulta do histórico passaram. Após reiniciar aplicação e banco, as oito versões sintéticas e quatro eventos de importação permaneceram disponíveis. Nenhum sistema institucional foi acessado. O ambiente de teste foi parado após a verificação.
-
-
-## Revisão de segurança 2.2
-Foram acrescentados rejeição de identificador ambíguo, validação do tipo de valueQuantity e cálculo de avisos antes da gravação. O núcleo agora possui 11 testes. O fluxo assistido sem API institucional está descrito em ACESSO_ASSISTIDO.md, sem coleta de senha de laboratórios na demo.
-
-## Versão 2.3 — importação guiada
-Carregamento completo por botão ou arquivo paciente-ficticio-01.json. O arquivo é um pacote próprio da JYXIA com registros sintéticos normalizados a partir do subconjunto FHIR; não é um Bundle FHIR diretamente importável em qualquer serviço. O importador público aceita exclusivamente o conteúdo do pacote aprovado. Não importa outros pacientes, arquivos modificados ou documentos reais. Conteúdo selecionado é processado localmente, sem envio do arquivo, e não entra no cofre ou no MongoDB. A origem e o conteúdo original de cada registro permanecem visíveis. Guia em DADOS_FICTICIOS.md.
+Validar contrato e perfis FHIR/HL7, identificadores por emissor, consentimento/base legal, autorização, versões, idempotência, proveniência, erros e reconciliação. Manter documentos sem vínculo quando houver dúvida de identidade. Planejar retorno manual e fila de exceções. Importação de arquivo pode anteceder API autorizada, mas não deve simular acesso nacional por CPF.

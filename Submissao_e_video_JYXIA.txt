@@ -1,19 +1,42 @@
-19 Pacote para o painel do Hack Brasil
-Base: oito capturas do painel fornecidas pelo time. As informações abaixo descrevem o que está visível nas telas e não substituem a leitura do regulamento. O painel mostra JYXIA, duas pessoas e uma pendência individual de aceite de termos. Cada integrante deve resolver seus próprios termos na própria conta.
+JYXIA — materiais de submissão — versão 3.0.0
 
-Textos sugeridos para os campos
-Nome do projeto: JYXIA
-Resumo: Plataforma de saúde digital que conecta teleconsultas, histórico clínico, exames, receitas e terapias para ampliar o acesso e a continuidade do cuidado.
-Descrição: O JYXIA propõe ampliar o acesso e a continuidade do cuidado em saúde por meio de teleconsultas, integração de prontuários, laboratórios e centros de diagnóstico, acompanhamento de pedidos de exames, avaliação para renovação de receitas e terapias. A IA assistiva apoiará a organização de informações e pendências, com revisão profissional. O histórico será vinculado com identificação segura, podendo usar CPF como um dos identificadores, sem permitir acesso apenas por esse dado. A demonstração utiliza dados sintéticos e fluxos simulados. Integrações com serviços públicos são possibilidades futuras, sujeitas à elegibilidade, acordos e homologação. O centro cirúrgico faz parte do roadmap especializado. A solução será avaliada por acessibilidade, tempo de resposta, qualidade da informação e continuidade do acompanhamento.
-Trilha sugerida: Saúde & bem-estar, conforme opção exibida. Links: inserir apenas endereços reais e testados de repositório, página, demo e vídeo; não usar exemplos como resultados.
+NOME
+JYXIA Inteligência Documental em Saúde
 
-20 Plano de entrega para o evento
-Este plano é uma proposta de trabalho do time até o prazo exibido nas telas. É separado do piloto de 16 semanas da seção 12. O evento recebe uma demonstração sintética; expansão clínica ocorre posteriormente.
+RESUMO EM UMA FRASE
+Conferência de documentos de saúde com fonte verificável, revisão humana e acompanhamento de pendências, começando por procedimentos eletivos.
 
-Roteiro para vídeo de até três minutos
-0 a 30 segundos | Pessoa idealizadora na câmera: Há cerca de seis anos, tive câncer. Meus exames estavam dispersos e eu repetia a história em cada atendimento. Também recebi um medicamento ao qual tinha alergia. Essa experiência motivou o JYXIA e o desejo de tornar o cuidado mais integrado, ágil e acessível.
-30 a 50 segundos | João na câmera: Queremos facilitar o acesso à saúde com teleconsultas, histórico integrado, exames, receitas e terapias. Paciente e equipe acompanham os próximos passos na mesma jornada, com acessibilidade e proteção dos dados.
-50 a 115 segundos | Demonstração: Mostrar o acesso à teleconsulta simulada, o histórico e suas fontes, a solicitação de exame e o acompanhamento. Mostrar avaliação de renovação de receita e terapia como solicitações, sem decisão automática. Explicar que dados são sintéticos e que o resumo é pré-escrito nesta versão.
-115 a 145 segundos | Pessoa idealizadora: A IA será apoio para organizar informações e destacar pendências. A identificação poderá usar CPF com validação e controle de acesso. Integração com serviços públicos é uma evolução condicionada a parcerias e requisitos oficiais.
-145 a 175 segundos | Outro integrante na câmera: Nossa parceria começou na faculdade, quando compartilhamos a ideia do projeto. Aprendemos muito juntos neste ano e hoje dividimos a responsabilidade e o sonho de fazer o JYXIA acontecer, contribuindo para uma saúde mais ágil e acessível, que alcance as pessoas que precisam de cuidado.
-Usar nomes reais somente após confirmação. Ambos devem aparecer na câmera conforme tela do rascunho. Gravar em ritmo natural, conferir duração final até 3 minutos e publicar como público ou não listado. A gravação real pelos integrantes permanece necessária; este roteiro não é um vídeo concluído.
+DESCRIÇÃO
+A JYXIA ajuda equipes a organizar documentos, conferir informações na página original e acompanhar pendências administrativas. O primeiro módulo concentra-se na preparação documental para procedimentos eletivos. A demo recebe arquivos totalmente fictícios, extrai campos de PDFs com texto, destaca a fonte, sinaliza divergências de identidade, identifica arquivos repetidos e preserva versões. A pessoa revisora confirma dados, justifica correções, atribui responsáveis e exporta o histórico. As regras não autorizam procedimentos nem substituem avaliação profissional. A versão 3.0 usa extração determinística; OCR de imagens, extração assistida por IA, autenticação institucional e integrações são próximas etapas. O impacto operacional ainda será medido com usuários.
+
+TRILHA PRETENDIDA
+Saúde & bem-estar. Conferir enquadramento no regulamento vigente.
+
+LINKS
+Repositório: https://github.com/yanuska90/jyxia-saude
+Página pública: https://yanuska90.github.io/jyxia-saude/
+Demo: https://yanuska90.github.io/jyxia-saude/demo.html
+Vídeo: pendente de gravação e publicação pelo time. Não há URL inventada.
+
+ROTEIRO DO VÍDEO — META DE 2 MINUTOS E 45 SEGUNDOS
+0:00–0:35 — Yanuska em câmera
+“Eu sou a Yanuska. A ideia da JYXIA nasceu quando vivenciei um câncer, há cerca de seis anos. Meus exames estavam separados e eu precisava repetir minha história nos atendimentos. Também recebi um medicamento ao qual tinha alergia. Essa experiência me mostrou a importância de informações organizadas e acessíveis.”
+
+0:35–0:55 — João em câmera
+“Conheci a Yanuska durante a faculdade. Ela compartilhou a ideia e aprendemos muito juntos neste ano. Hoje dividimos a responsabilidade de construir a JYXIA. Escolhemos começar por uma tarefa concreta: conferir documentos para procedimentos eletivos.”
+
+0:55–1:45 — Demonstração real, narrada pelos dois
+“Aqui carregamos um conjunto inteiramente fictício. Selecionamos o laudo e vemos a data de emissão. Ao clicar em Ver fonte, o trecho aparece no documento original. A pessoa confere a identidade e registra a revisão. Se tentarmos anexar o mesmo arquivo novamente, ele é reconhecido. Um documento com identidade divergente permanece em quarentena.”
+Mostrar: conjunto completo → laudo → Ver fonte de emissão → confirmar identidade → registrar revisão → cenário divergente. Ensaiar com a versão publicada. Não mostrar contas, senhas ou pacientes reais.
+
+1:45–2:20 — João, com tela de pendências
+“As regras mostram o que falta conferir. Cada pendência pode ter responsável e prazo. Correções e justificativas ficam no histórico exportável. A demo extrai texto de PDFs por regras; OCR e IA são fases futuras. O sistema não libera cirurgias nem toma decisões clínicas.”
+
+2:20–2:45 — Ambos em câmera
+“Queremos medir tempo de conferência, erros e retrabalho com equipes. Nosso próximo passo é validar o fluxo e construir os controles institucionais. A JYXIA começa com documentos para contribuir para um cuidado mais ágil, acessível e contínuo.”
+
+LISTA ANTES DO ENVIO
+Ensaiar e cortar para até três minutos; mostrar ambos; publicar vídeo acessível; testar os três links sem login; confirmar termos individualmente; confirmar elegibilidade do histórico de código, prazo e critérios no regulamento oficial. Campos de vídeo e aceites dependem da equipe. Não enviar enquanto incompletos. A atualização do site não constitui submissão.
+
+FONTE DO EVENTO
+https://hackbrasil.com/regulamento — consultado em 14/11/2026. Os quatro critérios são execução técnica, implementação técnica, impacto e comunicação, com pesos iguais. Prazo exibido: 30/11/2026 às 23:59 de Brasília; reconfirmar no portal. A gravação e a publicação do vídeo não foram executadas nesta entrega.

@@ -17,7 +17,7 @@ from integration import normalize,apply_batch,review_flags,IntegrationError
 
 MAX_FILE=10*1024*1024
 ROOT=Path(__file__).parent
-STATIC={'synthetic-import.js','paciente-ficticio-01.json','anexo-ficticio-01.txt','teleconsultation.js','vault.js','vault-crypto.js','index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
+STATIC={'demo-v2.html','synthetic-import.js','paciente-ficticio-01.json','anexo-ficticio-01.txt','teleconsultation.js','vault.js','vault-crypto.js','index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
 token=os.environ.get('JYXIA_API_TOKEN','')
 client=None;db=None;fs=None
 
@@ -203,11 +203,12 @@ def integrated_records():
 def config():return Response("window.JYXIA_STORAGE = 'api';",media_type='application/javascript',headers={'Cache-Control':'no-store'})
 
 @app.get('/')
-def index():return FileResponse(ROOT/'index.html')
+def index():return FileResponse(ROOT/'demo-v2.html')
 
 @app.get('/{filename}')
 def static(filename:str):
  if filename not in STATIC:raise HTTPException(404,'Página não encontrada.')
+ if filename=='demo.html':filename='demo-v2.html'
  return FileResponse(ROOT/filename)
 
 @app.middleware('http')

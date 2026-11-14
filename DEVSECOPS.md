@@ -1,3 +1,5 @@
+> Versão 3.0.0 — documento histórico. O produto atual é a conferência documental descrita no README. As funções abaixo pertencem à demo 2.3, preservada em demo-v2.html; não são capacidades da demo documental. Acesso a portais de laboratório permanece desativado.
+
 # Revisão de segurança e prática de desenvolvimento
 
 Revisão de 14/11/2026, incluindo componentes anteriores e a versão 2.3. Escopo: código do site, cadastro/anexos, CPF demonstrativo, ingestão sintética, API Docker, configuração de publicação e novos fluxos. Testes com dados fictícios nos ambientes próprios. Não houve pentest dos portais Delboni, Rede D’Or ou Daily, nem coleta de credenciais da titular.

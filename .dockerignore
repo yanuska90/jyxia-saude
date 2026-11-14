@@ -15,3 +15,5 @@ __pycache__
 *.zip
 work
 outputs
+!fixtures-jyxia.zip
+!Projeto_JYXIA_Inteligencia_Documental_v3.docx

@@ -1,111 +1,68 @@
-# JYXIA
+# JYXIA Inteligência Documental em Saúde
 
-Plataforma proposta de acesso e continuidade do cuidado em saúde, com teleconsultas, histórico integrado, exames, avaliação de receitas, terapias e IA assistiva. Materiais preparados para apresentação ao Hack Brasil na trilha Saúde & bem-estar, conforme painel fornecido pelo time.
+Versão 3.0.0 · 14 de novembro de 2026 · Yanuska e João.
 
-## Versão do projeto
+A JYXIA organiza documentos, mostra a origem de informações e acompanha pendências com revisão humana. O primeiro módulo é a **conferência documental para procedimentos eletivos**. A hipótese de valor é reduzir procura, redigitação e retrabalho; ainda não há benefício operacional ou clínico validado.
 
-Versão 2.3 — importação guiada de exemplo sintético, registros com cofre local e cadastro de teleconsulta. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
+- [Site HTTPS](https://yanuska90.github.io/jyxia-saude/)
+- [Demo documental HTTPS](https://yanuska90.github.io/jyxia-saude/demo.html)
+- [Projeto completo em DOCX](Projeto_JYXIA_Inteligencia_Documental_v3.docx)
+- [Exemplos fictícios para baixar](fixtures-jyxia.zip)
 
-## Acessos públicos
+## O que funciona
 
-- Site: https://yanuska90.github.io/jyxia-saude/
-- Demo: https://yanuska90.github.io/jyxia-saude/demo.html
-- Repositório: https://github.com/yanuska90/jyxia-saude
+1. Adicione um dos sete cenários ou anexe os arquivos fornecidos. O conteúdo deve corresponder ao catálogo sintético por SHA256; arquivos pessoais ou modificados são recusados.
+2. A demo extrai texto de PDFs com PDF.js, localiza nome, nascimento, identificador, emissão, tipo e origem informada. “Ver fonte” destaca o trecho na página original.
+3. Confira a identidade, a data e, em termos, a área de assinatura. Correções de data exigem observação e preservam o valor extraído. Uma marca visual não autentica assinatura.
+4. Trate pendências, atribua responsável fictício e prazo. Exceções exigem justificativa. Documentos divergentes ficam em quarentena sem vínculo confirmado ao caso.
+5. Confirme substituições entre documentos revisados do mesmo tipo; ambos ficam preservados. Arquivos idênticos não geram cópias adicionais.
+6. Exporte a sessão em JSON e verifique a sequência de hashes dos eventos. Não se trata de auditoria imutável ou autenticação de autoria.
 
-## Origem
+As regras são administrativas e versionadas. A referência do exemplo é 14/11/2026, com procedimento fictício em 30/11/2026 e janela inicial de 30 dias para a data do laudo. “Sem pendências” não libera procedimento.
 
-A ideia do JYXIA surgiu quando eu, Yanuska, vivenciei um câncer há cerca de seis anos. Durante os atendimentos, meus exames não estavam reunidos e eu precisava repetir minha história e meus sintomas a cada novo médico. Também recebi um medicamento ao qual tinha alergia. Essa vivência me mostrou a importância de um histórico de saúde integrado e acessível à equipe que cuida do paciente.
+## Estado real e limites
 
-Essa experiência deu origem ao desejo de tornar o cuidado mais integrado, ágil e acessível.
+O fluxo atual usa **extração determinística de PDFs com texto**, não IA generativa nem OCR de imagens. A imagem fictícia vai para revisão/reenvio. Há um caso sintético; a importação CSV/JSON confirma o cadastro fornecido. Não há busca por CPF real.
 
-## Nossa parceria
+Arquivos e alterações permanecem na memória da aba e desaparecem ao recarregar. A demo não envia arquivos ao servidor, não possui login institucional, banco documental persistente, integração hospitalar, RNDS ou assinatura digital. Não inserir dados reais, mesmo nas observações. A hospedagem recebe requisições normais de acesso ao site.
 
-Conheci o João durante a faculdade e compartilhei com ele a ideia do projeto. Ao longo deste ano, aprendemos muito juntos. Hoje, dividimos a responsabilidade e o sonho de fazer o JYXIA acontecer e contribuir para uma saúde mais ágil e acessível, que chegue a todos os cantos e às pessoas que precisam de cuidado.
+OCR, extração assistida por IA, autenticação, autorização por instituição/caso, processamento isolado e armazenamento privado são próximas fases. Veja [arquitetura](ARQUITETURA.md), [segurança](SEGURANCA.md) e [validação](VALIDACAO_DOCUMENTAL.md).
 
-## Problema e proposta
+## Como executar e testar
 
-O JYXIA busca facilitar acesso a profissionais e continuidade entre consulta, exame e acompanhamento. O portal reúne histórico com fontes e datas, solicitações e próximas ações. Acessibilidade, baixa conectividade e uso por celular orientam o projeto. Benefícios de eficiência e segurança ainda precisam ser validados.
-
-## Estado da implementação
-
-Esta versão contém página e demonstração estática interativa com quatro fluxos de serviços simulados: teleconsulta, exame, avaliação de renovação de receita e terapia. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. A demo também permite cadastrar medicamento, dosagem informada, data, origem, observações e anexos. Os registros manuais e anexos ficam criptografados no navegador após criar o acesso local neste site público. Esse cofre não é autenticação clínica ou segregação de pacientes no servidor. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
-
-## Como executar
-
-Use a URL pública HTTPS. Para desenvolver e testar a criptografia em uma origem local segura, com Python 3 disponível:
+A banca pode usar diretamente a demo HTTPS, sem instalação. Para desenvolvimento, use um servidor estático local com Python 3 e abra a página servida; abrir o HTML como arquivo não carrega os módulos:
 
 ```sh
-python -m http.server 8080 --directory .
+python -m http.server 8000 --bind 127.0.0.1
+node --test test_documental.mjs test_security.cjs test_synthetic_import.cjs
+python -m unittest test_integration.py -v
+python check_publication.py
 ```
 
-Essa opção é apenas para desenvolvimento. Para a submissão, utilizar a URL pública HTTPS publicada, nunca localhost.
+Alternativa Docker para a demo documental, sem banco ou senha:
 
-## Exemplo e verificação
+```sh
+docker compose -f compose.documental.yaml up --build
+```
 
-Abra a demo, consulte SYN-R01 a SYN-R04, carregue o resumo, confira as referências, edite e registre revisão simulada. Teste rejeição e indisponibilidade; as fontes devem continuar acessíveis. Reinicie para limpar o estado. Confira teclado e tela estreita.
+O endereço local serve apenas para desenvolvimento; a entrega pública usa o HTTPS acima. O Docker documental executa um servidor estático restrito aos arquivos de publicação, como usuário sem privilégios, sistema de arquivos somente leitura e porta vinculada a 127.0.0.1. Isso não o torna um ambiente clínico.
 
-## Roadmap
+## Origem e equipe
 
-1. Portal acessível, histórico e acompanhamento sintéticos; validar tarefas com usuários.
-2. Identidade, autorização, agenda, solicitações e importação FHIR em ambiente autorizado.
-3. Operação de teleconsulta com profissionais, vídeo e documentos clínicos homologados.
-4. Integração com laboratórios, centros de diagnóstico e rede de terapias; IA assistiva validada.
-5. Possíveis integrações públicas conforme elegibilidade e acordos. CPF ajuda na identificação, nunca concede acesso sozinho.
-6. Módulos hospitalares e cirúrgicos; pesquisa separada para imagem 3D, predição e monitoramento.
+A ideia surgiu quando eu, Yanuska, vivenciei um câncer há cerca de seis anos. Meus exames não estavam reunidos e eu precisava repetir minha história nos atendimentos. Também recebi um medicamento ao qual tinha alergia. Essa experiência mostrou a importância de informações acessíveis, organizadas e disponíveis para quem cuida do paciente.
 
-## CPF e serviços públicos
+Conheci o João durante a faculdade e compartilhei a ideia. Aprendemos muito juntos ao longo deste ano. Hoje dividimos a responsabilidade e o sonho de fazer a JYXIA acontecer e contribuir para uma saúde mais ágil e acessível.
 
-CPF é um possível identificador, não uma senha ou permissão de acesso. Integração de login gov.br, RNDS e operação com SUS são processos distintos e não estão ativos. O projeto é independente, sem vínculo ou parceria governamental confirmada.
+## Estratégia e histórico
 
-## Materiais atualizados
+O foco atual segue os quatro materiais enviados pela equipe sobre Clinical Document Intelligence. Acessibilidade continua como requisito transversal. Teleconsulta, prescrições, terapias, vacinas e integração ampla de prontuários ficam fora do primeiro produto e dependem de validação futura ou parceiros.
 
-O documento principal é `Projeto_JYXIA_Acesso_e_Continuidade.docx`. O arquivo com o nome anterior também contém a revisão consolidada para preservar os links já compartilhados. Hipóteses e estimativas não são resultados clínicos.
+`demo-v2.html` preserva a demonstração anterior e seus registros locais; não é o produto documental atual. Os módulos antigos de cofre, teleconsulta e API MongoDB permanecem para referência e regressão. `compose.yaml` é o ambiente histórico; `compose.documental.yaml` é a execução recomendada desta versão. Nenhuma migração ou exclusão de registros do navegador foi feita.
 
-## Dados e segurança
+## Hack Brasil
 
-Na demo pública, os anexos são guardados no navegador, sem envio a servidor. Não há analytics ou serviço de IA. A hospedagem pode manter logs técnicos. Dados fictícios são identificados como sintéticos. Autorização clínica, gestão de chaves no servidor, retenção e regulação são requisitos do produto futuro. A criptografia local desta versão e seus limites estão descritos em SEGURANCA.md.
+Trilha pretendida: Saúde & bem-estar. [Regulamento oficial](https://hackbrasil.com/regulamento), consultado em 14/11/2026: execução técnica, implementação técnica, impacto e comunicação. O roteiro e os campos estão em [Submissao_e_video_JYXIA.txt](Submissao_e_video_JYXIA.txt). Confirmar elegibilidade do histórico do código, prazo e condições no portal antes de enviar. Não houve submissão automática nem gravação do vídeo.
 
-## Materiais e direitos
+## Dependência de terceiros
 
-Consultar o DOCX, o prompt mestre e o arquivo de submissão e vídeo na raiz deste repositório. Confirmar nomes e papéis da equipe antes da submissão. Nenhuma licença aberta é presumida; direitos de terceiros e licença final precisam ser revisados pelo time.
-
-## Registros e anexos e ambiente Docker
-
-Use a seção **Adicionar registros e anexos** na demo para cadastrar, editar e remover registros fictícios e baixar anexos. Use PDF, PNG, JPG ou TXT, até 5 arquivos por registro e 10 MB por arquivo. Registros persistem neste navegador mesmo ao reiniciar o cenário. O resumo de exemplo não incorpora os novos registros automaticamente.
-
-A raiz inclui Dockerfile, compose.yaml, app.py, requirements.txt e .env.example. O ambiente Docker serve a interface com API FastAPI, MongoDB (NoSQL) e GridFS para anexos. Leia **ARQUITETURA.md** para execução, autenticação de teste, endpoints e limites. O banco e a API ainda não estão hospedados em produção. MySQL não é necessário para esta primeira implementação.
-
-
-## Cadastro de alergias
-
-Use o botão **Adicionar alergia** no cadastro ou **Cadastrar alergia** no cenário. Informe a substância ou medicamento, reação se conhecida, gravidade relatada (pode permanecer desconhecida), data, origem, observações e anexos. É possível editar ou remover depois. Dosagem não é exigida para alergia. Os registros são informados manualmente e sujeitos a avaliação profissional; não atualizam automaticamente o resumo pré-escrito do cenário. Na demo pública, ficam somente neste navegador.
-
-
-## Doenças preexistentes e cirurgias anteriores
-
-O cadastro inclui os tipos Doença preexistente e Cirurgia anterior e botões diretos para cada um. Nome, data do registro e fonte são obrigatórios. Data do diagnóstico ou cirurgia e instituição são opcionais, para evitar inventar informações desconhecidas. Doenças têm situação relatada. Todos permitem observações, anexos e edição. Dados são informados manualmente e não constituem diagnóstico ou validação clínica.
-
-
-### Busca por CPF na demonstração
-O formulário aceita exclusivamente o identificador fictício `000.000.000-00` para localizar o cenário SYN-P01. Outros valores não retornam paciente. O campo não envia requisições, não persiste a entrada e é limpo após a busca. Não consulta instituições nem implementa autenticação ou autorização. A demonstração tem um único paciente; não oferece segregação entre pacientes reais.
-
-## Integração de fontes sintéticas
-A demo reúne sete registros de duas instituições fictícias, com origem e versão preservadas. Veja INTEGRACOES.md para contrato, testes, API e limitações. Delboni e Hospital São Luiz são contatos indicados para possível piloto, sem conexão ou parceria confirmada.
-
-
-## Acesso protegido, dados fictícios e teleconsulta
-
-Na área de registros, crie um usuário local e uma senha exclusiva, sem reutilizar credenciais de laboratórios. Registros anteriores só passam a ser criptografados ao concluir essa configuração no próprio navegador. Use o botão de bloqueio ao terminar. Não há recuperação de senha ou sincronização; use somente dados fictícios. Leia [SEGURANCA.md](SEGURANCA.md).
-
-O acesso a laboratórios está fora desta etapa, por decisão da equipe. Os atalhos foram retirados da demo. Não realizar teste com contas reais. A decisão atual substitui o plano anterior e está em [ACESSO_ASSISTIDO.md](ACESSO_ASSISTIDO.md). Para usar o exemplo, consulte [DADOS_FICTICIOS.md](DADOS_FICTICIOS.md).
-
-O tipo **Teleconsulta** permite salvar data, horário de Brasília, profissional/clínica, especialidade, observações e endereço de uma sala Daily de teste. O link é guardado dentro do cofre; abrir a sala é uma navegação externa. Isso não cria nem confirma uma consulta. A criação de salas privadas e acessos temporários via servidor está especificada em [TELECONSULTA.md](TELECONSULTA.md).
-
-Para verificar o núcleo criptográfico e a validação de links, com Node.js 22 ou superior: `node --test test_security.cjs`. Os testes usam exclusivamente valores fictícios e não abrem o armazenamento pessoal do usuário.
-
-## Senha esquecida
-A demo não possui recuperação. Leia [RECUPERACAO_DE_ACESSO.md](RECUPERACAO_DE_ACESSO.md) antes de criar o cofre. A versão clínica depende de recuperação verificada e preservação dos dados.
-
-
-## Importar um exemplo pronto
-Na demo, abra Importar dados fictícios e clique em Carregar exemplo completo. Alternativamente, baixe paciente-ficticio-01.json e selecione-o no campo de importação. Resultado: 7 registros, 2 fontes fictícias, 1 paciente (SYN-P01). Repetir não duplica. Recarregar a página limpa apenas o cenário importado, que pode ser carregado novamente. O importador de arquivo aceita exclusivamente o pacote fornecido, sem edições. Não é importador genérico de FHIR ou de múltiplos pacientes.
+PDF.js 6.5.438, distribuído localmente, licença Apache 2.0 em `vendor/PDFJS-LICENSE.txt`. A origem e a integridade do pacote constam em [DEPENDENCIAS.md](DEPENDENCIAS.md). Nenhum CDN ou serviço de IA recebe documentos nesta versão.

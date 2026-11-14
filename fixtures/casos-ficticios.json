@@ -1,0 +1,13 @@
+{
+  "schema": "jyxia.synthetic-cases.v1",
+  "synthetic": true,
+  "cases": [
+    {
+      "id": "CASO-SYN-001",
+      "patient": "Pessoa Sintetica Alfa",
+      "birthDate": "1986-04-12",
+      "identifier": "SYN-P01",
+      "procedureDate": "2026-11-30"
+    }
+  ]
+}
