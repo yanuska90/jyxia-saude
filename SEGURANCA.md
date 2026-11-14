@@ -1,6 +1,6 @@
 # Proteção de acesso e limites da JYXIA
 
-Versão 2.2 — 14/11/2026. Protótipo com dados sintéticos. Não constitui prontuário clínico, certificação ou garantia de inviolabilidade.
+Versão 2.3 — 14/11/2026. Protótipo com dados sintéticos. Não constitui prontuário clínico, certificação ou garantia de inviolabilidade.
 
 ## Implementado no site público HTTPS
 
@@ -42,8 +42,11 @@ Implementar autenticação de servidor com MFA, recuperação segura e sessão r
 
 - [OWASP — armazenamento de senhas](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html): referência para derivação resistente; não certifica esta implementação.
 - [MDN — Web Crypto encrypt](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/encrypt): API criptográfica e contexto seguro.
-- [Acesso assistido](ACESSO_ASSISTIDO.md): fluxo com portais, limites e condições para um conector real.
+- [Acesso real suspenso](ACESSO_ASSISTIDO.md): decisão da etapa atual e requisitos para uma fase futura.
 
 ## Recuperação de acesso
 A limitação atual e os critérios obrigatórios da futura recuperação estão em RECUPERACAO_DE_ACESSO.md. Não liberar dados reais sem demonstrar recuperação de identidade e de acesso aos dados sem perda ou exposição.
 
+
+## Etapa atual: somente fontes fictícias
+O acesso a laboratórios reais foi retirado do escopo atual. O importador 2.3 aceita somente o pacote sintético fornecido, com limite de 256 KB e comparação integral com o catálogo aprovado; retorna registros desse catálogo, nunca campos de um arquivo rejeitado. Não envia o arquivo ao servidor. Isso não transforma arquivos arbitrários em dados fictícios e não é uma ferramenta de anonimização.

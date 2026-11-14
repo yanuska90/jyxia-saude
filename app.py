@@ -17,7 +17,7 @@ from integration import normalize,apply_batch,review_flags,IntegrationError
 
 MAX_FILE=10*1024*1024
 ROOT=Path(__file__).parent
-STATIC={'teleconsultation.js','vault.js','vault-crypto.js','index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
+STATIC={'synthetic-import.js','paciente-ficticio-01.json','anexo-ficticio-01.txt','teleconsultation.js','vault.js','vault-crypto.js','index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
 token=os.environ.get('JYXIA_API_TOKEN','')
 client=None;db=None;fs=None
 

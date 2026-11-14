@@ -1,0 +1,21 @@
+JYXIA — DOCUMENTO INTEIRAMENTE FICTÍCIO
+SEM VALIDADE CLÍNICA — EXCLUSIVAMENTE PARA TESTE
+
+Paciente de demonstração: SYN-P01
+Instituição inventada: Laboratório fictício A
+Data fictícia do exame: 10/11/2026
+Documento de teste: SYN-DOC-01
+
+Exame: Analito sintético A
+Resultado fictício: 10 unidades de teste A
+Intervalo fictício: 8 a 12 unidades de teste A
+Método fictício: Método demonstrativo A
+
+Observação: esses valores não correspondem a um exame clínico real e
+não podem ser interpretados como normalidade, diagnóstico ou conduta.
+Este arquivo foi criado do zero, sem usar laudos ou dados de pacientes.
+Não contém assinatura profissional ou autenticação institucional.
+
+Uso na demo: selecione o tipo Exame ou laudo no cadastro, informe título,
+data e origem fictícios e escolha este arquivo no campo Anexos.
+Anexar o TXT não transforma seu conteúdo em resultados estruturados.

@@ -30,9 +30,9 @@ Com o ambiente Docker iniciado conforme README, envie `lab-demo.json` como corpo
 
 A interface pública usa fixtures normalizadas e não chama essa API. O cadastro manual na API continua limitado a SYN-P01. A chave compartilhada é exclusivamente de desenvolvimento; não há identidade individual, consentimento operacional ou autorização clínica. Não exponha essa API com dados reais.
 
-## Próxima integração institucional
+## Integração institucional — fora da etapa atual
 
-Yanuska indicou contatos no Delboni e no Hospital São Luiz. Não há parceria, credenciamento, acesso, documentação ou conexão confirmados. Confirmar unidade e pessoa responsável antes de atribuir qualquer integração a essas instituições.
+Por decisão de Yanuska em 14/11/2026, não haverá acesso a contas ou sistemas reais nesta etapa, inclusive à conta da própria titular. A demonstração utiliza apenas dados fictícios. Os requisitos abaixo são referência para uma etapa futura; não representam uma integração em andamento.
 
 Solicitar ao responsável técnico, sem dados de pacientes:
 
@@ -63,3 +63,6 @@ Nove testes do núcleo passaram. Ambiente Docker com MongoDB executado: autentic
 
 ## Revisão de segurança 2.2
 Foram acrescentados rejeição de identificador ambíguo, validação do tipo de valueQuantity e cálculo de avisos antes da gravação. O núcleo agora possui 11 testes. O fluxo assistido sem API institucional está descrito em ACESSO_ASSISTIDO.md, sem coleta de senha de laboratórios na demo.
+
+## Versão 2.3 — importação guiada
+Carregamento completo por botão ou arquivo paciente-ficticio-01.json. O arquivo é um pacote próprio da JYXIA com registros sintéticos normalizados a partir do subconjunto FHIR; não é um Bundle FHIR diretamente importável em qualquer serviço. O importador público aceita exclusivamente o conteúdo do pacote aprovado. Não importa outros pacientes, arquivos modificados ou documentos reais. Conteúdo selecionado é processado localmente, sem envio do arquivo, e não entra no cofre ou no MongoDB. A origem e o conteúdo original de cada registro permanecem visíveis. Guia em DADOS_FICTICIOS.md.

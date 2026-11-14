@@ -4,7 +4,7 @@ Plataforma proposta de acesso e continuidade do cuidado em saúde, com teleconsu
 
 ## Versão do projeto
 
-Versão 2.2 — acesso, continuidade, registros e anexos com cofre local e cadastro de teleconsulta. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
+Versão 2.3 — importação guiada de exemplo sintético, registros com cofre local e cadastro de teleconsulta. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
 
 ## Acessos públicos
 
@@ -93,11 +93,11 @@ O formulário aceita exclusivamente o identificador fictício `000.000.000-00` p
 A demo reúne sete registros de duas instituições fictícias, com origem e versão preservadas. Veja INTEGRACOES.md para contrato, testes, API e limitações. Delboni e Hospital São Luiz são contatos indicados para possível piloto, sem conexão ou parceria confirmada.
 
 
-## Acesso protegido, portais e teleconsulta
+## Acesso protegido, dados fictícios e teleconsulta
 
 Na área de registros, crie um usuário local e uma senha exclusiva, sem reutilizar credenciais de laboratórios. Registros anteriores só passam a ser criptografados ao concluir essa configuração no próprio navegador. Use o botão de bloqueio ao terminar. Não há recuperação de senha ou sincronização; use somente dados fictícios. Leia [SEGURANCA.md](SEGURANCA.md).
 
-O acesso provisório aos laboratórios está documentado em [ACESSO_ASSISTIDO.md](ACESSO_ASSISTIDO.md). Os links oficiais abrem o Delboni/Nav Dasa e a Rede D’Or, mas não conectam contas nem importam exames automaticamente. Senhas, códigos e laudos não devem entrar no GitHub.
+O acesso a laboratórios está fora desta etapa, por decisão da equipe. Os atalhos foram retirados da demo. Não realizar teste com contas reais. A decisão atual substitui o plano anterior e está em [ACESSO_ASSISTIDO.md](ACESSO_ASSISTIDO.md). Para usar o exemplo, consulte [DADOS_FICTICIOS.md](DADOS_FICTICIOS.md).
 
 O tipo **Teleconsulta** permite salvar data, horário de Brasília, profissional/clínica, especialidade, observações e endereço de uma sala Daily de teste. O link é guardado dentro do cofre; abrir a sala é uma navegação externa. Isso não cria nem confirma uma consulta. A criação de salas privadas e acessos temporários via servidor está especificada em [TELECONSULTA.md](TELECONSULTA.md).
 
@@ -106,3 +106,6 @@ Para verificar o núcleo criptográfico e a validação de links, com Node.js 22
 ## Senha esquecida
 A demo não possui recuperação. Leia [RECUPERACAO_DE_ACESSO.md](RECUPERACAO_DE_ACESSO.md) antes de criar o cofre. A versão clínica depende de recuperação verificada e preservação dos dados.
 
+
+## Importar um exemplo pronto
+Na demo, abra Importar dados fictícios e clique em Carregar exemplo completo. Alternativamente, baixe paciente-ficticio-01.json e selecione-o no campo de importação. Resultado: 7 registros, 2 fontes fictícias, 1 paciente (SYN-P01). Repetir não duplica. Recarregar a página limpa apenas o cenário importado, que pode ser carregado novamente. O importador de arquivo aceita exclusivamente o pacote fornecido, sem edições. Não é importador genérico de FHIR ou de múltiplos pacientes.

@@ -13,7 +13,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Criptografia e links de teleconsulta
-        run: node --test test_security.cjs
+        run: node --test test_security.cjs test_synthetic_import.cjs
       - name: Integracao com identidades sinteticas
         run: python3 -m unittest test_integration.py -v
       - name: Higiene basica da publicacao

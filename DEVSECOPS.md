@@ -1,6 +1,6 @@
 # Revisão de segurança e prática de desenvolvimento
 
-Revisão de 14/11/2026, incluindo componentes anteriores e a versão 2.2. Escopo: código do site, cadastro/anexos, CPF demonstrativo, ingestão sintética, API Docker, configuração de publicação e novos fluxos. Testes com dados fictícios nos ambientes próprios. Não houve pentest dos portais Delboni, Rede D’Or ou Daily, nem coleta de credenciais da titular.
+Revisão de 14/11/2026, incluindo componentes anteriores e a versão 2.3. Escopo: código do site, cadastro/anexos, CPF demonstrativo, ingestão sintética, API Docker, configuração de publicação e novos fluxos. Testes com dados fictícios nos ambientes próprios. Não houve pentest dos portais Delboni, Rede D’Or ou Daily, nem coleta de credenciais da titular.
 
 ## Achados e tratamento
 
@@ -9,7 +9,7 @@ Revisão de 14/11/2026, incluindo componentes anteriores e a versão 2.2. Escopo
 | Alta | Registros anteriores ficavam em texto legível no navegador. | Cofre criptográfico e bloqueio adicionados. Migração depende de a titular criar seu acesso; cópias anteriores não são protegidas retroativamente. |
 | Crítica | API usa chave compartilhada e paciente fixo. | Continua exclusivamente em desenvolvimento e loopback, sem dados reais. Identidade individual, MFA e autorização por paciente são bloqueadores do piloto clínico. |
 | Alta | Respostas assíncronas poderiam reaparecer depois de sair da sessão. | Conferência de geração da sessão, remoção do conteúdo e descarte de resultados após bloqueio. |
-| Alta | Formulário de senha poderia ser confundido com integração do laboratório. | Credenciais dos portais permanecem na instituição; nenhum coletor implementado. Fluxo e requisitos em ACESSO_ASSISTIDO.md. |
+| Alta | Formulário de senha poderia ser confundido com integração do laboratório. | Acesso real suspenso por decisão da titular, incluindo teste individual; atalhos retirados e nenhum coletor implementado. Decisão em ACESSO_ASSISTIDO.md. |
 | Média | Ingestão aceitava identificadores ambíguos e valor de exame com tipo incompatível. | Identificadores limitados ao formato adotado; quantidade incompatível rejeitada. Avisos são calculados antes da gravação, evitando persistência seguida de erro nessa etapa. |
 | Alta | URLs de videochamada poderiam carregar credenciais ou apontar a qualquer domínio. | Validação HTTPS e subdomínio Daily, sem credenciais, query ou fragmento. Isso não comprova privacidade de uma sala externa. |
 | Média | Dependências e imagens podiam variar entre construções. | Versões Python resolvidas e imagens Python/Mongo fixadas. Atualizações exigem nova revisão, não congelamento permanente. |
@@ -42,3 +42,9 @@ O job de verificação, sozinho, não garante bloqueio do deploy do GitHub Pages
 6. Validar privacidade, contratos, retenção, continuidade assistencial e requisitos regulatórios; realizar pentest independente com escopo autorizado e corrigir os achados antes de dados reais.
 
 Os riscos abertos impedem classificar o protótipo como ferramenta clínica pronta. O trabalho reduziu riscos concretos, mas não fornece garantia de inviolabilidade.
+
+## Importação fictícia — revisão 2.3
+
+O acesso individual a portais reais foi suspenso por decisão da titular. O novo campo recebe somente o pacote sintético aprovado, limitado a 256 KB, e devolve uma cópia do catálogo confiável após comparação do conteúdo. Arquivos rejeitados não alimentam a interface nem a persistência. Não existe mecanismo de anonimização de arquivos reais.
+
+Validação: 7 testes específicos de importação passaram, além dos 11 testes existentes de criptografia/links e dos 11 de ingestão. Foram cobertos pacote completo, identidade divergente, conteúdo extra, arquivo inválido ou excessivo, isolamento da cópia e fontes incompletas. No navegador, botão e seleção do arquivo resultaram em 7 registros de 2 fontes, reimportação sem duplicação e limpeza do cenário ao recarregar. O formulário foi conferido em largura de celular, sem rolagem horizontal. Esses testes não equivalem a um pentest independente.
