@@ -10,7 +10,7 @@ Plataforma proposta de integração de prontuários e IA assistiva para o cuidad
 
 ## Origem
 
-A ideia nasceu da experiência pessoal de uma pessoa do time que teve câncer há cerca de seis anos. Ela relata exames dispersos, repetição de seu histórico em diferentes consultas e recebimento de medicamento ao qual tinha alergia. A divulgação de câncer e alergia foi autorizada sem identificação de médicos ou serviços. Essa motivação não demonstra que uma IA teria antecipado o diagnóstico ou evitado o episódio.
+A ideia nasceu da experiência pessoal de uma pessoa do time que teve câncer há cerca de seis anos. Ela relata exames dispersos, repetição de seu histórico em diferentes consultas e recebimento de medicamento ao qual tinha alergia. A divulgação de câncer e alergia foi autorizada sem identificação de médicos ou serviços. Essa experiência deu origem ao JYXIA e ao desejo de tornar o cuidado mais integrado, ágil e acessível.
 
 ## Nossa parceria
 
