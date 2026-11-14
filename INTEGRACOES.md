@@ -60,3 +60,6 @@ FHIR R4 foi escolhido como base do protótipo; a versão, os perfis e as termino
 ## Verificação em 14/11/2026
 Nove testes do núcleo passaram. Ambiente Docker com MongoDB executado: autenticação, ingestão das duas fontes, reenvio idempotente, rejeição de paciente divergente, colisão de conteúdo, nova versão e consulta do histórico passaram. Após reiniciar aplicação e banco, as oito versões sintéticas e quatro eventos de importação permaneceram disponíveis. Nenhum sistema institucional foi acessado. O ambiente de teste foi parado após a verificação.
 
+
+## Revisão de segurança 2.2
+Foram acrescentados rejeição de identificador ambíguo, validação do tipo de valueQuantity e cálculo de avisos antes da gravação. O núcleo agora possui 11 testes. O fluxo assistido sem API institucional está descrito em ACESSO_ASSISTIDO.md, sem coleta de senha de laboratórios na demo.

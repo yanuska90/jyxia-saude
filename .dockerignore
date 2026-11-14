@@ -1,5 +1,15 @@
 .git
 .env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.har
+secrets
+private-data
+patient-data
+qa-*
 __pycache__
 *.docx
 *.zip

@@ -4,7 +4,7 @@ Plataforma proposta de acesso e continuidade do cuidado em saúde, com teleconsu
 
 ## Versão do projeto
 
-Versão 2.1 — acesso, continuidade, cadastro de registros e anexos. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
+Versão 2.2 — acesso, continuidade, registros e anexos com cofre local e cadastro de teleconsulta. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
 
 ## Acessos públicos
 
@@ -28,11 +28,11 @@ O JYXIA busca facilitar acesso a profissionais e continuidade entre consulta, ex
 
 ## Estado da implementação
 
-Esta versão contém página e demonstração estática interativa com quatro fluxos de serviços simulados: teleconsulta, exame, avaliação de renovação de receita e terapia. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. A demo também permite cadastrar medicamento, dosagem informada, data, origem, observações e anexos. Os dados ficam no navegador neste site público. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
+Esta versão contém página e demonstração estática interativa com quatro fluxos de serviços simulados: teleconsulta, exame, avaliação de renovação de receita e terapia. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. A demo também permite cadastrar medicamento, dosagem informada, data, origem, observações e anexos. Os registros manuais e anexos ficam criptografados no navegador após criar o acesso local neste site público. Esse cofre não é autenticação clínica ou segregação de pacientes no servidor. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
 
 ## Como executar
 
-Abra `index.html` no navegador. Para servidor de desenvolvimento opcional, com Python 3 disponível:
+Use a URL pública HTTPS. Para desenvolver e testar a criptografia em uma origem local segura, com Python 3 disponível:
 
 ```sh
 python -m http.server 8080 --directory .
@@ -63,7 +63,7 @@ O documento principal é `Projeto_JYXIA_Acesso_e_Continuidade.docx`. O arquivo c
 
 ## Dados e segurança
 
-Na demo pública, os anexos são guardados no navegador, sem envio a servidor. Não há analytics ou serviço de IA. A hospedagem pode manter logs técnicos. Dados fictícios são identificados como sintéticos. Autorização, criptografia, retenção e regulação clínica são requisitos do produto futuro.
+Na demo pública, os anexos são guardados no navegador, sem envio a servidor. Não há analytics ou serviço de IA. A hospedagem pode manter logs técnicos. Dados fictícios são identificados como sintéticos. Autorização clínica, gestão de chaves no servidor, retenção e regulação são requisitos do produto futuro. A criptografia local desta versão e seus limites estão descritos em SEGURANCA.md.
 
 ## Materiais e direitos
 
@@ -92,3 +92,13 @@ O formulário aceita exclusivamente o identificador fictício `000.000.000-00` p
 ## Integração de fontes sintéticas
 A demo reúne sete registros de duas instituições fictícias, com origem e versão preservadas. Veja INTEGRACOES.md para contrato, testes, API e limitações. Delboni e Hospital São Luiz são contatos indicados para possível piloto, sem conexão ou parceria confirmada.
 
+
+## Acesso protegido, portais e teleconsulta
+
+Na área de registros, crie um usuário local e uma senha exclusiva, sem reutilizar credenciais de laboratórios. Registros anteriores só passam a ser criptografados ao concluir essa configuração no próprio navegador. Use o botão de bloqueio ao terminar. Não há recuperação de senha ou sincronização; use somente dados fictícios. Leia [SEGURANCA.md](SEGURANCA.md).
+
+O acesso provisório aos laboratórios está documentado em [ACESSO_ASSISTIDO.md](ACESSO_ASSISTIDO.md). Os links oficiais abrem o Delboni/Nav Dasa e a Rede D’Or, mas não conectam contas nem importam exames automaticamente. Senhas, códigos e laudos não devem entrar no GitHub.
+
+O tipo **Teleconsulta** permite salvar data, horário de Brasília, profissional/clínica, especialidade, observações e endereço de uma sala Daily de teste. O link é guardado dentro do cofre; abrir a sala é uma navegação externa. Isso não cria nem confirma uma consulta. A criação de salas privadas e acessos temporários via servidor está especificada em [TELECONSULTA.md](TELECONSULTA.md).
+
+Para verificar o núcleo criptográfico e a validação de links, com Node.js 22 ou superior: `node --test test_security.cjs`. Os testes usam exclusivamente valores fictícios e não abrem o armazenamento pessoal do usuário.

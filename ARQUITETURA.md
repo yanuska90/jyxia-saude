@@ -2,7 +2,7 @@
 
 ## Duas formas de executar
 
-**Site público no GitHub Pages:** formulário funcional com IndexedDB. Medicamento ou título, dosagem transcrita, data, origem, observações e arquivos ficam no navegador e dispositivo utilizados. O usuário pode adicionar, editar, baixar anexos e remover o registro após confirmação. Isso não sincroniza dados entre dispositivos ou usuários. Dados do paciente fictício não são enviados ao GitHub.
+**Site público no GitHub Pages:** formulário funcional com cofre criptográfico no IndexedDB, usuário/senha locais e bloqueio. A proteção é ativada ao criar o acesso; veja SEGURANCA.md. Medicamento ou título, dosagem transcrita, data, origem, observações e arquivos ficam no navegador e dispositivo utilizados. O usuário pode adicionar, editar, baixar anexos e remover o registro após confirmação. Isso não sincroniza dados entre dispositivos ou usuários. Dados do paciente fictício não são enviados ao GitHub.
 
 **Ambiente Docker de desenvolvimento:** FastAPI serve a mesma interface e uma API protegida por chave de teste; MongoDB armazena registros e GridFS armazena arquivos. A interface muda automaticamente para o modo API e solicita a chave. O MongoDB não expõe porta no computador; somente a aplicação é vinculada a 127.0.0.1:8000. Este endereço é para desenvolvimento, não substitui o site público HTTPS.
 
@@ -20,7 +20,7 @@ MongoDB já é um banco NoSQL e atende ao modelo documental dos registros. GridF
 6. A API está documentada em http://localhost:8000/docs. Use o botão Authorize com a mesma chave de teste.
 7. Para encerrar sem apagar os dados: `docker compose down`. O volume mongo_data é preservado. Não use `down -v` se quiser manter os registros.
 
-O download de imagens e bibliotecas depende de internet. As versões de bibliotecas estão limitadas por faixas no requirements.txt; a etapa de homologação deverá congelar versões resolvidas e digests de imagens após análise de vulnerabilidades. Não há certificado ou hospedagem de produção incluídos no Compose.
+O download de imagens e bibliotecas depende de internet. requirements.txt declara as dependências; requirements-lock.txt fixa as versões resolvidas desta revisão, aplicado no build. As imagens Python e MongoDB também têm digest fixado. Isso melhora a repetibilidade, mas exige atualização e nova análise de vulnerabilidades ao longo do tempo. Não há certificado ou hospedagem de produção incluídos no Compose.
 
 ## API
 
@@ -69,3 +69,6 @@ Use o botão **Adicionar alergia** no cadastro ou **Cadastrar alergia** no cená
 ## Doenças preexistentes e cirurgias anteriores
 
 O cadastro inclui os tipos Doença preexistente e Cirurgia anterior e botões diretos para cada um. Nome, data do registro e fonte são obrigatórios. Data do diagnóstico ou cirurgia e instituição são opcionais, para evitar inventar informações desconhecidas. Doenças têm situação relatada. Todos permitem observações, anexos e edição. Dados são informados manualmente e não constituem diagnóstico ou validação clínica.
+
+## Revisão 2.2
+Cadastro de teleconsulta e validação do endereço da sala descritos em TELECONSULTA.md. A API continua com autenticação de teste. Controles implementados, testes e bloqueadores do ambiente real estão em DEVSECOPS.md.

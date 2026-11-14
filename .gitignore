@@ -3,3 +3,17 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .venv/
+
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+private-data/
+patient-data/
+*.har
+*session*.json
+*cookie*.json
+qa-*

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import copy
+import re
 from datetime import datetime, timezone
 
 PATIENT = 'SYN-P01'
@@ -38,7 +39,7 @@ def normalize(source, bundle):
             raise IntegrationError('Tipo de recurso fora do subconjunto suportado.')
         rid = resource.get('id')
         version = resource.get('meta', {}).get('versionId')
-        if not isinstance(rid, str) or not rid or not isinstance(version, str) or not version:
+        if not isinstance(rid, str) or not re.fullmatch(r'[A-Za-z0-9\-.]{1,64}',rid) or not isinstance(version, str) or not re.fullmatch(r'[A-Za-z0-9\-.]{1,64}',version):
             raise IntegrationError('Cada recurso deve ter id e meta.versionId de origem.')
         subject = resource.get('patient' if kind == 'AllergyIntolerance' else 'subject', {}).get('reference')
         if subject not in SOURCES[source]:
@@ -56,6 +57,9 @@ def normalize(source, bundle):
                     issued=resource.get('issued'), code=code, original=resource,
                     review_status='pendente de revisão profissional')
         if kind == 'Observation':
+            quantity=resource.get('valueQuantity')
+            if quantity is not None and not isinstance(quantity,dict):
+                raise IntegrationError('valueQuantity deve ser um objeto, quando informado.')
             item.update(value=resource.get('valueQuantity'), text_value=resource.get('valueString'),
                         reference_ranges=resource.get('referenceRange', []),
                         method=resource.get('method'), specimen=resource.get('specimen'))

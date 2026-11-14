@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import date,datetime,timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote,urlsplit
 from bson import ObjectId
 from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Form,Header,Request
 from fastapi.responses import FileResponse,Response,StreamingResponse
@@ -17,7 +17,7 @@ from integration import normalize,apply_batch,review_flags,IntegrationError
 
 MAX_FILE=10*1024*1024
 ROOT=Path(__file__).parent
-STATIC={'index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
+STATIC={'teleconsultation.js','vault.js','vault-crypto.js','index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
 token=os.environ.get('JYXIA_API_TOKEN','')
 client=None;db=None;fs=None
 
@@ -39,7 +39,7 @@ def authorized(credentials:HTTPAuthorizationCredentials|None=Depends(security)):
 
 class Record(BaseModel):
  model_config=ConfigDict(str_strip_whitespace=True,extra='forbid')
- kind:Literal['medicamento','alergia','doenca','cirurgia','exame','outro']
+ kind:Literal['medicamento','alergia','doenca','cirurgia','exame','outro','teleconsulta']
  name:str=Field(min_length=1,max_length=160)
  dosage:str=Field(default='',max_length=120)
  record_date:date
@@ -50,6 +50,11 @@ class Record(BaseModel):
  event_date:date|None=None
  institution:str=Field(default='',max_length=240)
  clinical_status:Literal['desconhecida','acompanhamento','historico']='desconhecida'
+ appointment_date:date|None=None
+ appointment_time:str=Field(default='',max_length=5)
+ professional:str=Field(default='',max_length=160)
+ specialty:str=Field(default='',max_length=120)
+ meeting_url:str=Field(default='',max_length=400)
  @model_validator(mode='after')
  def medication_has_dosage(self):
   if self.kind=='medicamento' and not self.dosage:raise ValueError('Informe a dosagem transcrita do documento.')
@@ -57,6 +62,12 @@ class Record(BaseModel):
   if self.kind!='alergia':self.reaction='';self.severity='desconhecida'
   if self.kind not in ['doenca','cirurgia']:self.event_date=None;self.institution=''
   if self.kind!='doenca':self.clinical_status='desconhecida'
+  if self.kind=='teleconsulta':
+   if not self.appointment_date or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]',self.appointment_time) or not self.professional:raise ValueError('Informe data, horário e profissional.')
+   if self.meeting_url:
+    link=urlsplit(self.meeting_url)
+    if link.scheme!='https' or not re.fullmatch(r'[a-z0-9][a-z0-9-]*\.daily\.co',link.netloc) or not re.fullmatch(r'/[a-zA-Z0-9_-]{1,128}',link.path) or link.query or link.fragment:raise ValueError('Link de sala inválido ou contém credenciais.')
+  else:self.appointment_date=None;self.appointment_time='';self.professional='';self.specialty='';self.meeting_url=''
   return self
 
 def parse_record(raw):
@@ -169,6 +180,8 @@ async def ingest_synthetic(source:str,request:Request):
   try:rows,stats=apply_batch(existing['records'] if existing else [],incoming)
   except IntegrationError as exc:raise HTTPException(409,str(exc))
   if len(rows)>1000:raise HTTPException(409,'Limite de 1000 versões neste ambiente de teste.')
+  try:flags=review_flags(rows)
+  except (ValueError,TypeError,KeyError,AttributeError):raise HTTPException(422,'Lote incompatível. Nenhuma alteração foi gravada.')
   now=datetime.now(timezone.utc).isoformat()
   audit={'at':now,'source':source,**stats,'purpose':'synthetic-development'}
   if existing:
@@ -177,7 +190,7 @@ async def ingest_synthetic(source:str,request:Request):
   else:
    try:collection.insert_one({'_id':'SYN-P01','revision':1,'records':rows,'audit':[audit]})
    except DuplicateKeyError:continue
-  return {**stats,'patient_id':'SYN-P01','flags':review_flags(rows),'purpose':'synthetic-development'}
+  return {**stats,'patient_id':'SYN-P01','flags':flags,'purpose':'synthetic-development'}
  raise HTTPException(409,'Importação concorrente. Reenvie o lote.')
 
 @app.get('/api/integrations',dependencies=[Depends(authorized)])

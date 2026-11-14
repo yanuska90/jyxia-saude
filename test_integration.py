@@ -47,5 +47,11 @@ class IntegrationTests(unittest.TestCase):
     def test_unsupported_type_rejected(self):
         self.bundle['entry'][0]['resource']['resourceType']='Patient'
         with self.assertRaises(IntegrationError):normalize('lab-demo',self.bundle)
+    def test_ambiguous_composite_identifier_rejected(self):
+        self.bundle['entry'][0]['resource']['id']='obs|01'
+        with self.assertRaises(IntegrationError):normalize('lab-demo',self.bundle)
+    def test_invalid_quantity_rejected_before_persistence(self):
+        self.bundle['entry'][0]['resource']['valueQuantity']=['invalid']
+        with self.assertRaises(IntegrationError):normalize('lab-demo',self.bundle)
 
 if __name__=='__main__':unittest.main()
