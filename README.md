@@ -12,6 +12,10 @@ Plataforma proposta de integração de prontuários e IA assistiva para o cuidad
 
 A ideia nasceu da experiência pessoal de uma pessoa do time que teve câncer há cerca de seis anos. Ela relata exames dispersos, repetição de seu histórico em diferentes consultas e recebimento de medicamento ao qual tinha alergia. A divulgação de câncer e alergia foi autorizada sem identificação de médicos ou serviços. Essa motivação não demonstra que uma IA teria antecipado o diagnóstico ou evitado o episódio.
 
+## Nossa parceria
+
+A parceria do JYXIA começou na faculdade, quando a ideia foi compartilhada com João. Ao longo deste ano, os dois aprenderam muito juntos. Hoje, compartilham a responsabilidade e o sonho de fazer o projeto acontecer e contribuir para uma saúde mais ágil e acessível, que chegue a todos os cantos e às pessoas que precisam de cuidado.
+
 ## Problema e proposta
 
 Informações relevantes ao preparo cirúrgico podem estar em fontes diferentes. O JYXIA propõe organizar origem, datas, conflitos e pendências em um painel com resumo assistido por IA e revisão profissional. Benefícios de eficiência e segurança ainda precisam ser validados.
