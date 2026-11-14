@@ -2,10 +2,14 @@
 
 Plataforma proposta de acesso e continuidade do cuidado em saúde, com teleconsultas, histórico integrado, exames, avaliação de receitas, terapias e IA assistiva. Materiais preparados para apresentação ao Hack Brasil na trilha Saúde & bem-estar, conforme painel fornecido pelo time.
 
+## Versão do projeto
+
+Versão 2.0 — acesso e continuidade do cuidado. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
+
 ## Acessos públicos
 
-- Site: https://jyxia-saude-perioperatoria.blissfulapple.chatgpt.site/
-- Demo: https://jyxia-saude-perioperatoria.blissfulapple.chatgpt.site/demo
+- Site: https://yanuska90.github.io/jyxia-saude/
+- Demo: https://yanuska90.github.io/jyxia-saude/demo.html
 - Repositório: https://github.com/yanuska90/jyxia-saude
 
 ## Origem
