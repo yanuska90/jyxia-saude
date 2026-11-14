@@ -4,7 +4,7 @@ Plataforma proposta de acesso e continuidade do cuidado em saúde, com teleconsu
 
 ## Versão do projeto
 
-Versão 2.0 — acesso e continuidade do cuidado. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
+Versão 2.1 — acesso, continuidade, cadastro de registros e anexos. Site e demonstração são publicados automaticamente pelo GitHub Pages a partir dos arquivos da versão principal deste repositório.
 
 ## Acessos públicos
 
@@ -28,7 +28,7 @@ O JYXIA busca facilitar acesso a profissionais e continuidade entre consulta, ex
 
 ## Estado da implementação
 
-Esta versão contém página e demonstração estática interativa com quatro fluxos de serviços simulados: teleconsulta, exame, avaliação de renovação de receita e terapia. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
+Esta versão contém página e demonstração estática interativa com quatro fluxos de serviços simulados: teleconsulta, exame, avaliação de renovação de receita e terapia. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. A demo também permite cadastrar medicamento, dosagem informada, data, origem, observações e anexos. Os dados ficam no navegador neste site público. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
 
 ## Como executar
 
@@ -63,8 +63,14 @@ O documento principal é `Projeto_JYXIA_Acesso_e_Continuidade.docx`. O arquivo c
 
 ## Dados e segurança
 
-Nenhum upload, analytics ou serviço de IA é utilizado na demo. A hospedagem pode manter logs técnicos. Dados fictícios são identificados como sintéticos. Autorização, criptografia, retenção e regulação clínica são requisitos do produto futuro.
+Na demo pública, os anexos são guardados no navegador, sem envio a servidor. Não há analytics ou serviço de IA. A hospedagem pode manter logs técnicos. Dados fictícios são identificados como sintéticos. Autorização, criptografia, retenção e regulação clínica são requisitos do produto futuro.
 
 ## Materiais e direitos
 
 Consultar o DOCX, o prompt mestre e o arquivo de submissão e vídeo na raiz deste repositório. Confirmar nomes e papéis da equipe antes da submissão. Nenhuma licença aberta é presumida; direitos de terceiros e licença final precisam ser revisados pelo time.
+
+## Registros e anexos e ambiente Docker
+
+Use a seção **Adicionar registros e anexos** na demo para cadastrar, editar e remover registros fictícios e baixar anexos. Use PDF, PNG, JPG ou TXT, até 5 arquivos por registro e 10 MB por arquivo. Registros persistem neste navegador mesmo ao reiniciar o cenário. O resumo de exemplo não incorpora os novos registros automaticamente.
+
+A raiz inclui Dockerfile, compose.yaml, app.py, requirements.txt e .env.example. O ambiente Docker serve a interface com API FastAPI, MongoDB (NoSQL) e GridFS para anexos. Leia **ARQUITETURA.md** para execução, autenticação de teste, endpoints e limites. O banco e a API ainda não estão hospedados em produção. MySQL não é necessário para esta primeira implementação.
