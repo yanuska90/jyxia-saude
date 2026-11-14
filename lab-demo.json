@@ -1,0 +1,59 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs01",
+        "meta": {
+          "versionId": "1"
+        },
+        "subject": {
+          "reference": "Patient/LAB-P01"
+        },
+        "status": "final",
+        "code": {
+          "text": "Analito sintético A"
+        },
+        "effectiveDateTime": "2026-11-10T08:00:00-03:00",
+        "issued": "2026-11-10T15:00:00-03:00",
+        "valueQuantity": {
+          "value": 10,
+          "unit": "unidade de teste A"
+        },
+        "referenceRange": [
+          {
+            "text": "Intervalo fictício 8 a 12"
+          }
+        ],
+        "method": {
+          "text": "Método demonstrativo A"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "DiagnosticReport",
+        "id": "report01",
+        "meta": {
+          "versionId": "1"
+        },
+        "subject": {
+          "reference": "Patient/LAB-P01"
+        },
+        "status": "final",
+        "code": {
+          "text": "Laudo laboratorial fictício"
+        },
+        "effectiveDateTime": "2026-11-10T08:00:00-03:00",
+        "issued": "2026-11-10T15:00:00-03:00",
+        "result": [
+          {
+            "reference": "Observation/obs01"
+          }
+        ]
+      }
+    }
+  ]
+}

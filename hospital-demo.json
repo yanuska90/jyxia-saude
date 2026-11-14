@@ -1,0 +1,98 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Encounter",
+        "id": "enc01",
+        "meta": {
+          "versionId": "1"
+        },
+        "subject": {
+          "reference": "Patient/HOSP-P01"
+        },
+        "status": "finished",
+        "period": {
+          "start": "2026-11-11T10:00:00-03:00"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "AllergyIntolerance",
+        "id": "allergy01",
+        "meta": {
+          "versionId": "1"
+        },
+        "patient": {
+          "reference": "Patient/HOSP-P01"
+        },
+        "code": {
+          "text": "Substância fictícia de demonstração"
+        },
+        "clinicalStatus": {
+          "text": "Informação registrada na origem"
+        },
+        "verificationStatus": {
+          "text": "Não validado neste protótipo"
+        },
+        "criticality": "unable-to-assess"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "id": "condition01",
+        "meta": {
+          "versionId": "1"
+        },
+        "subject": {
+          "reference": "Patient/HOSP-P01"
+        },
+        "code": {
+          "text": "Condição fictícia em acompanhamento"
+        },
+        "onsetDateTime": "2026-11-01"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Procedure",
+        "id": "procedure01",
+        "meta": {
+          "versionId": "1"
+        },
+        "subject": {
+          "reference": "Patient/HOSP-P01"
+        },
+        "status": "completed",
+        "code": {
+          "text": "Procedimento fictício anterior"
+        },
+        "performedDateTime": "2025-06-01"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationStatement",
+        "id": "med01",
+        "meta": {
+          "versionId": "1"
+        },
+        "subject": {
+          "reference": "Patient/HOSP-P01"
+        },
+        "status": "unknown",
+        "medicationCodeableConcept": {
+          "text": "Medicamento fictício"
+        },
+        "dosage": [
+          {
+            "text": "Transcrição demonstrativa sem recomendação de uso"
+          }
+        ]
+      }
+    }
+  ]
+}

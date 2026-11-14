@@ -6,17 +6,18 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 from bson import ObjectId
-from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Form,Header
+from fastapi import FastAPI,Depends,HTTPException,UploadFile,File,Form,Header,Request
 from fastapi.responses import FileResponse,Response,StreamingResponse
 from fastapi.security import HTTPBearer,HTTPAuthorizationCredentials
 from gridfs import GridFS
 from pydantic import BaseModel,Field,ValidationError,model_validator,ConfigDict
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo.errors import PyMongoError,DuplicateKeyError
+from integration import normalize,apply_batch,review_flags,IntegrationError
 
 MAX_FILE=10*1024*1024
 ROOT=Path(__file__).parent
-STATIC={'index.html','demo.html','demo.js','records.js','runtime-config.js','style.css'}
+STATIC={'index.html','demo.html','demo.js','records.js','runtime-config.js','style.css','patient-search.js','integrations.js','integration-demo.json'}
 token=os.environ.get('JYXIA_API_TOKEN','')
 client=None;db=None;fs=None
 
@@ -152,6 +153,38 @@ def download(record_id:str,file_id:str):
    while data:=stream.read(65536):yield data
   finally:stream.close()
  return StreamingResponse(chunks(),media_type=metadata['type'],headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(metadata['name'],safe=''),'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
+
+@app.post('/api/integrations/{source}',dependencies=[Depends(authorized)])
+async def ingest_synthetic(source:str,request:Request):
+ raw=bytearray()
+ async for chunk in request.stream():
+  raw.extend(chunk)
+  if len(raw)>1024*1024:raise HTTPException(413,'Lote maior que 1 MB.')
+ try:incoming=normalize(source,json.loads(raw))
+ except (ValueError,TypeError,KeyError,AttributeError):raise HTTPException(422,'Lote inválido, identificação não autorizada ou recurso não suportado. Consulte o contrato do ambiente sintético.')
+ # One document per synthetic patient: atomic revision and embedded audit.
+ collection=db.integration_state
+ for attempt in range(3):
+  existing=collection.find_one({'_id':'SYN-P01'})
+  try:rows,stats=apply_batch(existing['records'] if existing else [],incoming)
+  except IntegrationError as exc:raise HTTPException(409,str(exc))
+  if len(rows)>1000:raise HTTPException(409,'Limite de 1000 versões neste ambiente de teste.')
+  now=datetime.now(timezone.utc).isoformat()
+  audit={'at':now,'source':source,**stats,'purpose':'synthetic-development'}
+  if existing:
+   result=collection.update_one({'_id':'SYN-P01','revision':existing['revision']},{'$set':{'records':rows},'$inc':{'revision':1},'$push':{'audit':{'$each':[audit],'$slice':-100}}})
+   if not result.modified_count:continue
+  else:
+   try:collection.insert_one({'_id':'SYN-P01','revision':1,'records':rows,'audit':[audit]})
+   except DuplicateKeyError:continue
+  return {**stats,'patient_id':'SYN-P01','flags':review_flags(rows),'purpose':'synthetic-development'}
+ raise HTTPException(409,'Importação concorrente. Reenvie o lote.')
+
+@app.get('/api/integrations',dependencies=[Depends(authorized)])
+def integrated_records():
+ state=db.integration_state.find_one({'_id':'SYN-P01'})
+ rows=state['records'] if state else []
+ return {'patient_id':'SYN-P01','records':rows,'flags':review_flags(rows),'audit':state.get('audit',[]) if state else [],'purpose':'synthetic-development'}
 
 @app.get('/runtime-config.js')
 def config():return Response("window.JYXIA_STORAGE = 'api';",media_type='application/javascript',headers={'Cache-Control':'no-store'})

@@ -88,3 +88,7 @@ O cadastro inclui os tipos Doença preexistente e Cirurgia anterior e botões di
 
 ### Busca por CPF na demonstração
 O formulário aceita exclusivamente o identificador fictício `000.000.000-00` para localizar o cenário SYN-P01. Outros valores não retornam paciente. O campo não envia requisições, não persiste a entrada e é limpo após a busca. Não consulta instituições nem implementa autenticação ou autorização. A demonstração tem um único paciente; não oferece segregação entre pacientes reais.
+
+## Integração de fontes sintéticas
+A demo reúne sete registros de duas instituições fictícias, com origem e versão preservadas. Veja INTEGRACOES.md para contrato, testes, API e limitações. Delboni e Hospital São Luiz são contatos indicados para possível piloto, sem conexão ou parceria confirmada.
+

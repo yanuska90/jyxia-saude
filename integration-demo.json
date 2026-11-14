@@ -1,0 +1,295 @@
+{
+  "sources": [
+    {
+      "id": "lab-demo",
+      "title": "Laboratório fictício A",
+      "records": [
+        {
+          "key": "lab-demo|Observation|obs01|1",
+          "source": "lab-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "Observation",
+          "source_id": "obs01",
+          "source_version": "1",
+          "content_hash": "09e6cc16cb29a619c4db8fee39c84522cdc5d7e8a443e5d3826073c441e2e402",
+          "title": "Analito sintético A",
+          "status": "final",
+          "event_date": "2026-11-10T08:00:00-03:00",
+          "issued": "2026-11-10T15:00:00-03:00",
+          "code": {
+            "text": "Analito sintético A"
+          },
+          "original": {
+            "resourceType": "Observation",
+            "id": "obs01",
+            "meta": {
+              "versionId": "1"
+            },
+            "subject": {
+              "reference": "Patient/LAB-P01"
+            },
+            "status": "final",
+            "code": {
+              "text": "Analito sintético A"
+            },
+            "effectiveDateTime": "2026-11-10T08:00:00-03:00",
+            "issued": "2026-11-10T15:00:00-03:00",
+            "valueQuantity": {
+              "value": 10,
+              "unit": "unidade de teste A"
+            },
+            "referenceRange": [
+              {
+                "text": "Intervalo fictício 8 a 12"
+              }
+            ],
+            "method": {
+              "text": "Método demonstrativo A"
+            }
+          },
+          "review_status": "pendente de revisão profissional",
+          "value": {
+            "value": 10,
+            "unit": "unidade de teste A"
+          },
+          "text_value": null,
+          "reference_ranges": [
+            {
+              "text": "Intervalo fictício 8 a 12"
+            }
+          ],
+          "method": {
+            "text": "Método demonstrativo A"
+          },
+          "specimen": null
+        },
+        {
+          "key": "lab-demo|DiagnosticReport|report01|1",
+          "source": "lab-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "DiagnosticReport",
+          "source_id": "report01",
+          "source_version": "1",
+          "content_hash": "7b57e85814a9c33e483c3fc2ca34cc0c80b1372de1d66a058040780118a7f09c",
+          "title": "Laudo laboratorial fictício",
+          "status": "final",
+          "event_date": "2026-11-10T08:00:00-03:00",
+          "issued": "2026-11-10T15:00:00-03:00",
+          "code": {
+            "text": "Laudo laboratorial fictício"
+          },
+          "original": {
+            "resourceType": "DiagnosticReport",
+            "id": "report01",
+            "meta": {
+              "versionId": "1"
+            },
+            "subject": {
+              "reference": "Patient/LAB-P01"
+            },
+            "status": "final",
+            "code": {
+              "text": "Laudo laboratorial fictício"
+            },
+            "effectiveDateTime": "2026-11-10T08:00:00-03:00",
+            "issued": "2026-11-10T15:00:00-03:00",
+            "result": [
+              {
+                "reference": "Observation/obs01"
+              }
+            ]
+          },
+          "review_status": "pendente de revisão profissional",
+          "result_refs": [
+            {
+              "reference": "Observation/obs01"
+            }
+          ],
+          "attachments": []
+        }
+      ]
+    },
+    {
+      "id": "hospital-demo",
+      "title": "Hospital fictício B",
+      "records": [
+        {
+          "key": "hospital-demo|Encounter|enc01|1",
+          "source": "hospital-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "Encounter",
+          "source_id": "enc01",
+          "source_version": "1",
+          "content_hash": "289d5555bad913a81a42d3cbf4a31d699a0f5434023eaf8641c94f882efe98c1",
+          "title": "Atendimento registrado na origem",
+          "status": "finished",
+          "event_date": "2026-11-11T10:00:00-03:00",
+          "issued": null,
+          "code": {},
+          "original": {
+            "resourceType": "Encounter",
+            "id": "enc01",
+            "meta": {
+              "versionId": "1"
+            },
+            "subject": {
+              "reference": "Patient/HOSP-P01"
+            },
+            "status": "finished",
+            "period": {
+              "start": "2026-11-11T10:00:00-03:00"
+            }
+          },
+          "review_status": "pendente de revisão profissional"
+        },
+        {
+          "key": "hospital-demo|AllergyIntolerance|allergy01|1",
+          "source": "hospital-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "AllergyIntolerance",
+          "source_id": "allergy01",
+          "source_version": "1",
+          "content_hash": "b7fcf1f1682fb79f3e9907c6bede3ea0f322b08daa182284e6117fbda81e378c",
+          "title": "Substância fictícia de demonstração",
+          "status": "não informado",
+          "event_date": null,
+          "issued": null,
+          "code": {
+            "text": "Substância fictícia de demonstração"
+          },
+          "original": {
+            "resourceType": "AllergyIntolerance",
+            "id": "allergy01",
+            "meta": {
+              "versionId": "1"
+            },
+            "patient": {
+              "reference": "Patient/HOSP-P01"
+            },
+            "code": {
+              "text": "Substância fictícia de demonstração"
+            },
+            "clinicalStatus": {
+              "text": "Informação registrada na origem"
+            },
+            "verificationStatus": {
+              "text": "Não validado neste protótipo"
+            },
+            "criticality": "unable-to-assess"
+          },
+          "review_status": "pendente de revisão profissional",
+          "criticality": "unable-to-assess",
+          "clinical_status": {
+            "text": "Informação registrada na origem"
+          },
+          "verification_status": {
+            "text": "Não validado neste protótipo"
+          },
+          "reactions": []
+        },
+        {
+          "key": "hospital-demo|Condition|condition01|1",
+          "source": "hospital-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "Condition",
+          "source_id": "condition01",
+          "source_version": "1",
+          "content_hash": "fee1223456726895a3506c92f6af390c621eb0429b8e8d9f760ef0b1ea3f60e0",
+          "title": "Condição fictícia em acompanhamento",
+          "status": "não informado",
+          "event_date": "2026-11-01",
+          "issued": null,
+          "code": {
+            "text": "Condição fictícia em acompanhamento"
+          },
+          "original": {
+            "resourceType": "Condition",
+            "id": "condition01",
+            "meta": {
+              "versionId": "1"
+            },
+            "subject": {
+              "reference": "Patient/HOSP-P01"
+            },
+            "code": {
+              "text": "Condição fictícia em acompanhamento"
+            },
+            "onsetDateTime": "2026-11-01"
+          },
+          "review_status": "pendente de revisão profissional"
+        },
+        {
+          "key": "hospital-demo|Procedure|procedure01|1",
+          "source": "hospital-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "Procedure",
+          "source_id": "procedure01",
+          "source_version": "1",
+          "content_hash": "5c7fd4a3b5d6d94b1ced37a4610adfe9590834ee1c0729bbc580c3208499ac7c",
+          "title": "Procedimento fictício anterior",
+          "status": "completed",
+          "event_date": "2025-06-01",
+          "issued": null,
+          "code": {
+            "text": "Procedimento fictício anterior"
+          },
+          "original": {
+            "resourceType": "Procedure",
+            "id": "procedure01",
+            "meta": {
+              "versionId": "1"
+            },
+            "subject": {
+              "reference": "Patient/HOSP-P01"
+            },
+            "status": "completed",
+            "code": {
+              "text": "Procedimento fictício anterior"
+            },
+            "performedDateTime": "2025-06-01"
+          },
+          "review_status": "pendente de revisão profissional"
+        },
+        {
+          "key": "hospital-demo|MedicationStatement|med01|1",
+          "source": "hospital-demo",
+          "patient_id": "SYN-P01",
+          "resource_type": "MedicationStatement",
+          "source_id": "med01",
+          "source_version": "1",
+          "content_hash": "893a1789b9f04371537175065e9065059af11c243f7f86331420d352cf0fbf5f",
+          "title": "Medicamento fictício",
+          "status": "unknown",
+          "event_date": null,
+          "issued": null,
+          "code": {},
+          "original": {
+            "resourceType": "MedicationStatement",
+            "id": "med01",
+            "meta": {
+              "versionId": "1"
+            },
+            "subject": {
+              "reference": "Patient/HOSP-P01"
+            },
+            "status": "unknown",
+            "medicationCodeableConcept": {
+              "text": "Medicamento fictício"
+            },
+            "dosage": [
+              {
+                "text": "Transcrição demonstrativa sem recomendação de uso"
+              }
+            ]
+          },
+          "review_status": "pendente de revisão profissional",
+          "dosage": [
+            {
+              "text": "Transcrição demonstrativa sem recomendação de uso"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
