@@ -1,6 +1,6 @@
 # JYXIA
 
-Plataforma proposta de integração de prontuários e IA assistiva para o cuidado perioperatório. Materiais preparados para apresentação ao Hack Brasil na trilha Saúde & bem-estar, conforme painel fornecido pelo time.
+Plataforma proposta de acesso e continuidade do cuidado em saúde, com teleconsultas, histórico integrado, exames, avaliação de receitas, terapias e IA assistiva. Materiais preparados para apresentação ao Hack Brasil na trilha Saúde & bem-estar, conforme painel fornecido pelo time.
 
 ## Acessos públicos
 
@@ -18,11 +18,11 @@ A parceria do JYXIA começou na faculdade, quando a ideia foi compartilhada com 
 
 ## Problema e proposta
 
-Informações relevantes ao preparo cirúrgico podem estar em fontes diferentes. O JYXIA propõe organizar origem, datas, conflitos e pendências em um painel com resumo assistido por IA e revisão profissional. Benefícios de eficiência e segurança ainda precisam ser validados.
+O JYXIA busca facilitar acesso a profissionais e continuidade entre consulta, exame e acompanhamento. O portal reúne histórico com fontes e datas, solicitações e próximas ações. Acessibilidade, baixa conectividade e uso por celular orientam o projeto. Benefícios de eficiência e segurança ainda precisam ser validados.
 
 ## Estado da implementação
 
-Esta versão contém página e demonstração estática interativa. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
+Esta versão contém página e demonstração estática interativa com quatro fluxos de serviços simulados: teleconsulta, exame, avaliação de renovação de receita e terapia. Consulta quatro registros sintéticos, carrega um resumo pré-escrito e permite editar, aprovar, rejeitar e simular falha. O histórico existe apenas na aba e desaparece ao recarregar. **Não há IA generativa, autenticação clínica, integração hospitalar, RNDS ou auditoria protegida implementadas.** Não usar para assistência ou inserir dados reais.
 
 ## Como executar
 
@@ -40,11 +40,20 @@ Abra a demo, consulte SYN-R01 a SYN-R04, carregue o resumo, confira as referênc
 
 ## Roadmap
 
-1. Validar demonstração sintética e usabilidade.
-2. Implementar identidade, isolamento institucional, importação FHIR R4 e auditoria real.
-3. Avaliar IA com evidências e revisão clínica independente.
-4. Integrar prontuário autorizado e executar piloto supervisionado após aprovações.
-5. Teleconsulta, prescrições, vacinas e alertas com requisitos próprios.
+1. Portal acessível, histórico e acompanhamento sintéticos; validar tarefas com usuários.
+2. Identidade, autorização, agenda, solicitações e importação FHIR em ambiente autorizado.
+3. Operação de teleconsulta com profissionais, vídeo e documentos clínicos homologados.
+4. Integração com laboratórios, centros de diagnóstico e rede de terapias; IA assistiva validada.
+5. Possíveis integrações públicas conforme elegibilidade e acordos. CPF ajuda na identificação, nunca concede acesso sozinho.
+6. Módulos hospitalares e cirúrgicos; pesquisa separada para imagem 3D, predição e monitoramento.
+
+## CPF e serviços públicos
+
+CPF é um possível identificador, não uma senha ou permissão de acesso. Integração de login gov.br, RNDS e operação com SUS são processos distintos e não estão ativos. O projeto é independente, sem vínculo ou parceria governamental confirmada.
+
+## Materiais atualizados
+
+O documento principal é `Projeto_JYXIA_Acesso_e_Continuidade.docx`. O arquivo com o nome anterior também contém a revisão consolidada para preservar os links já compartilhados. Hipóteses e estimativas não são resultados clínicos.
 
 ## Dados e segurança
 

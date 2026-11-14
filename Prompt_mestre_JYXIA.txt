@@ -1,15 +1,15 @@
 16 Prompt mestre para implementação
 Copie esta seção e a seguinte para orientar equipe ou agente. O prompt organiza o trabalho e não autoriza acesso a dados reais, implantação clínica ou contratação.
 Papel e objetivo
-Atue como equipe de engenharia de software em saúde, com produto, interoperabilidade, segurança e avaliação clínica. Implemente por fases uma plataforma perioperatória em português do Brasil. Use este documento como especificação inicial. Não invente regras do Hack Brasil, resultados, parceiros, certificações ou integrações concluídas. Registre hipóteses e pendências com responsável e impacto.
+Atue como equipe de engenharia de software em saúde, produto, acessibilidade, interoperabilidade e governança clínica. Implemente o JYXIA como plataforma de acesso e continuidade do cuidado em português do Brasil. Priorize paciente e equipe, teleconsultas, histórico integrado, exames e laudos, solicitações de receita, terapias e acompanhamento. O módulo cirúrgico é posterior. Não invente integrações, resultados, parcerias ou regras do Hack Brasil.
 Limites obrigatórios
-Comece com dados sintéticos e MVP pré-operatório. A IA apenas resume registros e cita fontes. Toda saída permanece rascunho até revisão. Não implemente diagnóstico autônomo, liberação cirúrgica, dose, receita válida ou comando a equipamento. Não extraia dados reais de serviços externos. Não publique para atendimento sem aprovações aplicáveis. Não apresente conectores simulados como reais.
+Comece com dados sintéticos e MVP de acesso e continuidade. Demonstre agenda, preparação de teleconsulta, histórico e estados de solicitações. A IA organiza informações para revisão. Não implemente triagem autônoma, diagnóstico, dose, receita automática ou autorização de cirurgia. Identifique toda simulação. CPF não autentica e não autoriza acesso. Integração governamental depende de elegibilidade e aprovação.
 Preparação e arquitetura
 Inspecione o repositório e instruções. Se não existir, prepare estrutura no diretório autorizado. Registre decisões em ADRs. Considere React e TypeScript, FastAPI, PostgreSQL, OIDC, fila e adaptador de IA; confirme versões suportadas nas fontes oficiais. Antes de serviço pago, apresente estimativa e limite aprovado. Mantenha segredos fora do código e configuração de exemplo sem valores reais.
 Dados e APIs
 Modele instituição, usuário, papel, vínculo assistencial, paciente, episódio, fonte, registro, importação, resumo, revisão, tarefa e auditoria. Exija emissor nos identificadores e diferencie data clínica de ingestão. Preserve unidade, código, autor, status e versão. Projete endpoints de importação, episódio, resumo, revisão e tarefas. Autorize no servidor cada recurso. Use paginação, erros estruturados, correlação, idempotência e versão. Não faça merge automático de homônimos.
 Interface
-Mostre paciente, episódio, instituição, atualização e estado do conector. Inclua linha do tempo, fontes e conflitos sem ocultar versões. Diferencie não informado, negado, confirmado e desatualizado. Implemente aprovar, editar e rejeitar com histórico. Inclua teclado, contraste e estados de erro e carregamento compreensíveis.
+Mostre paciente, contexto, origem, datas e atualização. Crie visão do paciente e da equipe, agenda, preparação da consulta, histórico de exames, solicitações e próxima ação. Priorize celular, teclado, leitores de tela, linguagem simples, ampliação de texto e baixa conectividade. Permita aprovar, editar e rejeitar resumos com histórico. Não exponha CPF em URLs, logs ou telas sem necessidade.
 
 17 Prompt mestre de execução e aceitação
 Contrato da IA e interoperabilidade
@@ -26,3 +26,7 @@ G: executar piloto aprovado, coletar métricas e submeter decisão G4. Teleconsu
 Definição de pronto
 Entregue código executável, instruções reproduzíveis, migrações, fixtures, testes relevantes, APIs, exemplos FHIR, inventário de dependências, custos, backup, contingência e reversão. Não declare teste sem execução. Distinga implementado, simulado, testado e pendente. Aplique critérios da seção 11 com referência clínica; falha crítica bloqueia avanço.
 Em cada fase, informe objetivo, comportamento entregue, execução, testes e resultados, limitações, riscos e próximo critério. Ao concluir MVP, entregue roteiro de cinco minutos e relatório sem alegações clínicas não comprovadas.
+
+
+Requisitos adicionais obrigatórios
+Priorize acessibilidade, teleconsulta, exames, avaliação de receita e terapias. Implemente estados e responsáveis; não faça triagem ou renovação autônoma. CPF não concede acesso. Integração pública só após elegibilidade e homologação. Diferencie operação clínica, simulação e pesquisa. Avalie conectividade, leitores de tela e fluxos assistidos. Adicione Appointment, ServiceRequest, DiagnosticReport, CarePlan, CareTeam, RelatedPerson e ImagingStudy conforme contrato de integração. A reserva de sala e o atendimento remoto real dependem do provedor; o MVP simula sem alegar consulta realizada.
