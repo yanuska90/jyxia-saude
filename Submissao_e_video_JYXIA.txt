@@ -1,0 +1,19 @@
+19 Pacote para o painel do Hack Brasil
+Base: oito capturas do painel fornecidas pelo time. As informações abaixo descrevem o que está visível nas telas e não substituem a leitura do regulamento. O painel mostra JYXIA, duas pessoas e uma pendência individual de aceite de termos. Cada integrante deve resolver seus próprios termos na própria conta.
+
+Textos sugeridos para os campos
+Nome do projeto: JYXIA
+Resumo: Plataforma de integração de prontuários e IA assistiva para organizar o contexto perioperatório com fontes verificáveis e revisão profissional.
+Descrição: O JYXIA propõe reunir informações clínicas dispersas em uma visão perioperatória com origem, datas e conflitos explícitos. O MVP planejado combina importação FHIR R4, linha do tempo e resumo assistido por IA sujeito à revisão profissional. A demonstração atual utiliza somente dados sintéticos e resumo pré-escrito para mostrar consulta de fontes, tratamento de lacunas e revisão simulada. Não realiza diagnóstico, prescrição ou autorização de cirurgia. A evolução prevê integração autorizada com prontuários, validação clínica e, depois, teleconsulta, prescrições, vacinas e alertas. A utilidade será medida por tempo de busca, cobertura da informação, rastreabilidade e testes de segurança. Integração hospitalar, IA generativa e RNDS não estão ativas nesta demonstração.
+Trilha sugerida: Saúde & bem-estar, conforme opção exibida. Links: inserir apenas endereços reais e testados de repositório, página, demo e vídeo; não usar exemplos como resultados.
+
+20 Plano de entrega para o evento
+Este plano é uma proposta de trabalho do time até o prazo exibido nas telas. É separado do piloto de 16 semanas da seção 12. O evento recebe uma demonstração sintética; expansão clínica ocorre posteriormente.
+
+Roteiro para vídeo de até três minutos
+0 a 30 segundos | Pessoa que viveu a experiência na câmera: Há cerca de seis anos, tive câncer. Meus exames não estavam reunidos e, a cada médico, eu repetia minha história e meus sintomas. Também recebi um medicamento ao qual tinha alergia. Essa experiência motivou o JYXIA: conectar informações e ajudar a equipe a enxergar o histórico do paciente.
+30 a 50 segundos | Outro integrante na câmera: Propomos integração de prontuários e IA assistiva, sempre com revisão profissional. Começamos pelo contexto pré-operatório. A solução não diagnostica, prescreve ou autoriza cirurgia. Não podemos afirmar que a IA teria mudado aquela trajetória.
+50 a 115 segundos | Tela compartilhada com apresentação: Esta demonstração usa dados sintéticos e um resumo pré-escrito. Aqui há alergias não informadas, relatos divergentes de medicamento e exame sem data. Abrimos as fontes e conferimos o resumo. O revisor pode editar, aprovar ou rejeitar na simulação. Se o resumo estiver indisponível, as fontes continuam acessíveis.
+115 a 145 segundos | Integrante 1: Na implementação seguinte, validaremos importação FHIR, controle de acesso e IA com evidências. Vamos medir tempo de busca, cobertura e erros, sem apresentar benefício clínico antes de comprová-lo.
+145 a 170 segundos | Integrante 2: O roadmap inclui teleconsulta, prescrições, vacinas e alertas, após validação e requisitos próprios. Buscamos mentoria e um serviço parceiro para um piloto responsável. Este é o JYXIA.
+Usar nomes reais somente após confirmação. Ambos devem aparecer na câmera conforme tela do rascunho. Gravar em ritmo natural, conferir duração final até 3 minutos e publicar como público ou não listado. A gravação real pelos integrantes permanece necessária; este roteiro não é um vídeo concluído.
