@@ -2,6 +2,12 @@
 
 Plataforma proposta de integração de prontuários e IA assistiva para o cuidado perioperatório. Materiais preparados para apresentação ao Hack Brasil na trilha Saúde & bem-estar, conforme painel fornecido pelo time.
 
+## Acessos públicos
+
+- Site: https://jyxia-saude-perioperatoria.blissfulapple.chatgpt.site/
+- Demo: https://jyxia-saude-perioperatoria.blissfulapple.chatgpt.site/demo
+- Repositório: https://github.com/yanuska90/jyxia-saude
+
 ## Origem
 
 A ideia nasceu da experiência pessoal de uma pessoa do time que teve câncer há cerca de seis anos. Ela relata exames dispersos, repetição de seu histórico em diferentes consultas e recebimento de medicamento ao qual tinha alergia. A divulgação de câncer e alergia foi autorizada sem identificação de médicos ou serviços. Essa motivação não demonstra que uma IA teria antecipado o diagnóstico ou evitado o episódio.
@@ -42,4 +48,4 @@ Nenhum upload, analytics ou serviço de IA é utilizado na demo. A hospedagem po
 
 ## Materiais e direitos
 
-Consultar `docs/` para projeto e prompt quando incluídos. Confirmar nomes e papéis da equipe antes da submissão. Nenhuma licença aberta é presumida; direitos de terceiros e licença final precisam ser revisados pelo time. A configuração `.openai/hosting.json` identifica a hospedagem deste projeto e não deve ser reutilizada para um Site diferente.
+Consultar o DOCX, o prompt mestre e o arquivo de submissão e vídeo na raiz deste repositório. Confirmar nomes e papéis da equipe antes da submissão. Nenhuma licença aberta é presumida; direitos de terceiros e licença final precisam ser revisados pelo time.
