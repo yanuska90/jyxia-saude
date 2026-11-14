@@ -102,3 +102,7 @@ O acesso provisório aos laboratórios está documentado em [ACESSO_ASSISTIDO.md
 O tipo **Teleconsulta** permite salvar data, horário de Brasília, profissional/clínica, especialidade, observações e endereço de uma sala Daily de teste. O link é guardado dentro do cofre; abrir a sala é uma navegação externa. Isso não cria nem confirma uma consulta. A criação de salas privadas e acessos temporários via servidor está especificada em [TELECONSULTA.md](TELECONSULTA.md).
 
 Para verificar o núcleo criptográfico e a validação de links, com Node.js 22 ou superior: `node --test test_security.cjs`. Os testes usam exclusivamente valores fictícios e não abrem o armazenamento pessoal do usuário.
+
+## Senha esquecida
+A demo não possui recuperação. Leia [RECUPERACAO_DE_ACESSO.md](RECUPERACAO_DE_ACESSO.md) antes de criar o cofre. A versão clínica depende de recuperação verificada e preservação dos dados.
+

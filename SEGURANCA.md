@@ -43,3 +43,7 @@ Implementar autenticação de servidor com MFA, recuperação segura e sessão r
 - [OWASP — armazenamento de senhas](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html): referência para derivação resistente; não certifica esta implementação.
 - [MDN — Web Crypto encrypt](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/encrypt): API criptográfica e contexto seguro.
 - [Acesso assistido](ACESSO_ASSISTIDO.md): fluxo com portais, limites e condições para um conector real.
+
+## Recuperação de acesso
+A limitação atual e os critérios obrigatórios da futura recuperação estão em RECUPERACAO_DE_ACESSO.md. Não liberar dados reais sem demonstrar recuperação de identidade e de acesso aos dados sem perda ou exposição.
+
