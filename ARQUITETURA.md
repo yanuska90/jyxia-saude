@@ -59,3 +59,13 @@ O exemplo Mongo usa credencial administrativa somente na rede de desenvolvimento
 - https://fastapi.tiangolo.com/tutorial/request-files/
 - https://www.mongodb.com/docs/languages/python/pymongo-driver/current/crud/gridfs/
 - https://docs.docker.com/compose/how-tos/startup-order/
+
+
+## Cadastro de alergias
+
+Use o botão **Adicionar alergia** no cadastro ou **Cadastrar alergia** no cenário. Informe a substância ou medicamento, reação se conhecida, gravidade relatada (pode permanecer desconhecida), data, origem, observações e anexos. É possível editar ou remover depois. Dosagem não é exigida para alergia. Os registros são informados manualmente e sujeitos a avaliação profissional; não atualizam automaticamente o resumo pré-escrito do cenário. Na demo pública, ficam somente neste navegador.
+
+
+## Doenças preexistentes e cirurgias anteriores
+
+O cadastro inclui os tipos Doença preexistente e Cirurgia anterior e botões diretos para cada um. Nome, data do registro e fonte são obrigatórios. Data do diagnóstico ou cirurgia e instituição são opcionais, para evitar inventar informações desconhecidas. Doenças têm situação relatada. Todos permitem observações, anexos e edição. Dados são informados manualmente e não constituem diagnóstico ou validação clínica.

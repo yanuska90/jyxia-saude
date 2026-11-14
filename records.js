@@ -21,7 +21,13 @@
   rows=apiMode ? await api('/records') : await req(db.transaction('records').objectStore('records').getAll()); render();
  }
  const paragraph=(parent,label,value)=>{const p=document.createElement('p');const strong=document.createElement('strong');strong.textContent=label+': ';p.append(strong,document.createTextNode(value||'Não informado'));parent.append(p);};
- function cancelEdit(){editing=null;retained=[];form.reset();$('record-dose').required=true;$('record-dose-group').hidden=false;$('save-record').textContent='Salvar registro';$('cancel-record').hidden=true;$('retained-files').textContent='';}
+ function syncKind(){
+  const kind=$('record-kind').value;
+  $('record-dose-group').hidden=kind!=='medicamento';$('record-dose').required=kind==='medicamento';
+  $('allergy-fields').hidden=kind!=='alergia';$('history-fields').hidden=!['doenca','cirurgia'].includes(kind);$('condition-status-group').hidden=kind!=='doenca';$('history-date-label').textContent=kind==='cirurgia'?'Data da cirurgia, se conhecida':'Data do diagnóstico, se conhecida';
+  $('record-name-label').textContent=({alergia:'Substância ou medicamento que causou alergia *',doenca:'Nome da doença preexistente *',cirurgia:'Nome da cirurgia ou procedimento *'})[kind]||'Medicamento ou título do registro *';
+ }
+ function cancelEdit(){editing=null;retained=[];form.reset();syncKind();$('save-record').textContent='Salvar registro';$('cancel-record').hidden=true;$('retained-files').textContent='';}
  function render() {
   const list=$('record-list');list.replaceChildren();$('record-count').textContent=rows.length+' registro(s) adicionado(s)';
   if(!rows.length){const p=document.createElement('p');p.textContent='Nenhum registro adicionado. Preencha os campos acima.';list.append(p);return;}
@@ -29,8 +35,10 @@
    const article=document.createElement('article');article.className='record user-record';
    const tag=document.createElement('span');tag.className='tag warn';tag.textContent='Informado manualmente · não validado clinicamente';article.append(tag);
    const title=document.createElement('h3');title.textContent=row.name;article.append(title);
-   paragraph(article,'Tipo',{medicamento:'Medicamento',exame:'Exame ou laudo',outro:'Outro registro'}[row.kind]);
+   paragraph(article,'Tipo',{medicamento:'Medicamento',alergia:'Alergia',doenca:'Doença preexistente',cirurgia:'Cirurgia anterior',exame:'Exame ou laudo',outro:'Outro registro'}[row.kind]);
    if(row.kind==='medicamento')paragraph(article,'Dosagem informada',row.dosage);
+   if(row.kind==='alergia'){paragraph(article,'Reação relatada',row.reaction);paragraph(article,'Gravidade relatada',({desconhecida:'Não informada ou desconhecida',leve:'Leve',moderada:'Moderada',grave:'Grave'})[row.severity||'desconhecida']);}
+   if(['doenca','cirurgia'].includes(row.kind)){paragraph(article,row.kind==='cirurgia'?'Data da cirurgia':'Data do diagnóstico',row.event_date?row.event_date.split('-').reverse().join('/'):'Não informada');paragraph(article,'Instituição ou serviço',row.institution);if(row.kind==='doenca')paragraph(article,'Situação relatada',({desconhecida:'Não informada',acompanhamento:'Em acompanhamento',historico:'Histórico anterior'})[row.clinical_status||'desconhecida']);}
    paragraph(article,'Data do registro',row.record_date.split('-').reverse().join('/'));
    paragraph(article,'Origem',row.source);paragraph(article,'Observações',row.notes);
    const files=document.createElement('div');files.className='attachment-list';
@@ -44,7 +52,7 @@
    }article.append(files);
    const actions=document.createElement('div');actions.className='actions';
    const edit=document.createElement('button');edit.className='secondary';edit.type='button';edit.textContent='Editar registro';edit.onclick=()=>{
-    editing=row.id;retained=row.attachments||[];$('record-kind').value=row.kind;$('record-name').value=row.name;$('record-dose').value=row.dosage||'';$('record-date').value=row.record_date;$('record-source').value=row.source;$('record-notes').value=row.notes||'';$('record-files').value='';$('record-dose-group').hidden=row.kind!=='medicamento';$('record-dose').required=row.kind==='medicamento';$('save-record').textContent='Salvar alterações';$('cancel-record').hidden=false;$('retained-files').textContent=retained.length+' anexo(s) existente(s) será(ão) mantido(s).';form.scrollIntoView({behavior:'smooth',block:'start'});$('record-name').focus();
+    editing=row.id;retained=row.attachments||[];$('record-kind').value=row.kind;$('record-name').value=row.name;$('record-dose').value=row.dosage||'';$('record-date').value=row.record_date;$('record-source').value=row.source;$('record-notes').value=row.notes||'';$('record-files').value='';$('allergy-reaction').value=row.reaction||'';$('allergy-severity').value=row.severity||'desconhecida';$('history-date').value=row.event_date||'';$('history-institution').value=row.institution||'';$('condition-status').value=row.clinical_status||'desconhecida';syncKind();$('save-record').textContent='Salvar alterações';$('cancel-record').hidden=false;$('retained-files').textContent=retained.length+' anexo(s) existente(s) será(ão) mantido(s).';form.scrollIntoView({behavior:'smooth',block:'start'});$('record-name').focus();
    };
    const remove=document.createElement('button');remove.type='button';remove.className='secondary';remove.textContent='Remover registro';
    const confirm=document.createElement('button');confirm.type='button';confirm.textContent='Confirmar remoção de '+row.name;confirm.hidden=true;
@@ -59,7 +67,7 @@
   const selected=[...$('record-files').files];
   if(selected.length+retained.length>5){say('Use no máximo 5 anexos por registro.',true);return;}
   if(selected.some(f=>!allowed.has(f.type)||f.size>maxFile||!f.size)){say('Use PDF, PNG, JPG ou TXT, com até 10 MB por arquivo e tamanho maior que zero.',true);return;}
-  const fields={kind:$('record-kind').value,name:$('record-name').value.trim(),dosage:$('record-kind').value==='medicamento'?$('record-dose').value.trim():'',record_date:$('record-date').value,source:$('record-source').value.trim(),notes:$('record-notes').value.trim()};
+  const fields={kind:$('record-kind').value,name:$('record-name').value.trim(),dosage:$('record-kind').value==='medicamento'?$('record-dose').value.trim():'',record_date:$('record-date').value,source:$('record-source').value.trim(),notes:$('record-notes').value.trim(),reaction:$('record-kind').value==='alergia'?$('allergy-reaction').value.trim():'',severity:$('record-kind').value==='alergia'?$('allergy-severity').value:'desconhecida',event_date:['doenca','cirurgia'].includes($('record-kind').value)?($('history-date').value||null):null,institution:['doenca','cirurgia'].includes($('record-kind').value)?$('history-institution').value.trim():'',clinical_status:$('record-kind').value==='doenca'?$('condition-status').value:'desconhecida'};
   if(!fields.name||!fields.source||(fields.kind==='medicamento'&&!fields.dosage)){say('Preencha os campos obrigatórios, sem usar somente espaços.',true);return;}
   $('save-record').disabled=true;
   try{
@@ -76,7 +84,9 @@
    cancelEdit();await load();say(apiMode?'Registro salvo no banco do ambiente Docker.':'Registro e anexos salvos neste navegador.');
   }catch(e){say('Não foi possível salvar. '+(e.name==='QuotaExceededError'?'O armazenamento do navegador está cheio.':e.message),true);}finally{$('save-record').disabled=false;}
  });
- $('record-kind').onchange=()=>{const medication=$('record-kind').value==='medicamento';$('record-dose-group').hidden=!medication;$('record-dose').required=medication;};
+ $('record-kind').onchange=syncKind;
+ document.querySelectorAll('[data-add-allergy]').forEach(button=>button.onclick=()=>{$('record-kind').value='alergia';syncKind();form.scrollIntoView({behavior:'smooth',block:'start'});$('record-name').focus();});
+ document.querySelectorAll('[data-add-history]').forEach(button=>button.onclick=()=>{$('record-kind').value=button.dataset.addHistory;syncKind();form.scrollIntoView({behavior:'smooth',block:'start'});$('record-name').focus();});
  $('cancel-record').onclick=cancelEdit;
  if(apiMode){
   $('storage-note').textContent='Ambiente Docker de desenvolvimento: os registros ficam no MongoDB e os anexos no GridFS. Use apenas dados fictícios. Este protótipo ainda não possui gestão de usuários ou autorização clínica.';

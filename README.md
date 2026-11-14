@@ -74,3 +74,13 @@ Consultar o DOCX, o prompt mestre e o arquivo de submissão e vídeo na raiz des
 Use a seção **Adicionar registros e anexos** na demo para cadastrar, editar e remover registros fictícios e baixar anexos. Use PDF, PNG, JPG ou TXT, até 5 arquivos por registro e 10 MB por arquivo. Registros persistem neste navegador mesmo ao reiniciar o cenário. O resumo de exemplo não incorpora os novos registros automaticamente.
 
 A raiz inclui Dockerfile, compose.yaml, app.py, requirements.txt e .env.example. O ambiente Docker serve a interface com API FastAPI, MongoDB (NoSQL) e GridFS para anexos. Leia **ARQUITETURA.md** para execução, autenticação de teste, endpoints e limites. O banco e a API ainda não estão hospedados em produção. MySQL não é necessário para esta primeira implementação.
+
+
+## Cadastro de alergias
+
+Use o botão **Adicionar alergia** no cadastro ou **Cadastrar alergia** no cenário. Informe a substância ou medicamento, reação se conhecida, gravidade relatada (pode permanecer desconhecida), data, origem, observações e anexos. É possível editar ou remover depois. Dosagem não é exigida para alergia. Os registros são informados manualmente e sujeitos a avaliação profissional; não atualizam automaticamente o resumo pré-escrito do cenário. Na demo pública, ficam somente neste navegador.
+
+
+## Doenças preexistentes e cirurgias anteriores
+
+O cadastro inclui os tipos Doença preexistente e Cirurgia anterior e botões diretos para cada um. Nome, data do registro e fonte são obrigatórios. Data do diagnóstico ou cirurgia e instituição são opcionais, para evitar inventar informações desconhecidas. Doenças têm situação relatada. Todos permitem observações, anexos e edição. Dados são informados manualmente e não constituem diagnóstico ou validação clínica.

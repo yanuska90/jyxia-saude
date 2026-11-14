@@ -38,16 +38,24 @@ def authorized(credentials:HTTPAuthorizationCredentials|None=Depends(security)):
 
 class Record(BaseModel):
  model_config=ConfigDict(str_strip_whitespace=True,extra='forbid')
- kind:Literal['medicamento','exame','outro']
+ kind:Literal['medicamento','alergia','doenca','cirurgia','exame','outro']
  name:str=Field(min_length=1,max_length=160)
  dosage:str=Field(default='',max_length=120)
  record_date:date
  source:str=Field(min_length=1,max_length=240)
  notes:str=Field(default='',max_length=3000)
+ reaction:str=Field(default='',max_length=500)
+ severity:Literal['desconhecida','leve','moderada','grave']='desconhecida'
+ event_date:date|None=None
+ institution:str=Field(default='',max_length=240)
+ clinical_status:Literal['desconhecida','acompanhamento','historico']='desconhecida'
  @model_validator(mode='after')
  def medication_has_dosage(self):
   if self.kind=='medicamento' and not self.dosage:raise ValueError('Informe a dosagem transcrita do documento.')
   if self.kind!='medicamento':self.dosage=''
+  if self.kind!='alergia':self.reaction='';self.severity='desconhecida'
+  if self.kind not in ['doenca','cirurgia']:self.event_date=None;self.institution=''
+  if self.kind!='doenca':self.clinical_status='desconhecida'
   return self
 
 def parse_record(raw):
