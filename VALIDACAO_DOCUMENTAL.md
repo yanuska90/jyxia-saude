@@ -1,10 +1,10 @@
-# Validação da versão 3.0.0
+# Validação da versão 3.1.0
 
 ## Engenharia executada
 
-13 testes do núcleo documental cobrem hashes dos exemplos e rejeição de bytes alterados, evidência com página/caixa, ambiguidade, revisão completa, duplicidade, versões explícitas, identidade divergente, identificador ausente, imagem, correção com justificativa, atribuição/prazo, invalidação de resoluções após nova revisão/regra, exportação e detecção de alteração na cadeia. O conjunto de regressão anterior contém 18 testes JavaScript e 11 Python.
+21 testes unitários em `test_documental.mjs` e 6 testes de integração real com PDF.js em `test_documental_pdfjs.mjs` (total de 27 testes da v3) cobrem hashes dos 14 exemplos sintéticos e rejeição de bytes alterados, evidência com página/caixa, ambiguidade, revisão completa, duplicidade, versões explícitas com verificação de subfamília, identidade divergente, identificador ausente, imagem sem OCR, normalização e conflito de lateralidade (`OD × OE`), divergência de procedimento, abstenção sem inferência clínica, correção com justificativa, atribuição/prazo, invalidação de resoluções, resumo administrativo de pendências, exportação JSON/CSV segura contra injeção de fórmula e detecção de alteração na cadeia de hashes. O conjunto de regressão histórico v2.x contém 18 testes JavaScript e 11 Python.
 
-Conferência em navegador: extração real dos PDFs fornecidos, destaque visual da emissão na página original, revisão de quatro classes, fechamento das pendências do conjunto completo, bloqueio de identidade divergente, duplicados, imagem sem OCR, confirmação manual de documento sem identificador e layout desktop/celular de 390 px. As verificações de interface não demonstram acessibilidade integral WCAG.
+Conferência E2E automatizada em navegador Chromium/Edge (`test_documental_e2e.mjs`): upload manual de PDF e PNG via seletor `#files` e recusa fora do catálogo, extração real dos PDFs fornecidos, destaque visual de emissão e lateralidade na página original, oito cenários completos incluindo divergência `OD × OE` nos quatro eixos de consistência, fechamento administrativo (`"Documentação conferida (regras do exemplo)"`), bloqueio de identidade divergente com orientação de quarentena, preservação de rascunho durante atribuição/regra, exportação JSON e CSV, resumo de pendências, reset limpo, layout desktop/celular de 390 px sem overflow horizontal e foco por teclado. As verificações de interface não demonstram auditoria completa WCAG.
 
 ## O que falta validar
 

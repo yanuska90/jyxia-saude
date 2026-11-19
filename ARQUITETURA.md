@@ -1,12 +1,12 @@
-# Arquitetura JYXIA 3.0.0
+# Arquitetura JYXIA 3.1.0
 
 ## Implementação atual
 
-GitHub Pages HTTPS → interface HTML/CSS responsiva → `documental-ui.mjs` → `documental-core.mjs`. PDF.js e seu worker são distribuídos em `vendor/`. Originais autorizados pelo catálogo sintético são lidos no navegador. O SHA256 é calculado antes do parsing; são aceitos somente os 12 arquivos exatos de `documental-manifest.json`, nos tipos previstos. Limites: 512 KB por arquivo, cinco páginas, 12 arquivos por seleção e 20 documentos por sessão.
+GitHub Pages HTTPS (deploy seletivo de 27 arquivos via `.github/workflows/pages.yml`) → interface HTML/CSS responsiva → `documental-ui.mjs` → `documental-core.mjs`. PDF.js e seu worker são distribuídos em `vendor/`. Originais autorizados pelo catálogo sintético são lidos no navegador. O SHA256 é calculado antes do parsing; são aceitos somente os 14 arquivos exatos de `documental-manifest.json`, nos tipos previstos. Limites: 512 KB por arquivo, cinco páginas, 12 arquivos por seleção e 20 documentos por sessão.
 
-O motor separa campos extraídos, fonte (página e caixa normalizada), revisão humana, versão da regra e eventos. `caseId` começa nulo e só é atribuído após confirmação humana compatível com nome e nascimento do caso; divergências não admitem confirmação. Duplicidade é igualdade de hash; substituição exige ação explícita e revisão dos dois documentos do mesmo tipo. Correção não modifica o valor original.
+O motor separa campos extraídos (incluindo `subfamily`, `procedure`, `laterality` e `signatureCue` quando presentes), fonte (página e caixa normalizada), revisão humana, versão da regra, eventos e quatro eixos determinísticos de consistência (`identidade`, `procedimento`, `lateralidade` e `temporalidade/versão`). `caseId` começa nulo e só é atribuído após confirmação humana compatível com nome e nascimento do caso; divergências de identidade, procedimento ou lateralidade não admitem conclusão automática. Duplicidade é igualdade de hash; substituição exige ação explícita, revisão dos dois documentos do mesmo tipo e compatibilidade de subfamília quando informada. Correção não modifica o valor original.
 
-O estado é volátil. Não há autenticação, API documental ou persistência nesta demo pública. CSV/JSON de cadastro são exemplos fixos reconhecidos por hash, não importação genérica. Responsáveis A/B são personagens fictícios. Os eventos têm sequência e hash anterior; o controlador do navegador pode reconstruir a cadeia. Não chamar isso de trilha imutável.
+O estado é volátil. Não há autenticação, API documental, OCR ou IA generativa nesta demo pública. CSV/JSON de cadastro são exemplos fixos reconhecidos por hash, não importação genérica. Responsáveis A/B são personagens fictícios. A demo gera resumo administrativo determinístico de pendências e exportação em JSON e CSV (com neutralização de fórmulas em células iniciadas por `=`, `+`, `-`, `@`, tabulação ou retorno). Os eventos têm sequência e hash anterior; o controlador do navegador pode reconstruir a cadeia. Não chamar isso de trilha imutável.
 
 ## Produto institucional proposto
 

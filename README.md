@@ -1,6 +1,6 @@
 # JYXIA Inteligência Documental em Saúde
 
-Versão 3.0.0 · 14 de novembro de 2026 · Yanuska e João.
+Versão 3.1.0 · 19 de novembro de 2026 · Yanuska e João.
 
 A JYXIA organiza documentos, mostra a origem de informações e acompanha pendências com revisão humana. O primeiro módulo é a **conferência documental para procedimentos eletivos**. A hipótese de valor é reduzir procura, redigitação e retrabalho; ainda não há benefício operacional ou clínico validado.
 
@@ -11,12 +11,12 @@ A JYXIA organiza documentos, mostra a origem de informações e acompanha pendê
 
 ## O que funciona
 
-1. Adicione um dos sete cenários ou anexe os arquivos fornecidos. O conteúdo deve corresponder ao catálogo sintético por SHA256; arquivos pessoais ou modificados são recusados.
-2. A demo extrai texto de PDFs com PDF.js, localiza nome, nascimento, identificador, emissão, tipo e origem informada. “Ver fonte” destaca o trecho na página original.
-3. Confira a identidade, a data e, em termos, a área de assinatura. Correções de data exigem observação e preservam o valor extraído. Uma marca visual não autentica assinatura.
-4. Trate pendências, atribua responsável fictício e prazo. Exceções exigem justificativa. Documentos divergentes ficam em quarentena sem vínculo confirmado ao caso.
-5. Confirme substituições entre documentos revisados do mesmo tipo; ambos ficam preservados. Arquivos idênticos não geram cópias adicionais.
-6. Exporte a sessão em JSON e verifique a sequência de hashes dos eventos. Não se trata de auditoria imutável ou autenticação de autoria.
+1. Adicione um dos oito cenários ou anexe os arquivos fornecidos (`14` fixtures em `fixtures-jyxia.zip`). O conteúdo deve corresponder ao catálogo sintético por SHA256; arquivos pessoais ou modificados são recusados.
+2. A demo extrai texto de PDFs com PDF.js, localiza os atributos documentais suportados (`Tipo`, `Subfamília`, `Paciente`, `Nascimento`, `Identificação`, `Emissão`, `Procedimento`, `Lateralidade`, `Origem` e marca visual em termos). “Ver fonte” destaca o trecho na página original.
+3. Os quatro eixos determinísticos de consistência (**Identidade**, **Procedimento**, **Lateralidade** e **Temporalidade/Versões**) apontam conflitos bloqueantes (ex.: `OD × OE` no cenário 8) ou abstenção por ausência de evidência, sem decidir clinicamente.
+4. Confira identidade, data, lateralidade e área de assinatura. Correções de data exigem observação e preservam o valor extraído. Uma marca visual não autentica assinatura.
+5. Trate pendências, atribua responsável fictício e prazo, e gere o resumo administrativo para retorno ao emissor. Conflitos ativos exigem retirada ou substituição explícita dentro da mesma subfamília documental.
+6. Exporte a sessão em **JSON** ou **CSV** (com proteção contra injeção de fórmula) e verifique a sequência de hashes dos eventos. Não se trata de auditoria imutável ou autenticação de autoria.
 
 As regras são administrativas e versionadas. A referência do exemplo é 14/11/2026, com procedimento fictício em 30/11/2026 e janela inicial de 30 dias para a data do laudo. “Sem pendências” não libera procedimento.
 
@@ -33,10 +33,13 @@ OCR, extração assistida por IA, autenticação, autorização por instituiçã
 A banca pode usar diretamente a demo HTTPS, sem instalação. Para desenvolvimento, use um servidor estático local com Python 3 e abra a página servida; abrir o HTML como arquivo não carrega os módulos:
 
 ```sh
-python -m http.server 8000 --bind 127.0.0.1
+python serve_documental.py --bind 127.0.0.1 --port 8000
 node --test test_documental.mjs test_documental_pdfjs.mjs
 python check_publication.py
+node test_documental_e2e.mjs
 ```
+
+*(Observação: `node test_documental_e2e.mjs` requer Chromium/Edge instalado localmente ou caminho definido via `JYXIA_BROWSER_BIN`. A publicação no GitHub Pages usa `.github/workflows/pages.yml` com lista explícita de 27 arquivos públicos, excluindo servidor local, testes e legado v2.x.)*
 
 Testes históricos da versão anterior v2.x (isolados):
 
@@ -69,6 +72,6 @@ O foco atual segue os quatro materiais enviados pela equipe sobre Clinical Docum
 
 Trilha pretendida: Saúde & bem-estar. [Regulamento oficial](https://hackbrasil.com/regulamento), consultado em 14/11/2026: execução técnica, implementação técnica, impacto e comunicação. O roteiro e os campos estão em [Submissao_e_video_JYXIA.txt](Submissao_e_video_JYXIA.txt). Confirmar elegibilidade do histórico do código, prazo e condições no portal antes de enviar. Não houve submissão automática nem gravação do vídeo.
 
-## Dependência de terceiros
+## Dependência de terceiros e licenciamento
 
-PDF.js 6.5.438, distribuído localmente, licença Apache 2.0 em `vendor/PDFJS-LICENSE.txt`. A origem e a integridade do pacote constam em [DEPENDENCIAS.md](DEPENDENCIAS.md). Nenhum CDN ou serviço de IA recebe documentos nesta versão.
+PDF.js 6.5.438, distribuído localmente, licença Apache 2.0 em `vendor/PDFJS-LICENSE.txt`. A origem e a integridade do pacote constam em [DEPENDENCIAS.md](DEPENDENCIAS.md). Nenhum CDN ou serviço de IA recebe documentos nesta versão. A definição de licença própria para o código-fonte da JYXIA permanece pendente de deliberação da equipe.
