@@ -62,7 +62,9 @@ jobs:
               "fixtures/laudo-atualizado.pdf",
               "fixtures/laudo.pdf",
               "fixtures/sem-identificador.pdf",
+              "fixtures/solicitacao-od.pdf",
               "fixtures/solicitacao.pdf",
+              "fixtures/termo-oe.pdf",
               "fixtures/termo-sem-marca.pdf",
               "fixtures/termo.pdf",
           ]
