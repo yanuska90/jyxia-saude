@@ -3,3 +3,20 @@
 @media(max-width:1100px){.wrap{width:calc(100% - 48px)}.top{padding:20px 24px}.workspace{grid-template-columns:200px 1fr}.split{grid-template-columns:1fr}.source{max-width:480px}.hero{gap:5%}.hero-visual{padding:25px}.review-chip{margin-left:10px}.band-grid{gap:25px}.task{grid-template-columns:1fr}.brand-sub{display:none}}
 @media(max-width:700px){.wrap{width:calc(100% - 32px)}.top{padding:18px 16px;gap:10px}.brand{font-size:1.25rem}.brand-symbol{font-size:1.3rem}.top nav{gap:12px}.top nav>a:first-child{display:none}.top nav>a{font-size:.72rem}.small{padding:8px 10px}.hero{grid-template-columns:1fr;padding:40px 0 55px;gap:35px}.hero h1{font-size:3.25rem}.lead{font-size:1.07rem}.hero-visual{min-height:390px;max-width:470px;width:100%;margin:auto}.band-grid,.two-col,.steps{grid-template-columns:1fr;gap:28px}.band{padding:30px 0}.band h2{font-size:1.65rem}.band-grid{gap:17px}.section{padding:50px 0}.steps{margin-top:30px;gap:12px}.step-number{margin-bottom:12px;padding-top:15px}.origin{padding:45px 0}.signature{margin-top:20px}.origin .two-col{gap:12px}footer{padding:25px 16px;flex-wrap:wrap;gap:12px}footer p{max-width:100%;width:100%}.demo-title{display:block;margin-top:25px}.demo-title h1{font-size:2.15rem;margin-bottom:13px}.demo-title>a{display:inline-block;margin-bottom:20px}.notice{font-size:.78rem;padding:13px}.controls,.case-strip{grid-template-columns:1fr;gap:25px}.panel{padding:18px;border-radius:12px}.metrics{grid-template-columns:repeat(3,1fr);gap:8px}.metric{padding:12px}.metric strong{font-size:1.4rem}.metric span{font-size:.64rem}.workspace{grid-template-columns:1fr;gap:0}.doc-list-panel{padding:15px}.doc-button{font-size:.8rem}.review-panel{padding:17px}.review-heading{display:block}.review-heading .pill{margin-top:0;margin-bottom:10px}.section-heading{display:block}.section-heading>.pill,.section-heading>.actions{margin-top:15px}.task-controls{grid-template-columns:1fr 1fr}.task-controls>button{grid-column:1/-1}.task-note{display:block}.task-note button{margin-top:8px;width:100%}.reset-row{display:block}.reset-row button{margin-top:12px;width:100%}.audit-panel .actions{display:grid;grid-template-columns:1fr}.field{font-size:.83rem}.field strong{font-size:.8rem}.check-label{font-size:.8rem}.field button{font-size:.73rem;min-height:44px}.source{max-width:none}.source-heading{font-size:.72rem}}
 @media(prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+
+.message.error{color:#8c2c19;background:#fdf2ef;border-left:4px solid #8c2c19;padding:10px 14px;border-radius:0 8px 8px 0;font-weight:600}
+.guidance{background:#fff6e6;border-left:4px solid #8c5b14;color:#4a330a;padding:12px 14px;border-radius:0 8px 8px 0;font-size:.82rem;margin:14px 0}
+.pill.danger{background:#fbe4df;color:#7a1f10}
+.axes-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+.axis-card{border:1px solid var(--line);border-left:4px solid var(--muted);border-radius:10px;padding:12px 14px;background:var(--paper)}
+.axis-card.axis-ok{border-left-color:var(--green);background:#eef7f2}
+.axis-card.axis-conflito{border-left-color:#8c2c19;background:#fdf2ef}
+.axis-card.axis-abstencao,.axis-card.axis-atencao{border-left-color:#8c5b14;background:#fff8eb}
+.axis-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.axis-head strong{font-size:.8rem;color:var(--ink)}
+.axis-badge{font-size:.64rem;font-weight:750;padding:2px 8px;border-radius:99px;background:#fff;border:1px solid var(--line);color:var(--ink)}
+.axis-card p{font-size:.74rem;margin:0;color:var(--ink)}
+.notice-details{margin:12px 0 18px;border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--paper)}
+.pending-notice{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.74rem;line-height:1.5;background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px;margin:10px 0;overflow-wrap:anywhere;color:var(--ink)}
+@media(max-width:1100px){.axes-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:700px){.axes-grid{grid-template-columns:1fr}}
