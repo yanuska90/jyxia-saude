@@ -12,8 +12,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Criptografia e links de teleconsulta
-        run: node --test test_documental.mjs test_security.cjs test_synthetic_import.cjs
+      - name: Nucleo documental, integracao PDF.js e testes historicos
+        run: node --test test_documental.mjs test_documental_pdfjs.mjs test_security.cjs test_synthetic_import.cjs
       - name: Integracao com identidades sinteticas
         run: python3 -m unittest test_integration.py -v
       - name: Higiene basica da publicacao
