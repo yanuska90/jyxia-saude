@@ -234,10 +234,15 @@ async function main() {
     await waitUntil(() => cdp.eval(`
       document.readyState === 'complete' &&
       !document.body.hasAttribute('aria-busy') &&
-      document.getElementById('scenario')?.options?.length === 7 &&
+      document.getElementById('scenario')?.options?.length === 8 &&
       document.getElementById('case-meta')?.textContent?.includes('12/04/1986')
     `));
     assert.equal(await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`), 'favicon.svg');
+    // Verify keyboard Tab navigation moves focus to an interactive control cleanly
+    await cdp.eval(`document.getElementById('scenario').focus()`);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    assert.equal(await cdp.eval(`document.activeElement?.id`), 'load');
     console.log('E2E_3_DEMO_INIT_OK');
 
     // 4. Manual upload via #files: PDF + PNG + altered file rejection
@@ -282,6 +287,7 @@ async function main() {
     assert(manualPngState.caption.includes('Sem OCR nesta versão'));
     assert.equal(manualPngState.reviewFormHidden, true);
     assert.equal(manualPngState.docsCount, 2);
+    assert.equal(await cdp.eval(`document.getElementById('quarantine-guidance').hidden`), false);
 
     await uploadFiles([invalidPdfPath]);
     const rejectedManualState = await cdp.eval(`({
@@ -290,6 +296,7 @@ async function main() {
       docsCount: document.querySelectorAll('#document-list .doc-button').length,
     })`);
     assert.equal(rejectedManualState.isErr, true);
+    assert(rejectedManualState.msg.startsWith('Erro: '));
     assert.equal(rejectedManualState.docsCount, 2);
     console.log('E2E_4_MANUAL_FILES_PDF_AND_PNG_OK:', { manualPdfPixels, docsCount: manualPngState.docsCount });
 
@@ -340,13 +347,24 @@ async function main() {
       `);
       await waitIdle();
     }
-    assert.equal(await cdp.eval(`document.getElementById('readiness').textContent`), 'Sem pendências nas regras do exemplo');
+    assert.equal(await cdp.eval(`document.getElementById('readiness').textContent`), 'Documentação conferida (regras do exemplo)');
+
+    // Non-destructive draft preservation when assigning a task or recalculating rule
+    await cdp.eval(`document.getElementById('review-note').value = 'Rascunho em edicao.'; document.getElementById('rule').click();`);
+    await waitIdle();
+    assert.equal(await cdp.eval(`document.getElementById('review-note').value`), 'Rascunho em edicao.');
 
     await cdp.eval(`document.getElementById('verify').click()`);
     await waitIdle();
     assert.equal(await cdp.eval(`document.getElementById('message').classList.contains('error')`), false);
     await cdp.eval(`document.getElementById('export').click()`);
     await waitIdle();
+    await cdp.eval(`document.getElementById('export-csv').click()`);
+    await waitIdle();
+    assert(await cdp.eval(`document.getElementById('message').textContent.includes('Exportação CSV')`));
+    await cdp.eval(`document.getElementById('copy-notice').click()`);
+    await waitIdle();
+    assert(await cdp.eval(`document.getElementById('pdf-canvas').getAttribute('aria-label')?.includes('Página 1 de')`));
 
     for (const caseFile of ['casos-ficticios.csv', 'casos-ficticios.json']) {
       const docNode = await cdp.send('DOM.getDocument', { depth: -1 });
@@ -375,6 +393,31 @@ async function main() {
     await cdp.eval(`document.getElementById('scenario').value = 'divergente'; document.getElementById('load').click();`);
     await waitIdle();
     assert.equal(await cdp.eval(`document.getElementById('review-form').hidden`), true);
+    assert.equal(await cdp.eval(`document.getElementById('quarantine-guidance').hidden`), false);
+
+    // Scenario 8: Lateralidade divergente (OD x OE) + Ver fonte em Lateralidade + Eixo 3 bloqueante + mobile 390px sem overflow
+    await cdp.eval(`document.getElementById('reset-confirm').checked = true; document.getElementById('reset').click();`);
+    await waitIdle();
+    await cdp.eval(`document.getElementById('scenario').value = 'lateralidade'; document.getElementById('load').click();`);
+    await waitIdle();
+    await cdp.eval(`document.querySelector('button[aria-label*="Lateralidade informada"]')?.click()`);
+    await waitIdle();
+    await waitUntil(() => cdp.eval(`!document.getElementById('source-highlight').hidden`));
+    const latE2e = await cdp.eval(`({
+      axesCount: document.querySelectorAll('#consistency-axes .axis-card').length,
+      latCardText: document.querySelector('.axis-card.axis-conflito')?.textContent || '',
+      caption: document.getElementById('source-caption').textContent,
+      notice: document.getElementById('pending-notice').textContent,
+      readiness: document.getElementById('readiness').textContent,
+    })`);
+    assert.equal(latE2e.axesCount, 4);
+    assert(latE2e.latCardText.includes('BLOQUEIO'));
+    assert(latE2e.caption.includes('Lateralidade: Olho Esquerdo (OE)'));
+    assert(latE2e.notice.includes('Divergência de lateralidade'));
+    assert(latE2e.readiness.includes('Divergência bloqueante'));
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false);
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
 
     await cdp.eval(`document.getElementById('scenario').value = 'janela'; document.getElementById('load').click();`);
     await waitIdle();

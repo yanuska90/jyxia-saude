@@ -187,3 +187,27 @@ test('PDF without selectable text yields empty lines and readable=false, multi-p
     assert(x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= 1 && y + h <= 1, `Rotated box out of [0,1]: ${JSON.stringify(l.box)}`);
   }
 });
+
+test('PDF.js extracts DE-04 subfamily, procedure, laterality and signature cue from OD/OE fixtures and flags conflict', async () => {
+  const s = new DocumentarySession(manifest);
+  const ingestReal = async name => {
+    const f = manifest.files.find(x => x.name === name);
+    const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const { lines } = await parseRealPdf(bytes);
+    return (await s.ingest(f, lines, 5)).document;
+  };
+  const sol = await ingestReal('solicitacao-od.pdf');
+  const term = await ingestReal('termo-oe.pdf');
+  assert.equal(sol.fields.subfamily.value, 'Solicitacao cirurgica');
+  assert.equal(sol.fields.procedure.value, 'Facoemulsificacao com implante de LIO');
+  assert.equal(sol.fields.laterality.normalized, 'direito');
+  assert.equal(term.fields.laterality.normalized, 'esquerdo');
+  assert.equal(term.fields.signatureCue.source.page, 1);
+  for (const key of ['subfamily', 'procedure', 'laterality']) {
+    const [x, y, w, h] = sol.fields[key].source.box;
+    assert(x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= 1 && y + h <= 1);
+  }
+  const latAxis = s.consistencyAxes().find(a => a.id === 'laterality');
+  assert.equal(latAxis.status, 'conflito');
+  assert.equal(latAxis.blocking, true);
+});

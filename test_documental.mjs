@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {DocumentarySession,addDaysISO,allowedFixture,brazilDate,extractFields,extractPdfLines,identity,isoToBrazil,parseSyntheticCase,verifyEvents} from './documental-core.mjs';
+import {DocumentarySession,addDaysISO,allowedFixture,brazilDate,csvSafeCell,extractFields,extractPdfLines,identity,isoToBrazil,normalizeLaterality,parseSyntheticCase,verifyEvents} from './documental-core.mjs';
 const manifest=JSON.parse(await readFile(new URL('./documental-manifest.json',import.meta.url)));
 const fixture=name=>manifest.files.find(x=>x.name===name);
 function lines(overrides={}){const values={type:'laudo',patient:'Pessoa Sintetica Alfa',birthDate:'12/04/1986',identifier:'SYN-P01',issueDate:'11/11/2026',origin:'Instituicao Ficticia JYXIA',...overrides};const labels={type:'Tipo',patient:'Paciente',birthDate:'Nascimento',identifier:'Identificador',issueDate:'Emissao',origin:'Origem'};return Object.entries(values).filter(([,v])=>v!==null).map(([k,v],i)=>({text:labels[k]+': '+v,page:1,box:[.1,.2+i*.03,.5,.02]}));}
@@ -49,4 +49,49 @@ test('extractPdfLines enforces page limit via loadingTask.destroy when available
  const mockDoc={numPages:6,loadingTask:{destroy:async()=>{destroyed=true;}}};
  await assert.rejects(extractPdfLines(mockDoc,()=>[1,0,0,1,0,0],5),/Limite de cinco páginas/);
  assert.equal(destroyed,true);
+});
+
+test('normalizeLaterality maps valid tokens deterministically and abstains on ambiguity',()=>{
+ assert.equal(normalizeLaterality('Olho Direito (OD)'),'direito');
+ assert.equal(normalizeLaterality('OE'),'esquerdo');
+ assert.equal(normalizeLaterality('Ambos os olhos (AO)'),'bilateral');
+ assert.equal(normalizeLaterality('Nao aplicavel'),'nao_aplicavel');
+ assert.equal(normalizeLaterality('Olho direito e olho esquerdo'),'abstencao');
+ assert.equal(normalizeLaterality('texto livre incerto'),'abstencao');
+ assert.equal(normalizeLaterality(''),'');
+});
+test('DE-04 consistency axes detect procedure/laterality conflicts and block automatic completion',async()=>{
+ const s=new DocumentarySession(manifest);
+ const req=(await s.ingest(fixture('solicitacao-od.pdf'),[...lines({type:'solicitacao'}),{text:'Subfamilia: Solicitacao cirurgica',page:1,box:[.1,.5,.4,.02]},{text:'Procedimento: Facoemulsificacao com LIO',page:1,box:[.1,.55,.5,.02]},{text:'Lateralidade: Olho Direito (OD)',page:1,box:[.1,.6,.4,.02]}])).document;
+ const term=(await s.ingest(fixture('termo-oe.pdf'),[...lines({type:'termo'}),{text:'Subfamilia: Termo de procedimento',page:1,box:[.1,.5,.4,.02]},{text:'Procedimento: Facoemulsificacao com LIO',page:1,box:[.1,.55,.5,.02]},{text:'Lateralidade: Olho Esquerdo (OE)',page:1,box:[.1,.6,.4,.02]},{text:'MARCA FICTICIA',page:1,box:[.1,.7,.3,.02]}])).document;
+ assert.equal(term.fields.signatureCue.source.page,1);
+ await review(s,req);
+ await review(s,term,{signature:'present'});
+ const axes=s.consistencyAxes();
+ assert.equal(axes.find(a=>a.id==='procedure').status,'ok');
+ assert.equal(axes.find(a=>a.id==='laterality').status,'conflito');
+ assert.equal(axes.find(a=>a.id==='laterality').blocking,true);
+ assert.equal(s.readinessState().code,'conflito');
+ const axisTask=s.tasks().find(t=>t.id.startsWith('axis:laterality:'));
+ assert(axisTask&&!axisTask.manual);
+ await s.discard(term.id,'Lateralidade incorreta no termo anexado.');
+ assert.equal(s.consistencyAxes().find(a=>a.id==='laterality').status,'ok');
+});
+test('cross-subfamily replacement is rejected and abstention applies when procedure is absent',async()=>{
+ const s=new DocumentarySession(manifest);
+ const a=(await s.ingest(fixture('laudo.pdf'),[...lines({type:'laudo'}),{text:'Subfamilia: Hematologia',page:1,box:[.1,.5,.3,.02]}])).document;
+ const b=(await s.ingest(fixture('laudo-atualizado.pdf'),[...lines({type:'laudo'}),{text:'Subfamilia: Imagem',page:1,box:[.1,.5,.3,.02]}])).document;
+ await review(s,a);await review(s,b);
+ await assert.rejects(s.replace(b.id,a.id),/Subfamílias documentais distintas/);
+ assert.equal(s.consistencyAxes().find(a=>a.id==='procedure').status,'abstencao');
+});
+test('buildPendingNotice and exportCsv neutralize spreadsheet formula injection',async()=>{
+ assert.equal(csvSafeCell('=CMD("calc")'),'"\'=CMD(""calc"")"');
+ assert.equal(csvSafeCell('+1+1'),'"\'+1+1"');
+ assert.equal(csvSafeCell('@SUM(A1)'),'"\'@SUM(A1)"');
+ const s=new DocumentarySession(manifest),d=await add(s,'laudo.pdf');
+ await review(s,d,{issueDate:'2026-11-12',note:'=IMPORTXML("http://example.invalid")'});
+ const csv=s.exportCsv();
+ assert(csv.includes('"\'=IMPORTXML(""http://example.invalid"")"'));
+ assert(s.buildPendingNotice().includes('Aviso: uso exclusivamente administrativo'));
 });
