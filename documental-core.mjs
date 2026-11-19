@@ -12,6 +12,43 @@ export const SCENARIOS={
 const normalize=x=>String(x??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
 export function validISO(s){if(!/^\d{4}-\d{2}-\d{2}$/.test(s))return false;const d=new Date(s+'T00:00:00Z');return Number.isFinite(+d)&&d.toISOString().slice(0,10)===s;}
 export function brazilDate(s){const m=String(s??'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);if(!m)return '';const v=`${m[3]}-${m[2]}-${m[1]}`;return validISO(v)?v:'';}
+export function isoToBrazil(s){if(!validISO(s))return '';const [y,m,d]=s.split('-');return `${d}/${m}/${y}`;}
+export function addDaysISO(s,days){if(!validISO(s)||!Number.isInteger(days))return '';const d=new Date(s+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
+export function parseSyntheticCase(text,mime){
+ if(typeof text!=='string'||!text.trim())throw Error('Cadastro sintético vazio.');
+ const clean=text.replace(/^\uFEFF/,'').trim();let item;
+ if(mime==='application/json'){
+  let parsed;try{parsed=JSON.parse(clean);}catch{throw Error('JSON de cadastro sintético inválido.');}
+  if(!parsed?.synthetic||!Array.isArray(parsed.cases)||!parsed.cases.length)throw Error('Estrutura de cadastro sintético inválida.');
+  item=parsed.cases[0];
+ }else if(mime==='text/csv'){
+  const rows=clean.split(/\r?\n/).map(r=>r.trim()).filter(Boolean);
+  if(rows.length<2)throw Error('CSV de cadastro sintético incompleto.');
+  const headers=rows[0].split(',').map(x=>x.trim()),values=rows[1].split(',').map(x=>x.trim());
+  if(headers.length!==values.length)throw Error('Colunas incompatíveis no CSV sintético.');
+  item=Object.fromEntries(headers.map((h,i)=>[h,values[i]]));
+ }else throw Error('Formato de cadastro não suportado.');
+ const required=['id','patient','birthDate','identifier','procedureDate'];
+ for(const k of required)if(typeof item?.[k]!=='string'||!item[k].trim())throw Error('Campo obrigatório ausente no cadastro: '+k);
+ if(!validISO(item.birthDate)||!validISO(item.procedureDate))throw Error('Datas inválidas no cadastro sintético.');
+ return {id:item.id.trim(),patient:item.patient.trim(),birthDate:item.birthDate.trim(),identifier:item.identifier.trim(),procedureDate:item.procedureDate.trim()};
+}
+export async function extractPdfLines(doc,transformFn,maxPages=5){
+ if(doc.numPages>maxPages){if(doc.loadingTask?.destroy)await doc.loadingTask.destroy();else if(doc.destroy)await doc.destroy();throw Error('Limite de cinco páginas por documento.');}
+ const lines=[];
+ for(let i=1;i<=doc.numPages;i++){
+  const p=await doc.getPage(i),v=p.getViewport({scale:1}),content=await p.getTextContent();
+  for(const item of content.items){
+   if(!item.str?.trim())continue;
+   const t=transformFn(v.transform,item.transform),rawH=Math.hypot(t[2],t[3]),height=Math.max(rawH,8),scaleH=rawH>0?height/rawH:1;
+   const hx=rawH>0?t[2]*scaleH:0,hy=rawH>0?t[3]*scaleH:-height,angle=Math.atan2(t[1],t[0]),wx=Math.cos(angle)*item.width,wy=Math.sin(angle)*item.width;
+   const xs=[t[4],t[4]+wx,t[4]+hx,t[4]+wx+hx],ys=[t[5],t[5]+wy,t[5]+hy,t[5]+wy+hy];
+   const minX=Math.max(0,Math.min(...xs)/v.width),maxX=Math.min(1,Math.max(...xs)/v.width),minY=Math.max(0,Math.min(...ys)/v.height),maxY=Math.min(1,Math.max(...ys)/v.height);
+   lines.push({text:item.str,page:i,box:[minX,minY,Math.max(0,maxX-minX),Math.max(0,maxY-minY)]});
+  }
+ }
+ return lines;
+}
 export function stable(value){if(Array.isArray(value))return '['+value.map(stable).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+stable(value[k])).join(',')+'}';return JSON.stringify(value);}
 export async function sha256(bytes){const b=typeof bytes==='string'?new TextEncoder().encode(bytes):bytes;return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',b)),v=>v.toString(16).padStart(2,'0')).join('');}
 export async function allowedFixture(bytes,manifest,mimes=['application/pdf','image/png']){
@@ -69,6 +106,7 @@ export class DocumentarySession{
  async discard(id,reason){const d=this.doc(id);if(d.supersededBy)throw Error('Versão anterior já preservada.');if(typeof reason!=='string'||reason.trim().length<5||reason.length>500)throw Error('Informe o motivo com 5 a 500 caracteres.');d.status='discarded';await this.event('documento_descartado',{document:id,reason:reason.trim()});}
  async replace(newId,oldId){const newer=this.doc(newId),older=this.doc(oldId);if(newId===oldId||newer.kind!==older.kind||newer.kind==='desconhecido'||!newer.review||!older.review||newer.caseId!==older.caseId||older.supersededBy||newer.supersededBy||newer.status==='discarded'||older.status==='discarded'||newer.replaces||older.replaces===newId)throw Error('Revise os dois documentos do mesmo tipo antes de confirmar a substituição.');newer.replaces=oldId;older.supersededBy=newId;await this.event('substituicao_confirmada',{previous:oldId,current:newId});}
  async configure(days){if(!Number.isInteger(days)||days<1||days>365)throw Error('A janela deve ter de 1 a 365 dias.');this.policy={version:this.policy.version+1,maxAgeDays:days};await this.event('regra_administrativa_alterada',{policy:this.policy});}
+ async loadSyntheticCase(known,text){const file=this.manifest.files.find(x=>x.sha256===known?.sha256&&['application/json','text/csv'].includes(x.mime));if(!file)throw Error('Cadastro fora do conjunto sintético autorizado.');const parsed=parseSyntheticCase(text,file.mime);this.case=parsed;await this.event('cadastro_importado',{name:file.name,hash:file.sha256,caseId:this.case.id,identifier:this.case.identifier});return structuredClone(this.case);}
  active(){return this.documents.filter(d=>d.status!=='discarded'&&!d.supersededBy);}
  tasks(){
   const tasks=[];const active=this.active();const push=(id,title,docId,manual=false)=>{const key=`${id}:v${this.policy.version}`;tasks.push({id:key,title,docId,manual,resolution:this.resolutions[key]||null,assignment:this.assignments[key]||null});};

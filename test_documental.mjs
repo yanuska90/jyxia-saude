@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {DocumentarySession,allowedFixture,extractFields,identity,verifyEvents,brazilDate} from './documental-core.mjs';
+import {DocumentarySession,addDaysISO,allowedFixture,brazilDate,extractFields,extractPdfLines,identity,isoToBrazil,parseSyntheticCase,verifyEvents} from './documental-core.mjs';
 const manifest=JSON.parse(await readFile(new URL('./documental-manifest.json',import.meta.url)));
 const fixture=name=>manifest.files.find(x=>x.name===name);
 function lines(overrides={}){const values={type:'laudo',patient:'Pessoa Sintetica Alfa',birthDate:'12/04/1986',identifier:'SYN-P01',issueDate:'11/11/2026',origin:'Instituicao Ficticia JYXIA',...overrides};const labels={type:'Tipo',patient:'Paciente',birthDate:'Nascimento',identifier:'Identificador',issueDate:'Emissao',origin:'Origem'};return Object.entries(values).filter(([,v])=>v!==null).map(([k,v],i)=>({text:labels[k]+': '+v,page:1,box:[.1,.2+i*.03,.5,.02]}));}
@@ -20,3 +20,33 @@ test('policy changes invalidate old task resolutions while preserving audit',asy
 test('explicit replacement requires both reviews, keeps original and blocks cycles',async()=>{const s=new DocumentarySession(manifest),a=await add(s,'laudo.pdf'),b=await add(s,'laudo-atualizado.pdf',{issueDate:'14/11/2026'});await assert.rejects(s.replace(b.id,a.id));await review(s,a);await review(s,b);await s.replace(b.id,a.id);assert.equal(s.documents.length,2);assert.equal(s.active().length,1);assert.equal(a.supersededBy,b.id);await assert.rejects(s.replace(a.id,b.id));});
 test('export is detached from state and hash chain detects payload changes and order',async()=>{const s=new DocumentarySession(manifest);const d=await add(s,'laudo.pdf');await review(s,d);const exported=s.export();exported.documents[0].name='changed';assert.equal(s.documents[0].name,'laudo.pdf');assert(await verifyEvents(exported.events));exported.events[0].data.identity='changed';assert.equal(await verifyEvents(exported.events),false);assert.equal(await verifyEvents([...s.events].reverse()),false);});
 test('date parser refuses rollover and future dates are flagged',async()=>{assert.equal(brazilDate('30/02/2026'),'');const s=new DocumentarySession(manifest);const d=await add(s,'laudo.pdf',{issueDate:'15/11/2026'});await review(s,d);assert(s.tasks().some(t=>t.id.includes(':future:')));});
+test('date formatting helpers convert ISO dates and offset days safely',()=>{assert.equal(isoToBrazil('1986-04-12'),'12/04/1986');assert.equal(isoToBrazil('2026-02-30'),'');assert.equal(addDaysISO('2026-11-14',2),'2026-11-16');assert.equal(addDaysISO('2026-11-29',2),'2026-12-01');});
+test('synthetic case CSV and JSON fixtures parse, update session case and reject malformed data',async()=>{
+ const csvText=await readFile(new URL('./fixtures/casos-ficticios.csv',import.meta.url),'utf8');
+ const jsonText=await readFile(new URL('./fixtures/casos-ficticios.json',import.meta.url),'utf8');
+ const parsedCsv=parseSyntheticCase(csvText,'text/csv');
+ const parsedJson=parseSyntheticCase(jsonText,'application/json');
+ assert.deepEqual(parsedCsv,parsedJson);
+ assert.equal(parsedCsv.id,'CASO-SYN-001');
+ assert.throws(()=>parseSyntheticCase('id,patient\nCASO,Nome','text/csv'));
+ assert.throws(()=>parseSyntheticCase('{"synthetic":false}','application/json'));
+ const s=new DocumentarySession(manifest);
+ const csvKnown=await allowedFixture(new TextEncoder().encode(csvText),manifest,['text/csv']);
+ const loaded=await s.loadSyntheticCase(csvKnown,csvText);
+ assert.equal(loaded.identifier,'SYN-P01');
+ assert(s.events.some(e=>e.action==='cadastro_importado'&&e.data.identifier==='SYN-P01'));
+});
+test('discard preserves history, rejects short reason and blocks discarded review',async()=>{
+ const s=new DocumentarySession(manifest),d=await add(s,'laudo.pdf');
+ await assert.rejects(s.discard(d.id,'abc'));
+ await s.discard(d.id,'Documento substituído manualmente no teste.');
+ assert.equal(d.status,'discarded');
+ assert.equal(s.active().length,0);
+ await assert.rejects(review(s,d));
+});
+test('extractPdfLines enforces page limit via loadingTask.destroy when available',async()=>{
+ let destroyed=false;
+ const mockDoc={numPages:6,loadingTask:{destroy:async()=>{destroyed=true;}}};
+ await assert.rejects(extractPdfLines(mockDoc,()=>[1,0,0,1,0,0],5),/Limite de cinco páginas/);
+ assert.equal(destroyed,true);
+});
