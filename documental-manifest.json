@@ -93,6 +93,20 @@
       "sha256": "637700e35963770eca22da0bc307c63f83a07e784112ca6cd8487fc5b1c8c383",
       "size": 113,
       "mime": "text/csv"
+    },
+    {
+      "name": "solicitacao-od.pdf",
+      "path": "fixtures/solicitacao-od.pdf",
+      "sha256": "ee664dd19a7fccab9d1e6a057ea6139e45a61cf9e6cb99e1f2e11993cb7d75ff",
+      "size": 2678,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "termo-oe.pdf",
+      "path": "fixtures/termo-oe.pdf",
+      "sha256": "f66938b93e00359345b269ec64146b791c2d0e8a6e518e1adfc10676604a9793",
+      "size": 2887,
+      "mime": "application/pdf"
     }
   ]
 }
