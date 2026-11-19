@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, unquote
 import argparse, json
 ROOT=Path(__file__).resolve().parent
-PUBLIC={'index.html','demo.html','documental.css','documental-core.mjs','documental-ui.mjs','documental-manifest.json','fixtures-jyxia.zip','Projeto_JYXIA_Inteligencia_Documental_v3.docx','vendor/pdf.min.mjs','vendor/pdf.worker.min.mjs','vendor/PDFJS-LICENSE.txt'}
+PUBLIC={'index.html','demo.html','documental.css','documental-core.mjs','documental-ui.mjs','documental-manifest.json','favicon.svg','fixtures-jyxia.zip','Projeto_JYXIA_Inteligencia_Documental_v3.docx','vendor/pdf.min.mjs','vendor/pdf.worker.min.mjs','vendor/PDFJS-LICENSE.txt'}
 PUBLIC.update(f['path'] for f in json.loads((ROOT/'documental-manifest.json').read_text(encoding='utf-8'))['files'])
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*args,**kwargs): super().__init__(*args,directory=str(ROOT),**kwargs)
