@@ -34,9 +34,15 @@ A banca pode usar diretamente a demo HTTPS, sem instalação. Para desenvolvimen
 
 ```sh
 python -m http.server 8000 --bind 127.0.0.1
-node --test test_documental.mjs test_security.cjs test_synthetic_import.cjs
-python -m unittest test_integration.py -v
+node --test test_documental.mjs test_documental_pdfjs.mjs
 python check_publication.py
+```
+
+Testes históricos da versão anterior v2.x (isolados):
+
+```sh
+node --test test_security.cjs test_synthetic_import.cjs
+python -m unittest test_integration.py -v
 ```
 
 Alternativa Docker para a demo documental, sem banco ou senha:

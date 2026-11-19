@@ -12,6 +12,6 @@ Baixe `fixtures-jyxia.zip` ou use “Adicionar cenário”. Todos os nomes, iden
 | Imagem sem texto | Sem OCR; quarentena e reenvio |
 | Data e marca | Janela administrativa e área de assinatura exigem conferência |
 
-Os PDFs contêm texto, não resultados clínicos. A importação aceita somente bytes exatos do catálogo; mudar qualquer campo faz o arquivo ser recusado. Importar cadastro CSV ou JSON confere o único caso fornecido, sem acrescentar pacientes reais. É uma proteção do protótipo público, não um importador institucional.
+Os PDFs contêm texto, não resultados clínicos. A importação aceita somente bytes exatos do catálogo sintético; arquivos pessoais ou alterados são recusados por política da demonstração pública (o que não significa que o arquivo seja malicioso nem substitui quarentena técnica de segurança). Conferir e carregar cadastro CSV ou JSON lê e valida apenas o único caso sintético fornecido, sem acrescentar pacientes reais. É uma proteção do protótipo público, não um importador institucional.
 
 Para uma avaliação futura, criar novo conjunto sintético reservado, com variações reais de layout e gabarito revisado, sem dados pessoais. Os sete cenários atuais são testes funcionais conhecidos; não medem acurácia de OCR, IA ou benefício clínico.
