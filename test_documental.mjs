@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {DocumentarySession,addDaysISO,allowedFixture,brazilDate,csvSafeCell,extractFields,extractPdfLines,identity,isoToBrazil,normalizeLaterality,parseSyntheticCase,verifyEvents} from './documental-core.mjs';
+import {DocumentarySession,addDaysISO,allowedFixture,brazilDate,csvSafeCell,diffDaysISO,extractFields,extractPdfLines,identity,isoToBrazil,normalizeLaterality,parseSyntheticCase,verifyEvents} from './documental-core.mjs';
 const manifest=JSON.parse(await readFile(new URL('./documental-manifest.json',import.meta.url)));
 const fixture=name=>manifest.files.find(x=>x.name===name);
 function lines(overrides={}){const values={type:'laudo',patient:'Pessoa Sintetica Alfa',birthDate:'12/04/1986',identifier:'SYN-P01',issueDate:'11/11/2026',origin:'Instituicao Ficticia JYXIA',...overrides};const labels={type:'Tipo',patient:'Paciente',birthDate:'Nascimento',identifier:'Identificador',issueDate:'Emissao',origin:'Origem'};return Object.entries(values).filter(([,v])=>v!==null).map(([k,v],i)=>({text:labels[k]+': '+v,page:1,box:[.1,.2+i*.03,.5,.02]}));}
@@ -94,4 +94,124 @@ test('buildPendingNotice and exportCsv neutralize spreadsheet formula injection'
  const csv=s.exportCsv();
  assert(csv.includes('"\'=IMPORTXML(""http://example.invalid"")"'));
  assert(s.buildPendingNotice().includes('Aviso: uso exclusivamente administrativo'));
+});
+
+test('Etapa 2.1 identity re-evaluates unreviewed docs on case change and quarantines reviewed caseId mismatch',async()=>{
+ const s=new DocumentarySession(manifest);
+ const unrev=await add(s,'laudo.pdf',{patient:'Outra Pessoa Sintetica',birthDate:'02/02/1980',identifier:'SYN-P88'});
+ assert.equal(unrev.identity,'conflict');
+ assert.equal(unrev.caseId,null);
+ const docMatch=await add(s,'solicitacao.pdf');
+ await review(s,docMatch);
+ assert.equal(docMatch.caseId,manifest.case.id);
+ const jsonObj=JSON.parse(await readFile(new URL('./fixtures/casos-ficticios.json',import.meta.url),'utf8'));
+ const altPayload=JSON.stringify({...jsonObj,cases:[{...jsonObj.cases[0],id:'CASO-SYN-OUTRO',identifier:'SYN-P88',patient:'Outra Pessoa Sintetica',birthDate:'1980-02-02'}]});
+ await s.loadSyntheticCase(fixture('casos-ficticios.json'),altPayload);
+ assert.equal(unrev.identity,'suggested');
+ assert.equal(s.consistencyAxes().find(a=>a.id==='identity').status,'conflito');
+ assert.equal(s.readinessState().code,'conflito');
+});
+test('Etapa 2.1 procedure normalization, Codigo comparison, incomplete abstention and intra-doc conflict',async()=>{
+ // Punctuation and accent variations should NOT trigger false positive conflict
+ const sOk=new DocumentarySession(manifest);
+ const aOk=(await sOk.ingest(fixture('solicitacao.pdf'),[...lines({type:'solicitacao'}),{text:'Procedimento: Facoemulsificação.',page:1,box:[.1,.5,.4,.02]},{text:'Codigo: 04.05.05.011-9',page:1,box:[.1,.54,.4,.02]}])).document;
+ const bOk=(await sOk.ingest(fixture('laudo.pdf'),[...lines({type:'laudo'}),{text:'Procedimento: Facoemulsificacao',page:1,box:[.1,.5,.4,.02]},{text:'Codigo: 04.05.05.011-9',page:1,box:[.1,.54,.4,.02]}])).document;
+ await review(sOk,aOk);await review(sOk,bOk);
+ assert.equal(sOk.consistencyAxes().find(a=>a.id==='procedure').status,'ok');
+
+ // Diverging Codigo across docs -> conflict
+ const sCode=new DocumentarySession(manifest);
+ await sCode.ingest(fixture('solicitacao.pdf'),[...lines({type:'solicitacao'}),{text:'Procedimento: Cirurgia X',page:1,box:[.1,.5,.4,.02]},{text:'Codigo: 1111',page:1,box:[.1,.54,.4,.02]}]);
+ await sCode.ingest(fixture('laudo.pdf'),[...lines({type:'laudo'}),{text:'Procedimento: Cirurgia X',page:1,box:[.1,.5,.4,.02]},{text:'Codigo: 2222',page:1,box:[.1,.54,.4,.02]}]);
+ const codeAxis=sCode.consistencyAxes().find(a=>a.id==='procedure');
+ assert.equal(codeAxis.status,'conflito');
+ assert.equal(codeAxis.blocking,true);
+
+ // Incomplete generic procedure -> abstencao without clinical inference
+ const sInc=new DocumentarySession(manifest);
+ await sInc.ingest(fixture('solicitacao.pdf'),[...lines({type:'solicitacao'}),{text:'Procedimento: A definir.',page:1,box:[.1,.5,.4,.02]}]);
+ const incAxis=sInc.consistencyAxes().find(a=>a.id==='procedure');
+ assert.equal(incAxis.status,'abstencao');
+ assert.equal(incAxis.blocking,false);
+
+ // Contradictory multiple Procedimento lines inside ONE PDF -> conflito
+ const sIntra=new DocumentarySession(manifest);
+ await sIntra.ingest(fixture('solicitacao.pdf'),[...lines({type:'solicitacao'}),{text:'Procedimento: Cirurgia A',page:1,box:[.1,.5,.4,.02]},{text:'Procedimento: Cirurgia B',page:1,box:[.1,.54,.4,.02]}]);
+ assert.equal(sIntra.consistencyAxes().find(a=>a.id==='procedure').status,'conflito');
+});
+test('Etapa 2.1 laterality OD/OE/NA matrix, intra-doc contradiction and blocking abstention',async()=>{
+ assert.equal(normalizeLaterality('Nao aplicavel ao procedimento'),'nao_aplicavel');
+
+ // Contradictory OD + OE within same document -> conflito & blocking
+ const sIntra=new DocumentarySession(manifest);
+ await sIntra.ingest(fixture('solicitacao.pdf'),[...lines({type:'solicitacao'}),{text:'Lateralidade: Olho Direito (OD)',page:1,box:[.1,.6,.4,.02]},{text:'Lateralidade: Olho Esquerdo (OE)',page:1,box:[.1,.63,.4,.02]}]);
+ const intraLat=sIntra.consistencyAxes().find(a=>a.id==='laterality');
+ assert.equal(intraLat.status,'conflito');
+ assert.equal(intraLat.blocking,true);
+ assert.equal(sIntra.readinessState().code,'conflito');
+
+ // Directional OD vs Nao aplicavel -> conflito
+ const sNa=new DocumentarySession(manifest);
+ await sNa.ingest(fixture('solicitacao.pdf'),[...lines({type:'solicitacao'}),{text:'Lateralidade: Olho Direito (OD)',page:1,box:[.1,.6,.4,.02]}]);
+ await sNa.ingest(fixture('termo.pdf'),[...lines({type:'termo'}),{text:'Lateralidade: Nao aplicavel',page:1,box:[.1,.6,.4,.02]}]);
+ assert.equal(sNa.consistencyAxes().find(a=>a.id==='laterality').status,'conflito');
+
+ // Complete 4 docs with unrecognized laterality -> blocking abstention prevents 'conferida'
+ const sBlk=new DocumentarySession(manifest);
+ for(const [name,type] of [['solicitacao.pdf','solicitacao'],['laudo.pdf','laudo'],['avaliacao.pdf','avaliacao'],['termo.pdf','termo']]){
+  const extra=type==='solicitacao'?[{text:'Procedimento: Cirurgia Ficticia',page:1,box:[.1,.55,.4,.02]},{text:'Lateralidade: lado duvidoso xpto',page:1,box:[.1,.6,.4,.02]}]:[{text:'Procedimento: Cirurgia Ficticia',page:1,box:[.1,.55,.4,.02]}];
+  const d=(await sBlk.ingest(fixture(name),[...lines({type}),...extra])).document;
+  await review(sBlk,d,{signature:type==='termo'?'present':'unknown'});
+ }
+ const blkLat=sBlk.consistencyAxes().find(a=>a.id==='laterality');
+ assert.equal(blkLat.status,'abstencao');
+ assert.equal(blkLat.blocking,true);
+ assert.equal(sBlk.readinessState().code,'conflito');
+});
+test('Etapa 2.1 UTC diffDaysISO, missing procedureDate abstention, 3-doc replacement chain & signature wording',async()=>{
+ assert.equal(diffDaysISO('2024-02-28','2024-03-01'),2);
+ assert.equal(diffDaysISO('2026-11-11','2026-11-11'),0);
+ assert.equal(diffDaysISO('invalid','2026-11-11'),null);
+
+ const s=new DocumentarySession({...manifest,case:{...manifest.case,procedureDate:''}});
+ const d=await add(s,'laudo.pdf',{issueDate:'01/09/2026'});
+ await review(s,d);
+ assert(s.tasks().some(t=>t.id.includes(':window-unknown:')));
+ const tempAxis=s.consistencyAxes().find(a=>a.id==='temporality');
+ assert.equal(tempAxis.status,'atencao');
+ assert(tempAxis.detail.includes('regra do exemplo não é validade universal'));
+
+ // 3-document replacement chain A -> B -> C preserves history and blocks cycles
+ const sChain=new DocumentarySession(manifest);
+ const a=await add(sChain,'laudo.pdf',{issueDate:'11/11/2026'});
+ const b=await add(sChain,'laudo-atualizado.pdf',{issueDate:'12/11/2026'});
+ const c=await add(sChain,'laudo-antigo.pdf',{issueDate:'13/11/2026'});
+ await review(sChain,a);await review(sChain,b);await review(sChain,c);
+ await sChain.replace(b.id,a.id);
+ await sChain.replace(c.id,b.id);
+ assert.equal(sChain.active().length,1);
+ assert.equal(sChain.active()[0].id,c.id);
+ await assert.rejects(sChain.replace(a.id,c.id));
+
+ // Signature cue never claims cryptographic validity
+ const sig=extractFields([...lines({type:'termo'}),{text:'MARCA FICTICIA',page:1,box:[.1,.7,.3,.02]}]);
+ assert(sig.fields.signatureCue.value.includes('não autentica'));
+ assert(!/\bv[aá]lida\b/i.test(sig.fields.signatureCue.value));
+ const sigDup=extractFields([...lines({type:'termo'}),{text:'MARCA FICTICIA',page:1,box:[.1,.7,.3,.02]},{text:'MARCA FICTICIA',page:1,box:[.1,.8,.3,.02]}]);
+ assert.equal(sigDup.fields.signatureCue.uncertain,true);
+});
+test('Etapa 2.1 CSV formula hardening (spaces/NBSP/tabs/CRLF/null) and detached JSON axes/readiness',async()=>{
+ assert.equal(csvSafeCell('  =CMD()'),'"\'  =CMD()"');
+ assert.equal(csvSafeCell('\u00A0+1+1'),'"\'\u00A0+1+1"');
+ assert.equal(csvSafeCell('\t=HYPERLINK("x")'),'"\'\t=HYPERLINK(""x"")"');
+ assert.equal(csvSafeCell('linha1\r\nlinha2\u0000ação'),'"linha1 linha2ação"');
+ const s=new DocumentarySession(manifest),d=await add(s,'laudo.pdf');
+ await review(s,d,{note:'Ação, "aspas" & =FORMULA'});
+ const csv=s.exportCsv();
+ assert(csv.includes('Ação, ""aspas"" & =FORMULA'));
+ const exported=s.export();
+ exported.consistencyAxes[0].status='mutated';
+ exported.readiness.code='mutated';
+ assert.notEqual(s.consistencyAxes()[0].status,'mutated');
+ assert.notEqual(s.readinessState().code,'mutated');
 });

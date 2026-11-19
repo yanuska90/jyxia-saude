@@ -415,8 +415,12 @@ async function main() {
     assert(latE2e.caption.includes('Lateralidade: Olho Esquerdo (OE)'));
     assert(latE2e.notice.includes('Divergência de lateralidade'));
     assert(latE2e.readiness.includes('Divergência bloqueante'));
-    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false);
+    for (const vw of [320, 390, 768]) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: vw, height: 844, deviceScaleFactor: 1, mobile: vw < 768 });
+      assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false, `Overflow horizontal em ${vw}px`);
+    }
+    const minSummaryH = await cdp.eval(`Math.min(...[...document.querySelectorAll('summary')].map(el => el.getBoundingClientRect().height))`);
+    assert(minSummaryH >= 44, `Altura mínima de touch target <summary> esperada >=44px, obtida ${minSummaryH}`);
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
 
     await cdp.eval(`document.getElementById('scenario').value = 'janela'; document.getElementById('load').click();`);
