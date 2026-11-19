@@ -13,9 +13,10 @@ const labels={
  type:'Tipo',
  subfamily:'Subfamília',
  procedure:'Procedimento informado',
+ procedureCode:'Código documental',
  laterality:'Lateralidade informada',
  origin:'Origem informada',
- signatureCue:'Marca visual na área de assinatura'
+ signatureCue:'Marca gráfica aparente (não autentica)'
 };
 const identityLabels={suggested:'Identidade sugerida · conferir',manual:'Sem identificador · conferir manualmente',conflict:'Identidade divergente · quarentena',insufficient:'Identidade insuficiente · quarentena',unreadable:'Sem extração · quarentena'};
 const actionLabels={documento_recebido:'Documento recebido',duplicado_recusado:'Arquivo idêntico recusado',revisao_humana:'Revisão humana registrada',documento_descartado:'Documento retirado do fluxo',substituicao_confirmada:'Substituição confirmada',regra_administrativa_alterada:'Regra administrativa alterada',pendencia_atribuida:'Responsável e prazo atribuídos',pendencia_resolvida:'Resolução justificada',cadastro_importado:'Cadastro fictício importado'};
@@ -74,10 +75,11 @@ async function renderReview(){
  for(const [key,label] of Object.entries(labels)){
   const f=d.fields[key]||{value:'',source:null,uncertain:false};
   if(key==='signatureCue'&&d.kind!=='termo'&&!f.value&&!f.uncertain)continue;
+  if(key==='procedureCode'&&!f.value&&!f.uncertain)continue;
   const row=el('div',undefined,'field'),top=el('div',undefined,'field-top');
   top.append(el('small',label));
   if(f.source){const b=el('button','Ver fonte');b.type='button';b.setAttribute('aria-label','Ver fonte de '+label);b.addEventListener('click',()=>run(async()=>{await showSource(d,f);message('Trecho de '+label+' destacado na página original.');},false));top.append(b);}
-  const emptyText=['subfamily','procedure','laterality'].includes(key)?'Não informado neste documento':key==='signatureCue'?'Marca visual não localizada (conferência manual necessária)':'Não localizado';
+  const emptyText=['subfamily','procedure','procedureCode','laterality'].includes(key)?'Não informado neste documento':key==='signatureCue'?'Marca gráfica não localizada (conferência manual necessária)':'Não localizado';
   row.append(top,el('strong',f.uncertain?'Ambíguo · múltiplos valores no documento':(f.value||emptyText)));
   $('fields').append(row);
  }
@@ -127,7 +129,7 @@ $('replace').addEventListener('click',()=>run(async()=>{await session.replace(se
 $('discard').addEventListener('click',()=>run(async()=>{await session.discard(selected,$('discard-note').value);message('Documento retirado do fluxo ativo e preservado no histórico.');}));
 $('verify').addEventListener('click',()=>run(async()=>{const valid=await verifyEvents(session.events);message(valid?'Sequência de '+session.events.length+' eventos íntegra nesta sessão. Isso não autentica autoria nem impede reconstrução do histórico.':'Sequência divergente.',!valid);}));
 $('export').addEventListener('click',()=>run(async()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(session.export(),null,2)],{type:'application/json'})),a=el('a');a.href=url;a.download='JYXIA-sessao-ficticia-v3.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);message('Exportação JSON gerada com fontes, consistência, revisões, regras, pendências e eventos da sessão.');}));
-$('export-csv')?.addEventListener('click',()=>run(async()=>{const url=URL.createObjectURL(new Blob([session.exportCsv()],{type:'text/csv;charset=utf-8'})),a=el('a');a.href=url;a.download='JYXIA-conferencia-ficticia-v3.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);message('Exportação CSV administrativa gerada para a sessão fictícia.');}));
+$('export-csv')?.addEventListener('click',()=>run(async()=>{const url=URL.createObjectURL(new Blob(['\uFEFF'+session.exportCsv()],{type:'text/csv;charset=utf-8'})),a=el('a');a.href=url;a.download='JYXIA-conferencia-ficticia-v3.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);message('Exportação CSV administrativa gerada para a sessão fictícia.');}));
 $('copy-notice')?.addEventListener('click',()=>run(async()=>{const text=session.buildPendingNotice();try{await navigator.clipboard?.writeText(text);message('Resumo administrativo copiado para a área de transferência.');}catch{message('Resumo administrativo pronto no painel abaixo para cópia manual.');}},false));
 $('reset').addEventListener('click',()=>run(async()=>{if(!$('reset-confirm').checked)throw Error('Marque a confirmação antes de limpar a sessão fictícia.');for(const s of sources.values()){if(s.doc)await destroyPdf(s.doc);if(s.url)URL.revokeObjectURL(s.url);}sources.clear();session=new DocumentarySession(manifest);selected=null;renderedDocKey='';$('reset-confirm').checked=false;message('Sessão fictícia limpa. Os registros locais da versão histórica não foram alterados.');}));
 await refresh();message('Pronto. Escolha um cenário fictício ou anexe os exemplos fornecidos.');

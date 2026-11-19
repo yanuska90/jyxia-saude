@@ -11,21 +11,25 @@ export const SCENARIOS={
  lateralidade:{label:'8 · Lateralidade divergente (OD × OE)',files:['solicitacao-od.pdf','termo-oe.pdf']}
 };
 const normalize=x=>String(x??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
+const normalizeComparable=x=>normalize(x).replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+const INCOMPLETE_PROC=new Set(['','a definir','nao informado','indefinido','em avaliacao','pendente','outro','cirurgia','procedimento']);
 export function validISO(s){if(!/^\d{4}-\d{2}-\d{2}$/.test(s))return false;const d=new Date(s+'T00:00:00Z');return Number.isFinite(+d)&&d.toISOString().slice(0,10)===s;}
 export function brazilDate(s){const m=String(s??'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);if(!m)return '';const v=`${m[3]}-${m[2]}-${m[1]}`;return validISO(v)?v:'';}
 export function isoToBrazil(s){if(!validISO(s))return '';const [y,m,d]=s.split('-');return `${d}/${m}/${y}`;}
 export function addDaysISO(s,days){if(!validISO(s)||!Number.isInteger(days))return '';const d=new Date(s+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
+export function diffDaysISO(fromISO,toISO){if(!validISO(fromISO)||!validISO(toISO))return null;const [fy,fm,fd]=fromISO.split('-').map(Number),[ty,tm,td]=toISO.split('-').map(Number);return Math.round((Date.UTC(ty,tm-1,td)-Date.UTC(fy,fm-1,fd))/86400000);}
 export function normalizeLaterality(text){
  const n=normalize(text);
  if(!n)return '';
- if(n==='nao aplicavel'||n==='nao se aplica'||n==='n/a'||n==='na')return 'nao_aplicavel';
+ const rawClean=String(text??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
  const hasRight=/\b(od|direit[oa]|olho direito|lado direito)\b/.test(n);
  const hasLeft=/\b(oe|esquerd[oa]|olho esquerdo|lado esquerdo)\b/.test(n);
- const hasBoth=/\b(ao|bilateral|ambos|ambos os olhos)\b/.test(n);
+ const hasBoth=/\b(bilateral(mente)?|ambos(\s+os\s+olhos)?|ambas)\b/.test(n)||n==='ao'||/(?:^|[\s(/])(AO|A\.O\.)(?:$|[\s)./,;])/.test(rawClean);
  if((hasRight&&hasLeft)||(hasBoth&&(hasRight||hasLeft)))return 'abstencao';
  if(hasBoth)return 'bilateral';
  if(hasRight)return 'direito';
  if(hasLeft)return 'esquerdo';
+ if(n==='na'||/\b(nao aplicavel|nao se aplica|sem lateralidade aplicavel|n\/a)\b/.test(n))return 'nao_aplicavel';
  return 'abstencao';
 }
 export function parseSyntheticCase(text,mime){
@@ -72,23 +76,28 @@ export async function allowedFixture(bytes,manifest,mimes=['application/pdf','im
  return {...f};
 }
 export function csvSafeCell(value){
- const raw=String(value??'').replace(/\r?\n/g,' ');
- const safe=/^[=+\-@\t\r]/.test(raw)?"'"+raw:raw;
+ const raw=String(value??'').replace(/[\r\n]+/g,' ').replace(/\u0000/g,'');
+ const safe=/^[\t]/.test(raw)||/^[\s\u00A0]*[=+\-@]/.test(raw)?"'"+raw:raw;
  return '"'+safe.replace(/"/g,'""')+'"';
 }
 export function extractFields(lines){
- const defs={patient:'Paciente:',birthDate:'Nascimento:',identifier:'Identificador:',issueDate:'Emissao:',type:'Tipo:',origin:'Origem:',subfamily:'Subfamilia:',procedure:'Procedimento:',laterality:'Lateralidade:'};
+ const defs={patient:'Paciente:',birthDate:'Nascimento:',identifier:'Identificador:',issueDate:'Emissao:',type:'Tipo:',origin:'Origem:',subfamily:'Subfamilia:',procedure:'Procedimento:',procedureCode:'Codigo:',laterality:'Lateralidade:'};
  const fields={};
  for(const [key,prefix] of Object.entries(defs)){
   const matches=lines.filter(x=>normalize(x.text).startsWith(normalize(prefix)));
-  if(matches.length!==1){fields[key]={value:'',source:null,uncertain:matches.length>1};continue;}
+  if(matches.length>1){
+   const candidates=matches.map(m=>m.text.slice(m.text.indexOf(':')+1).trim()).filter(Boolean);
+   fields[key]={value:'',source:null,uncertain:true,candidates};
+   continue;
+  }
+  if(matches.length===0){fields[key]={value:'',source:null,uncertain:false};continue;}
   const line=matches[0];const value=line.text.slice(line.text.indexOf(':')+1).trim();
   fields[key]={value,source:{page:line.page,box:[...line.box],text:line.text},uncertain:false};
  }
  if(fields.laterality.value)fields.laterality.normalized=normalizeLaterality(fields.laterality.value);
  const sigMatches=lines.filter(x=>normalize(x.text)==='marca ficticia');
  fields.signatureCue=sigMatches.length===1
-  ?{value:'Marca visual presente (nao autentica)',source:{page:sigMatches[0].page,box:[...sigMatches[0].box],text:sigMatches[0].text},uncertain:false}
+  ?{value:'Marca visual presente (não autentica assinatura)',source:{page:sigMatches[0].page,box:[...sigMatches[0].box],text:sigMatches[0].text},uncertain:false}
   :{value:'',source:null,uncertain:sigMatches.length>1};
  const type=normalize(fields.type.value);
  return {fields,kind:Object.hasOwn(KINDS,type)&&type!=='desconhecido'?type:'desconhecido',readable:lines.some(x=>x.text.trim().length>4)};
@@ -138,21 +147,33 @@ export class DocumentarySession{
   newer.replaces=oldId;older.supersededBy=newId;await this.event('substituicao_confirmada',{previous:oldId,current:newId});
  }
  async configure(days){if(!Number.isInteger(days)||days<1||days>365)throw Error('A janela deve ter de 1 a 365 dias.');this.policy={version:this.policy.version+1,maxAgeDays:days};await this.event('regra_administrativa_alterada',{policy:this.policy});}
- async loadSyntheticCase(known,text){const file=this.manifest.files.find(x=>x.sha256===known?.sha256&&['application/json','text/csv'].includes(x.mime));if(!file)throw Error('Cadastro fora do conjunto sintético autorizado.');const parsed=parseSyntheticCase(text,file.mime);this.case=parsed;await this.event('cadastro_importado',{name:file.name,hash:file.sha256,caseId:this.case.id,identifier:this.case.identifier});return structuredClone(this.case);}
+ async loadSyntheticCase(known,text){
+  const file=this.manifest.files.find(x=>x.sha256===known?.sha256&&['application/json','text/csv'].includes(x.mime));
+  if(!file)throw Error('Cadastro fora do conjunto sintético autorizado.');
+  const parsed=parseSyntheticCase(text,file.mime);
+  this.case=parsed;
+  for(const d of this.documents)if(!d.review&&d.status!=='discarded')d.identity=identity({fields:d.fields,readable:d.readable},this.case);
+  await this.event('cadastro_importado',{name:file.name,hash:file.sha256,caseId:this.case.id,identifier:this.case.identifier});
+  return structuredClone(this.case);
+ }
  active(){return this.documents.filter(d=>d.status!=='discarded'&&!d.supersededBy);}
  _coreTasks(){
   const tasks=[];const active=this.active();const push=(id,title,docId,manual=false)=>{const key=`${id}:v${this.policy.version}`;tasks.push({id:key,title,docId,manual,resolution:this.resolutions[key]||null,assignment:this.assignments[key]||null});};
-  for(const kind of ['solicitacao','laudo','avaliacao','termo'])if(!active.some(d=>d.kind===kind&&d.review))push('missing:'+kind,'Pendente: conferir '+KINDS[kind].toLowerCase(),null);
+  for(const kind of ['solicitacao','laudo','avaliacao','termo'])if(!active.some(d=>d.kind===kind&&d.review&&(!d.caseId||d.caseId===this.case.id)))push('missing:'+kind,'Pendente: conferir '+KINDS[kind].toLowerCase(),null);
   for(const d of active){
    if(!d.readable){push(d.id+':unreadable','Imagem sem extração disponível; requer reenvio legível',d.id);continue;}
-   if(['conflict','insufficient'].includes(d.identity)){push(d.id+':identity','Identidade divergente ou insuficiente; documento em quarentena',d.id);continue;}
+   if(['conflict','insufficient'].includes(d.identity)||(d.caseId&&d.caseId!==this.case.id)){push(d.id+':identity','Identidade divergente ou insuficiente; documento em quarentena',d.id);continue;}
    if(d.kind==='desconhecido'){push(d.id+':unknown','Tipo de documento não reconhecido',d.id);continue;}
    if(!d.review)push(d.id+':review',d.identity==='manual'?'Conferir identificação manualmente e revisar campos':'Conferir identidade e campos extraídos',d.id);
    const date=d.review?d.review.issueDate:brazilDate(d.fields.issueDate.value);
    if(!date)push(d.id+':date-missing','Data de emissão ausente ou inválida',d.id,true);
    else if(date>this.manifest.referenceDate)push(d.id+':future','Data de emissão posterior à data de referência do exemplo',d.id,true);
-   else if(d.kind==='laudo'&&(Date.parse(this.case.procedureDate)-Date.parse(date))/86400000>this.policy.maxAgeDays)push(d.id+':window','Laudo fora da janela administrativa de '+this.policy.maxAgeDays+' dias',d.id,true);
-   if(d.kind==='termo'&&(!d.review||d.review.signature!=='present'))push(d.id+':signature','Marca na área de assinatura requer conferência visual',d.id,true);
+   else if(d.kind==='laudo'){
+    const ageDays=diffDaysISO(date,this.case.procedureDate);
+    if(ageDays===null)push(d.id+':window-unknown','Temporalidade indeterminada: data do procedimento ausente ou inválida',d.id,true);
+    else if(ageDays>this.policy.maxAgeDays)push(d.id+':window','Emissão anterior à janela administrativa configurada ('+this.policy.maxAgeDays+' dias no exemplo)',d.id,true);
+   }
+   if(d.kind==='termo'&&(!d.review||d.review.signature!=='present'))push(d.id+':signature','Marca gráfica na área de assinatura requer conferência visual (não autentica)',d.id,true);
   }
   return tasks;
  }
@@ -168,46 +189,60 @@ export class DocumentarySession{
    ];
   }
   // Eixo 1 — Identidade
+  const caseMismatch=active.filter(d=>d.caseId&&d.caseId!==this.case.id);
   const conflicts=active.filter(d=>d.identity==='conflict');
   const abstainsId=active.filter(d=>d.identity==='unreadable'||d.identity==='insufficient');
   const unreviewedId=active.filter(d=>['suggested','manual'].includes(d.identity)&&!d.review);
   let identityAxis;
-  if(conflicts.length)identityAxis={id:'identity',label:'1. Identidade cadastral',status:'conflito',blocking:true,detail:'Divergência de identidade em quarentena ('+conflicts.map(d=>d.name).join(', ')+'). Vínculo bloqueado.'};
+  if(conflicts.length||caseMismatch.length)identityAxis={id:'identity',label:'1. Identidade cadastral',status:'conflito',blocking:true,detail:'Divergência de identidade em quarentena ('+[...new Set([...conflicts,...caseMismatch].map(d=>d.name))].join(', ')+'). Vínculo automático bloqueado.'};
   else if(abstainsId.length)identityAxis={id:'identity',label:'1. Identidade cadastral',status:'abstencao',blocking:true,detail:'Abstenção obrigatória por ilegibidade ou dados insuficientes ('+abstainsId.map(d=>d.name).join(', ')+').'};
   else if(unreviewedId.length)identityAxis={id:'identity',label:'1. Identidade cadastral',status:'pendente',blocking:false,detail:'Aguardando confirmação humana em '+unreviewedId.length+' documento(s).'};
-  else identityAxis={id:'identity',label:'1. Identidade cadastral',status:'ok',blocking:false,detail:'Nenhuma divergência identificada nos documentos revisados para '+this.case.patient+'.'};
+  else identityAxis={id:'identity',label:'1. Identidade cadastral',status:'ok',blocking:false,detail:'Nenhuma divergência cadastral identificada nos documentos revisados para '+this.case.patient+'.'};
 
-  // Eixo 2 — Procedimento
+  // Eixo 2 — Procedimento e código documental
   const procDocs=active.filter(d=>d.readable&&d.fields.procedure);
-  const procUncertain=procDocs.filter(d=>d.fields.procedure.uncertain);
-  const procEntries=procDocs.filter(d=>d.fields.procedure.value?.trim()).map(d=>({doc:d.name,raw:d.fields.procedure.value.trim(),norm:normalize(d.fields.procedure.value)}));
-  const procUnique=[...new Map(procEntries.map(x=>[x.norm,x])).values()];
+  const procUncertain=procDocs.filter(d=>d.fields.procedure.uncertain||d.fields.procedureCode?.uncertain);
+  const procEntries=procDocs.filter(d=>d.fields.procedure.value?.trim()).map(d=>({doc:d.name,raw:d.fields.procedure.value.trim(),norm:normalizeComparable(d.fields.procedure.value)}));
+  const incompleteProcs=procEntries.filter(x=>x.norm.length<3||INCOMPLETE_PROC.has(x.norm));
+  const validProcEntries=procEntries.filter(x=>x.norm.length>=3&&!INCOMPLETE_PROC.has(x.norm));
+  const procUnique=[...new Map(validProcEntries.map(x=>[x.norm,x])).values()];
+  const codeEntries=procDocs.filter(d=>d.fields.procedureCode?.value?.trim()).map(d=>({doc:d.name,raw:d.fields.procedureCode.value.trim(),norm:normalizeComparable(d.fields.procedureCode.value)}));
+  const codeUnique=[...new Map(codeEntries.map(x=>[x.norm,x])).values()];
   let procedureAxis;
-  if(procUncertain.length)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'conflito',blocking:true,detail:'Múltiplos valores de procedimento no mesmo documento ('+procUncertain.map(d=>d.name).join(', ')+'). Requer revisão humana.'};
-  else if(procUnique.length>1)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'conflito',blocking:true,detail:'Divergência de procedimento entre documentos ativos: '+procEntries.map(e=>`${e.doc} (${e.raw})`).join(' × ')+'.'};
-  else if(procUnique.length===1)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'ok',blocking:false,detail:'Texto compatível nos documentos informados: '+procUnique[0].raw+'.'};
-  else procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'abstencao',blocking:false,detail:'Informação não localizada nos campos extraídos; revisão humana requerida (sem inferência clínica).'};
+  if(procUncertain.length)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'conflito',blocking:true,detail:'Múltiplos valores de procedimento ou código no mesmo documento ('+procUncertain.map(d=>d.name).join(', ')+'). Requer revisão humana.'};
+  else if(procUnique.length>1)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'conflito',blocking:true,detail:'Divergência textual de procedimento entre documentos ativos: '+validProcEntries.map(e=>`${e.doc} (${e.raw})`).join(' × ')+'. Sem julgamento clínico; requer conferência humana.'};
+  else if(codeUnique.length>1)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'conflito',blocking:true,detail:'Divergência de código documental entre documentos ativos: '+codeEntries.map(e=>`${e.doc} (${e.raw})`).join(' × ')+'. Requer conferência humana.'};
+  else if(incompleteProcs.length&&!procUnique.length)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'abstencao',blocking:false,detail:'Descrição de procedimento incompleta ou genérica ('+incompleteProcs.map(e=>e.raw).join(', ')+'); abstenção sem inferência clínica.'};
+  else if(procUnique.length===1)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'ok',blocking:false,detail:'Texto documental compatível nos campos extraídos: '+procUnique[0].raw+(codeUnique.length===1?' (código '+codeUnique[0].raw+')':'')+'.'};
+  else if(codeUnique.length===1)procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'ok',blocking:false,detail:'Código documental compatível: '+codeUnique[0].raw+'.'};
+  else procedureAxis={id:'procedure',label:'2. Procedimento informado',status:'abstencao',blocking:false,detail:'Informação de procedimento não localizada nos campos extraídos; revisão humana requerida (sem inferência clínica).'};
 
   // Eixo 3 — Lateralidade
   const latDocs=active.filter(d=>d.readable&&d.fields.laterality);
-  const latUncertain=latDocs.filter(d=>d.fields.laterality.uncertain||(d.fields.laterality.value?.trim()&&normalizeLaterality(d.fields.laterality.value)==='abstencao'));
+  const latUncertain=latDocs.filter(d=>d.fields.laterality.uncertain);
+  const latUncertainConflict=latUncertain.filter(d=>{
+   const codes=(d.fields.laterality.candidates||[]).map(normalizeLaterality).filter(Boolean);
+   return new Set(codes).size>1||codes.includes('abstencao');
+  });
+  const latBadText=latDocs.filter(d=>!d.fields.laterality.uncertain&&d.fields.laterality.value?.trim()&&normalizeLaterality(d.fields.laterality.value)==='abstencao');
   const latEntries=latDocs.filter(d=>d.fields.laterality.value?.trim()).map(d=>({doc:d.name,raw:d.fields.laterality.value.trim(),code:normalizeLaterality(d.fields.laterality.value)}));
   const latDirs=latEntries.filter(x=>['direito','esquerdo','bilateral'].includes(x.code));
   const latDirCodes=[...new Set(latDirs.map(x=>x.code))];
   const latNa=latEntries.filter(x=>x.code==='nao_aplicavel');
   let lateralityAxis;
-  if(latUncertain.length)lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'abstencao',blocking:true,detail:'Lateralidade ambígua ou não reconhecida em '+latUncertain.map(d=>d.name).join(', ')+'. Requer revisão humana.'};
+  if(latUncertainConflict.length)lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'conflito',blocking:true,detail:'Lateralidade contraditória ou ambígua no mesmo documento ('+latUncertainConflict.map(d=>d.name+': '+(d.fields.laterality.candidates||[]).join(' × ')).join('; ')+'). Requer revisão humana.'};
+  else if(latUncertain.length||latBadText.length)lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'abstencao',blocking:true,detail:'Lateralidade ambígua ou não reconhecida em '+[...latUncertain,...latBadText].map(d=>d.name).join(', ')+'. Requer conferência humana.'};
   else if(latDirCodes.length>1||(latDirs.length>0&&latNa.length>0))lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'conflito',blocking:true,detail:'Divergência de lateralidade entre documentos ativos: '+latEntries.map(e=>`${e.doc} (${e.raw})`).join(' × ')+'. Abstenção automática; revisão humana obrigatória.'};
   else if(latDirCodes.length===1)lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'ok',blocking:false,detail:'Lateralidade compatível nos documentos informados: '+latDirs[0].raw+'.'};
   else if(latNa.length>0)lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'nao_aplicavel',blocking:false,detail:'Lateralidade declarada como não aplicável nos documentos.'};
   else lateralityAxis={id:'laterality',label:'3. Lateralidade (quando aplicável)',status:'abstencao',blocking:false,detail:'Lateralidade não informada nos documentos; conferir quando aplicável ao procedimento.'};
 
   // Eixo 4 — Temporalidade, validade e versão
-  const openTemp=baseTasks.filter(t=>!t.resolution&&(t.id.includes(':window:')||t.id.includes(':future:')||t.id.includes(':date-missing:')||t.id.includes(':signature:')||t.id.startsWith('missing:')||t.id.includes(':review:')));
+  const openTemp=baseTasks.filter(t=>!t.resolution&&(t.id.includes(':window:')||t.id.includes(':window-unknown:')||t.id.includes(':future:')||t.id.includes(':date-missing:')||t.id.includes(':signature:')||t.id.startsWith('missing:')||t.id.includes(':review:')));
   const replacedCount=this.documents.filter(d=>d.supersededBy).length;
   let temporalityAxis;
-  if(openTemp.length)temporalityAxis={id:'temporality',label:'4. Temporalidade e versões',status:'atencao',blocking:false,detail:`${openTemp.length} item(ns) documental(is) ou temporal(is) aguardando conferência/resolução (${replacedCount} substituição(ões) preservada(s)).`};
-  else temporalityAxis={id:'temporality',label:'4. Temporalidade e versões',status:'ok',blocking:false,detail:`Datas, janela de ${this.policy.maxAgeDays} dias e ${replacedCount} substituição(ões) conferidas segundo as regras executadas.`};
+  if(openTemp.length)temporalityAxis={id:'temporality',label:'4. Temporalidade e versões',status:'atencao',blocking:false,detail:`${openTemp.length} item(ns) documental(is) ou temporal(is) aguardando conferência/resolução (${replacedCount} substituição(ões) preservada(s); regra do exemplo não é validade universal).`};
+  else temporalityAxis={id:'temporality',label:'4. Temporalidade e versões',status:'ok',blocking:false,detail:`Datas, regra administrativa do exemplo (${this.policy.maxAgeDays} dias) e ${replacedCount} substituição(ões) conferidas sem pendências abertas.`};
 
   return [identityAxis,procedureAxis,lateralityAxis,temporalityAxis];
  }
@@ -227,9 +262,9 @@ export class DocumentarySession{
  readinessState(){
   const active=this.active(),axes=this.consistencyAxes(),s=this.summary(),tasks=this.tasks();
   if(!this.documents.length)return {code:'aguardando',label:'Aguardando documentos',administrativeOnly:true};
-  if(axes.some(a=>a.status==='conflito')||s.quarantine>0)return {code:'conflito',label:s.quarantine?'Documento em quarentena · revisão obrigatória':'Divergência bloqueante · revisão obrigatória',administrativeOnly:true};
+  if(axes.some(a=>a.status==='conflito'||a.blocking)||s.quarantine>0)return {code:'conflito',label:s.quarantine?'Documento em quarentena · revisão obrigatória':'Divergência bloqueante · revisão obrigatória',administrativeOnly:true};
   if(s.pending>0)return {code:'pendente',label:`${s.pending} pendência(s) documental(is)`,administrativeOnly:true};
-  const allFour=['solicitacao','laudo','avaliacao','termo'].every(k=>active.some(d=>d.kind===k&&d.review));
+  const allFour=['solicitacao','laudo','avaliacao','termo'].every(k=>active.some(d=>d.kind===k&&d.review&&(!d.caseId||d.caseId===this.case.id)));
   if(allFour&&tasks.every(t=>t.resolution))return {code:'conferida',label:'Documentação conferida (regras do exemplo)',administrativeOnly:true};
   return {code:'pendente',label:'Conferência incompleta',administrativeOnly:true};
  }
