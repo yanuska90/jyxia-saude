@@ -1,6 +1,6 @@
 {
-  "version": "3.0.0",
-  "engine": "regras-documentais-1.0",
+  "version": "3.2.0",
+  "engine": "regras-documentais-2.0",
   "referenceDate": "2026-11-14",
   "case": {
     "id": "CASO-SYN-001",
@@ -106,6 +106,34 @@
       "path": "fixtures/termo-oe.pdf",
       "sha256": "f66938b93e00359345b269ec64146b791c2d0e8a6e518e1adfc10676604a9793",
       "size": 2887,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "solicitacao-completa.pdf",
+      "path": "fixtures/solicitacao-completa.pdf",
+      "sha256": "efde8e4a6d12973b0a6658dc24ba229eaa0e0ef94a3803a06478ec61e8a9f2b6",
+      "size": 2051,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "laudo-completo.pdf",
+      "path": "fixtures/laudo-completo.pdf",
+      "sha256": "d3753f110ec582b40c190b0cae06c149fa2cbcc2efef2478af9e9d09a53d12c0",
+      "size": 2037,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "avaliacao-completa.pdf",
+      "path": "fixtures/avaliacao-completa.pdf",
+      "sha256": "f7f330fe8515c21177f13f2838cfe085ae28a5154c9575405ff4ba031384db42",
+      "size": 2065,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "termo-completo.pdf",
+      "path": "fixtures/termo-completo.pdf",
+      "sha256": "238421b143bd9074996dfd85e986112bef4c0bd1726d53bda212a73fb928b2ba",
+      "size": 2154,
       "mime": "application/pdf"
     }
   ]
