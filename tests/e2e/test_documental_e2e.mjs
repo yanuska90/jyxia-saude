@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MSEDGE_CANDIDATES = [
   process.env.JYXIA_BROWSER_BIN,
   String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
@@ -133,7 +133,7 @@ async function main() {
       stdio: 'ignore',
     });
   } else {
-    server = spawn('python', ['serve_documental.py', '--bind', '127.0.0.1', '--port', String(opts.httpPort)], {
+    server = spawn('python', ['tools/serve_documental.py', '--bind', '127.0.0.1', '--port', String(opts.httpPort)], {
       cwd: ROOT_DIR,
       stdio: 'ignore',
     });
@@ -145,8 +145,8 @@ async function main() {
   try {
     await waitForHttp(`${baseUrl}/index.html`);
 
-    const favRes = await fetch(`${baseUrl}/favicon.svg`);
-    assert.equal(favRes.status, 200, 'favicon.svg deve responder HTTP 200');
+    const favRes = await fetch(`${baseUrl}/assets/favicon.svg`);
+    assert.equal(favRes.status, 200, 'assets/favicon.svg deve responder HTTP 200');
     assert.match(favRes.headers.get('content-type') || '', /image\/svg\+xml/);
 
     const demoRes = await fetch(`${baseUrl}/demo.html`);
@@ -161,18 +161,24 @@ async function main() {
     for (const blocked of [
       '/app.py',
       '/demo-v2.html',
-      '/serve_documental.py',
-      '/serve_lab.py',
-      '/lab-local.html',
-      '/lab-local.mjs',
-      '/lab-extractor.mjs',
-      '/benchmark/benchmark-manifest.json',
-      '/test_documental.mjs',
-      '/test_documental_pdfjs.mjs',
-      '/test_lab_and_benchmark.mjs',
-      '/test_documental_e2e.mjs',
-      '/integration.py',
+      '/legacy/v2/app.py',
+      '/legacy/v2/demo-v2.html',
+      '/backend/app/main.py',
+      '/docs/ARQUITETURA.md',
+      '/tools/serve_documental.py',
+      '/tools/serve_lab.py',
+      '/lab/lab-local.html',
+      '/frontend/lab/lab-local.html',
+      '/frontend/lab/lab-local.mjs',
+      '/frontend/lab/lab-extractor.mjs',
+      '/tests/benchmark/benchmark-manifest.json',
+      '/tests/frontend/test_documental.mjs',
+      '/tests/frontend/test_documental_pdfjs.mjs',
+      '/tests/frontend/test_lab_and_benchmark.mjs',
+      '/tests/e2e/test_documental_e2e.mjs',
+      '/legacy/v2/integration.py',
       '/README.md',
+      '/fixtures/../backend/app/main.py',
       '/fixtures/../app.py',
     ]) {
       const r = await fetch(`${baseUrl}${blocked}`);
@@ -232,7 +238,7 @@ async function main() {
     await cdp.send('Page.navigate', { url: `${baseUrl}/index.html` });
     await waitUntil(() => cdp.eval(`document.readyState === 'complete' && document.body.innerText.includes('JYXIA')`));
     const indexFavHref = await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`);
-    assert.equal(indexFavHref, 'favicon.svg');
+    assert.equal(indexFavHref, 'assets/favicon.svg');
     for (const vw of [320, 390, 768, 1024, 1280]) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: vw, height: 844, deviceScaleFactor: 1, mobile: vw < 768 });
       assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false, `Overflow em index.html a ${vw}px`);
@@ -250,7 +256,7 @@ async function main() {
       document.getElementById('scenario')?.options?.length === 9 &&
       document.getElementById('case-meta')?.textContent?.includes('12/04/1986')
     `));
-    assert.equal(await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`), 'favicon.svg');
+    assert.equal(await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`), 'assets/favicon.svg');
     await cdp.eval(`document.getElementById('scenario').focus()`);
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
@@ -258,7 +264,7 @@ async function main() {
     console.log('E2E_3_DEMO_INIT_OK');
 
     // 4. Manual upload via #files: PDF + PNG (no signature analysis claim!) + altered file rejection
-    const fixturesBase = opts.staticDir || ROOT_DIR;
+    const fixturesBase = opts.staticDir || path.join(ROOT_DIR, 'frontend', 'public');
     const uploadFiles = async files => {
       const docNode = await cdp.send('DOM.getDocument', { depth: -1 });
       const q = await cdp.send('DOM.querySelector', { nodeId: docNode.root.nodeId, selector: '#files' });
@@ -486,21 +492,21 @@ async function main() {
     // 7. In live workspace mode (!staticMode), also test isolated localhost Modalidade B lab server end-to-end
     if (!staticMode) {
       const labPort = opts.httpPort + 10;
-      const labServer = spawn('python', ['serve_lab.py', '--bind', '127.0.0.1', '--port', String(labPort)], {
+      const labServer = spawn('python', ['tools/serve_lab.py', '--bind', '127.0.0.1', '--port', String(labPort)], {
         cwd: ROOT_DIR,
         stdio: 'ignore',
       });
       try {
-        await waitForHttp(`http://127.0.0.1:${labPort}/lab-local.html`);
+        await waitForHttp(`http://127.0.0.1:${labPort}/lab/lab-local.html`);
         const blockedPublicDemoFromLab = await fetch(`http://127.0.0.1:${labPort}/demo.html`);
         assert.equal(blockedPublicDemoFromLab.status, 404);
-        await cdp.send('Page.navigate', { url: `http://127.0.0.1:${labPort}/lab-local.html` });
+        await cdp.send('Page.navigate', { url: `http://127.0.0.1:${labPort}/lab/lab-local.html` });
         await waitUntil(() => cdp.eval(`document.readyState === 'complete' && document.body.innerText.includes('MODALIDADE B')`));
         const docNode = await cdp.send('DOM.getDocument', { depth: -1 });
         const labInput = await cdp.send('DOM.querySelector', { nodeId: docNode.root.nodeId, selector: '#lab-file' });
         await cdp.send('DOM.setFileInputFiles', {
           nodeId: labInput.nodeId,
-          files: [path.join(ROOT_DIR, 'benchmark', 'fixtures', 'eval-01-tabular-times-acentos.pdf')],
+          files: [path.join(ROOT_DIR, 'tests', 'benchmark', 'fixtures', 'eval-01-tabular-times-acentos.pdf')],
         });
         await waitUntil(() => cdp.eval(`!document.getElementById('lab-workspace').hidden && document.getElementById('lab-fields').textContent.includes('Nome completo')`));
         const labText = await cdp.eval(`document.getElementById('lab-message').textContent`);

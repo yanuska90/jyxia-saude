@@ -2,7 +2,7 @@ import hashlib
 import json
 import pathlib
 
-BENCH_DIR = pathlib.Path(r'C:\Users\Joaoe\Documents\Jyxia\jyxia-saude-trabalho\benchmark')
+BENCH_DIR = pathlib.Path(__file__).resolve().parent
 FIX_DIR = BENCH_DIR / 'fixtures'
 MANIFEST_PATH = BENCH_DIR / 'benchmark-manifest.json'
 FIX_DIR.mkdir(parents=True, exist_ok=True)

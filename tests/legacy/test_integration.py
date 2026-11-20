@@ -2,13 +2,17 @@ import copy
 import json
 import unittest
 from pathlib import Path
+import sys
+from pathlib import Path
+LEGACY_DIR = Path(__file__).resolve().parents[2] / 'legacy' / 'v2'
+sys.path.insert(0, str(LEGACY_DIR))
 from integration import normalize, apply_batch, IntegrationError, review_flags
 
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
-        self.bundle=json.loads((Path(__file__).parent/'lab-demo.json').read_text(encoding='utf-8'))
+        self.bundle=json.loads((LEGACY_DIR/'lab-demo.json').read_text(encoding='utf-8'))
     def test_two_sources_same_internal_patient(self):
-        hospital=json.loads((Path(__file__).parent/'hospital-demo.json').read_text(encoding='utf-8'))
+        hospital=json.loads((LEGACY_DIR/'hospital-demo.json').read_text(encoding='utf-8'))
         rows=normalize('lab-demo',self.bundle)+normalize('hospital-demo',hospital)
         self.assertEqual({r['patient_id'] for r in rows},{'SYN-P01'})
         self.assertEqual(len(rows),7)

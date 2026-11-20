@@ -1,37 +1,37 @@
-"""Localhost-only experimental lab server (Modalidade B). Never included in GitHub Pages or public demo."""
+"""Static synthetic demo server (Modalidade A). Serves strictly allowlisted files from frontend/public/."""
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
 import argparse
+import json
 
-ROOT = Path(__file__).resolve().parent
-LAB_ALLOWLIST = {
-    'lab-local.html',
-    'lab-local.mjs',
-    'lab-extractor.mjs',
-    'documental-core.mjs',
+ROOT = Path(__file__).resolve().parent.parent
+PUBLIC_DIR = ROOT / 'frontend' / 'public'
+PUBLIC = {
+    'index.html',
+    'demo.html',
     'documental.css',
-    'favicon.svg',
+    'documental-core.mjs',
+    'documental-ui.mjs',
+    'documental-manifest.json',
+    'assets/favicon.svg',
+    'assets/fixtures-jyxia.zip',
+    'assets/Projeto_JYXIA_Inteligencia_Documental_v3.docx',
     'vendor/pdf.min.mjs',
     'vendor/pdf.worker.min.mjs',
     'vendor/PDFJS-LICENSE.txt',
 }
-LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+PUBLIC.update(f['path'] for f in json.loads((PUBLIC_DIR / 'documental-manifest.json').read_text(encoding='utf-8'))['files'])
 
 
-class LabHandler(SimpleHTTPRequestHandler):
+class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(ROOT), **kwargs)
+        super().__init__(*args, directory=str(PUBLIC_DIR), **kwargs)
 
     def allowed(self):
-        rel = unquote(urlsplit(self.path).path).lstrip('/')
-        return rel == '' or rel in LAB_ALLOWLIST
-
-    def translate_path(self, path):
-        rel = unquote(urlsplit(path).path).lstrip('/')
-        if rel == '':
-            rel = 'lab-local.html'
-        return str(ROOT / rel)
+        path = urlsplit(self.path).path
+        rel = unquote(path).lstrip('/')
+        return path == '/' or rel in PUBLIC
 
     def do_GET(self):
         if not self.allowed():
@@ -56,15 +56,12 @@ class LabHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, *args):
-        # Strictly zero logging of request paths or document content
         pass
 
 
 if __name__ == '__main__':
-    p = argparse.ArgumentParser(description='JYXIA Modalidade B Local Lab (localhost only)')
+    p = argparse.ArgumentParser()
     p.add_argument('--bind', default='127.0.0.1')
-    p.add_argument('--port', type=int, default=8099)
+    p.add_argument('--port', type=int, default=8000)
     a = p.parse_args()
-    if a.bind not in LOOPBACK_HOSTS:
-        raise SystemExit('Erro de seguranca: serve_lab.py permite exclusivamente bind em loopback (localhost/127.0.0.1).')
-    ThreadingHTTPServer((a.bind, a.port), LabHandler).serve_forever()
+    ThreadingHTTPServer((a.bind, a.port), Handler).serve_forever()

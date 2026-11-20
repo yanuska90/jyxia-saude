@@ -5,8 +5,8 @@ import { pathToFileURL } from 'node:url';
 
 Uint8Array.prototype.toHex ??= function () { return Buffer.from(this).toString('hex'); };
 
-const pdfjs = await import('./vendor/pdf.min.mjs');
-pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(new URL('./vendor/pdf.worker.min.mjs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')).href;
+const pdfjs = await import('../../frontend/public/vendor/pdf.min.mjs');
+pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(new URL('../../frontend/public/vendor/pdf.worker.min.mjs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')).href;
 
 import {
   DocumentarySession,
@@ -14,9 +14,9 @@ import {
   brazilDate,
   extractPdfLines,
   verifyEvents,
-} from './documental-core.mjs';
+} from '../../frontend/public/documental-core.mjs';
 
-const manifest = JSON.parse(await readFile(new URL('./documental-manifest.json', import.meta.url), 'utf8'));
+const manifest = JSON.parse(await readFile(new URL('../../frontend/public/documental-manifest.json', import.meta.url), 'utf8'));
 
 function buildMinimalPdf({ pages = [{ text: '' }], rotate = 0 } = {}) {
   const objects = [];
@@ -65,7 +65,7 @@ test('PDF.js extracts core fields and valid normalized coordinates from all 15 s
   const pdfFixtures = manifest.files.filter(x => x.mime === 'application/pdf');
   assert.equal(pdfFixtures.length, 15);
   for (const f of pdfFixtures) {
-    const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const bytes = new Uint8Array(await readFile(new URL('../../frontend/public/' + f.path, import.meta.url)));
     const fixture = await allowedFixture(bytes, manifest, ['application/pdf']);
     const { lines } = await parseRealPdf(bytes);
     assert(lines.length >= 10, `${f.name} should yield text items`);
@@ -95,7 +95,7 @@ test('real PDF.js integration runs scenarios 1-7 and 9 cleanly with honest readi
   const s = new DocumentarySession(manifest);
   const loadReal = async name => {
     const f = manifest.files.find(x => x.name === name);
-    const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const bytes = new Uint8Array(await readFile(new URL('../../frontend/public/' + f.path, import.meta.url)));
     const lines = f.mime === 'application/pdf' ? (await parseRealPdf(bytes)).lines : [];
     return s.ingest(f, lines, 5);
   };
@@ -155,7 +155,7 @@ test('real PDF.js integration runs scenarios 1-7 and 9 cleanly with honest readi
   const s9 = new DocumentarySession(manifest);
   for (const fname of ['solicitacao-completa.pdf', 'laudo-completo.pdf', 'avaliacao-completa.pdf', 'termo-completo.pdf']) {
     const f = manifest.files.find(x => x.name === fname);
-    const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const bytes = new Uint8Array(await readFile(new URL('../../frontend/public/' + f.path, import.meta.url)));
     const { lines } = await parseRealPdf(bytes);
     const d = (await s9.ingest(f, lines, 5)).document;
     await s9.review(d.id, {
@@ -210,7 +210,7 @@ test('PDF.js extracts DE-04 subfamily, procedure, laterality and synthetic marke
   const s = new DocumentarySession(manifest);
   const ingestReal = async name => {
     const f = manifest.files.find(x => x.name === name);
-    const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const bytes = new Uint8Array(await readFile(new URL('../../frontend/public/' + f.path, import.meta.url)));
     const { lines } = await parseRealPdf(bytes);
     return (await s.ingest(f, lines, 5)).document;
   };

@@ -19,9 +19,9 @@ import {
   parseSyntheticCase,
   verifyEvents,
   verifyEventsReport,
-} from './documental-core.mjs';
+} from '../../frontend/public/documental-core.mjs';
 
-const manifest = JSON.parse(await readFile(new URL('./documental-manifest.json', import.meta.url)));
+const manifest = JSON.parse(await readFile(new URL('../../frontend/public/documental-manifest.json', import.meta.url)));
 const fixture = name => manifest.files.find(x => x.name === name);
 
 function lines(overrides = {}) {
@@ -72,7 +72,7 @@ test('provided files are accepted by content hash, changed and unknown files are
   assert.equal(VERSION, '3.2.0');
   assert.equal(manifest.files.length, 18);
   for (const f of manifest.files) {
-    const b = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const b = new Uint8Array(await readFile(new URL('../../frontend/public/' + f.path, import.meta.url)));
     assert.equal((await allowedFixture(b, manifest, [f.mime])).sha256, f.sha256);
     const changed = b.slice();
     changed[0] ^= 1;
@@ -238,8 +238,8 @@ test('date formatting helpers convert ISO dates and offset days safely', () => {
 });
 
 test('synthetic case CSV and JSON fixtures parse, update session case and reject malformed data', async () => {
-  const csvText = await readFile(new URL('./fixtures/casos-ficticios.csv', import.meta.url), 'utf8');
-  const jsonText = await readFile(new URL('./fixtures/casos-ficticios.json', import.meta.url), 'utf8');
+  const csvText = await readFile(new URL('../../frontend/public/fixtures/casos-ficticios.csv', import.meta.url), 'utf8');
+  const jsonText = await readFile(new URL('../../frontend/public/fixtures/casos-ficticios.json', import.meta.url), 'utf8');
   const parsedCsv = parseSyntheticCase(csvText, 'text/csv');
   const parsedJson = parseSyntheticCase(jsonText, 'application/json');
   assert.deepEqual(parsedCsv, parsedJson);
@@ -327,7 +327,7 @@ test('Etapa 2.1 identity re-evaluates unreviewed docs on case change and quarant
   const docMatch = await add(s, 'solicitacao.pdf');
   await review(s, docMatch);
   assert.equal(docMatch.caseId, manifest.case.id);
-  const jsonObj = JSON.parse(await readFile(new URL('./fixtures/casos-ficticios.json', import.meta.url), 'utf8'));
+  const jsonObj = JSON.parse(await readFile(new URL('../../frontend/public/fixtures/casos-ficticios.json', import.meta.url), 'utf8'));
   const altPayload = JSON.stringify({ ...jsonObj, cases: [{ ...jsonObj.cases[0], id: 'CASO-SYN-OUTRO', identifier: 'SYN-P88', patient: 'Outra Pessoa Sintetica', birthDate: '1980-02-02' }] });
   await s.loadSyntheticCase(fixture('casos-ficticios.json'), altPayload);
   assert.equal(unrev.identity, 'suggested');

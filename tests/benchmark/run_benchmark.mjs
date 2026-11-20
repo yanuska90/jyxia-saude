@@ -1,14 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { extractLabPdfLines, extractWithExplicitAliases, LAB_LIMITS } from '../lab-extractor.mjs';
+import { extractLabPdfLines, extractWithExplicitAliases, LAB_LIMITS } from '../../frontend/lab/lab-extractor.mjs';
 
 Uint8Array.prototype.toHex ??= function () { return Buffer.from(this).toString('hex'); };
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO_DIR = path.resolve(BENCH_DIR, '..');
-const pdfjs = await import(pathToFileURL(path.join(REPO_DIR, 'vendor', 'pdf.min.mjs')).href);
-pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(path.join(REPO_DIR, 'vendor', 'pdf.worker.min.mjs')).href;
+const REPO_DIR = path.resolve(BENCH_DIR, '..', '..');
+const pdfjs = await import(pathToFileURL(path.join(REPO_DIR, 'frontend', 'public', 'vendor', 'pdf.min.mjs')).href);
+pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(path.join(REPO_DIR, 'frontend', 'public', 'vendor', 'pdf.worker.min.mjs')).href;
 
 const CRITICAL_FIELDS = new Set(['patient', 'birthDate', 'identifier', 'laterality']);
 

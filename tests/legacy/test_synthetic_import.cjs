@@ -1,7 +1,7 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');
-require('./synthetic-import.js');const I=globalThis.JYXIA_DEMO_IMPORT;
-const catalog=JSON.parse(fs.readFileSync(__dirname+'/integration-demo.json','utf8'));
-const packageText=fs.readFileSync(__dirname+'/paciente-ficticio-01.json','utf8');
+require('../../legacy/v2/synthetic-import.js');const I=globalThis.JYXIA_DEMO_IMPORT;
+const catalog=JSON.parse(fs.readFileSync(__dirname+'/../../legacy/v2/integration-demo.json','utf8'));
+const packageText=fs.readFileSync(__dirname+'/../../legacy/v2/paciente-ficticio-01.json','utf8');
 test('provided package imports seven records of exactly one fictional patient',()=>{
  const sources=I.parseApproved(packageText,catalog);assert.equal(sources.flatMap(s=>s.records).length,7);assert.deepEqual([...new Set(sources.flatMap(s=>s.records).map(r=>r.patient_id))],['SYN-P01']);
 });

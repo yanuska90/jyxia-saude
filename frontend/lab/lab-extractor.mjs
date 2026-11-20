@@ -1,4 +1,4 @@
-import { normalizeLaterality, brazilDate } from './documental-core.mjs';
+import { normalizeLaterality, brazilDate } from '../public/documental-core.mjs';
 
 export const LAB_LIMITS = Object.freeze({
   maxBytes: 524288,

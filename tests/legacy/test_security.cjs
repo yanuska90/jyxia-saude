@@ -1,7 +1,7 @@
 const {test,before}=require('node:test');
 const assert=require('node:assert/strict');
 const {randomBytes}=require('node:crypto');
-require('./vault-crypto.js');require('./teleconsultation.js');
+require('../../legacy/v2/vault-crypto.js');require('../../legacy/v2/teleconsultation.js');
 const C=globalThis.JYXIA_CRYPTO;let account,password;
 const row={id:'synthetic-record',name:'Registro inteiramente fictício',kind:'exame',attachments:[{id:'file1',name:'ficticio.txt',type:'text/plain',size:4,blob:new Blob(['TEST'],{type:'text/plain'})}]};
 before(async()=>{password=randomBytes(24).toString('hex');account=await C.create('teste_sintetico',password);});

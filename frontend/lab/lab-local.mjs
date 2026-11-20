@@ -1,4 +1,4 @@
-import * as pdfjs from './vendor/pdf.min.mjs';
+import * as pdfjs from '../public/vendor/pdf.min.mjs';
 import {
   LAB_LIMITS,
   assertLocalhostEnvironment,
@@ -7,7 +7,7 @@ import {
   hasPdfMagicBytes,
 } from './lab-extractor.mjs';
 
-pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL('../public/vendor/pdf.worker.min.mjs', import.meta.url).href;
 assertLocalhostEnvironment(window.location.hostname);
 
 const $ = id => document.getElementById(id);

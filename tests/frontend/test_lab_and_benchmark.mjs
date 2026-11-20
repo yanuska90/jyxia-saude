@@ -4,8 +4,8 @@ import {
   assertLocalhostEnvironment,
   extractWithExplicitAliases,
   hasPdfMagicBytes,
-} from './lab-extractor.mjs';
-import { runBenchmark } from './benchmark/run_benchmark.mjs';
+} from '../../frontend/lab/lab-extractor.mjs';
+import { runBenchmark } from '../benchmark/run_benchmark.mjs';
 
 test('Modalidade B lab enforces localhost isolation and %PDF- magic bytes', () => {
   assert.doesNotThrow(() => assertLocalhostEnvironment('localhost'));
