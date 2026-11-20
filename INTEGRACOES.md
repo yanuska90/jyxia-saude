@@ -1,7 +1,7 @@
-# Integrações na versão documental 3.0.0
+# Integrações na versão documental 3.1.0
 
-A entrada atual é um catálogo sintético de PDF, PNG, CSV e JSON. Não há conexão real com Delboni, Hospital São Luiz, RNDS, gov.br ou sistemas hospitalares. Não se solicita login ou senha de laboratório; a alternativa de acesso por credenciais do paciente está retirada do escopo ativo por decisão de Yanuska.
+A entrada da demonstração pública `3.1.0` é um catálogo sintético fechado de PDF, PNG, CSV e JSON validado por SHA-256 no navegador. **Não existe nenhuma conexão automatizada real com hospitais, laboratórios, operadoras de saúde, RNDS, gov.br ou sistemas como MV, Tasy (atualmente no portfólio Bionexo) ou Epic.** Alternativas de acesso usando credenciais pessoais de paciente em portais externos foram retiradas do escopo ativo.
 
-O protótipo histórico de normalização FHIR/JSON permanece testado em integration.py, sem caracterizar conector real. Para a próxima fase, escolher uma instituição e obter documentação pública/fornecida, autorização, contrato, responsável e ambiente de testes fictício. Não usar Drive pessoal, dados reais, cookies ou senhas para explorar integrações.
+Os módulos históricos em Python (`integration.py` / `test_integration.py` — `11` testes legados preservados) exercitam apenas normalização sintética local em JSON/FHIR conceitual e **não caracterizam conector hospitalar ativo**.
 
-Validar contrato e perfis FHIR/HL7, identificadores por emissor, consentimento/base legal, autorização, versões, idempotência, proveniência, erros e reconciliação. Manter documentos sem vínculo quando houver dúvida de identidade. Planejar retorno manual e fila de exceções. Importação de arquivo pode anteceder API autorizada, mas não deve simular acesso nacional por CPF.
+Qualquer integração futura com terceiros (ou recebimento de cadastros/documentos em produção) dependerá de: validação em campo da necessidade antes da engenharia, contrato e autorização formal da instituição controladora, documentação técnica da versão/perfil adotado pelo parceiro (ex.: HL7 FHIR R4, HL7 v2 ou especificações TISS/TUSS vigentes na ANS), testes com dados exclusivamente sintéticos ou homologados, idempotência, controle de versões e quarentena sem vínculo automático quando houver divergência cadastral.

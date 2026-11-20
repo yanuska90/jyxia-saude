@@ -1,18 +1,18 @@
-# Dados fictícios da demo documental
+# Dados fictícios da demo documental (`3.1.0`)
 
-Baixe `fixtures-jyxia.zip` ou use “Adicionar cenário”. Todos os nomes, identificadores, instituições, documentos e marcas foram criados para demonstração. O caso SYN-P01 não corresponde a pessoa real; não é CPF.
+Baixe `fixtures-jyxia.zip` ou use “Adicionar cenário” na demonstração. Todos os nomes, identificadores (`SYN-P01`), instituições, documentos e marcas (`MARCA FICTICIA`) são sintéticos e criados exclusivamente para demonstração pública. Não correspondem a pessoas reais e não consultam CPF real.
 
-| Cenário | Comportamento esperado |
-| --- | --- |
-| Conjunto completo | Quatro classes; revisão de cada documento e marca do termo para concluir as regras |
-| Duplicado | O segundo arquivo idêntico não cria outro documento |
-| Atualizado | Dois laudos distintos, sem substituição automática; revisar ambos e confirmar |
-| Identidade divergente | Quarentena e caseId nulo, sem liberação manual do vínculo |
-| Identificador ausente | Nome e nascimento compatíveis; confirmação humana obrigatória |
-| Imagem sem texto | Sem OCR; quarentena e reenvio |
-| Data e marca | Janela administrativa e área de assinatura exigem conferência |
-| Lateralidade divergente (`OD × OE`) | Solicitação indica `Olho Direito (OD)` e termo indica `Olho Esquerdo (OE)`; conflito bloqueia conclusão e exige retirada/substituição |
+| Cenário | Arquivos envolvidos | Comportamento esperado |
+| --- | --- | --- |
+| 1 · Conjunto completo | `solicitacao.pdf`, `laudo.pdf`, `avaliacao.pdf`, `termo.pdf` | Quatro classes; conferência de cada documento e marca do termo para concluir as regras administrativas do exemplo |
+| 2 · Arquivo duplicado | `laudo.pdf`, `laudo.pdf` | O segundo arquivo idêntico por SHA-256 é recusado sem criar segundo registro |
+| 3 · Documento atualizado | `laudo.pdf`, `laudo-atualizado.pdf` | Dois laudos distintos; sem substituição automática; exige revisão de ambos e confirmação explícita dentro da mesma subfamília |
+| 4 · Identidade divergente | `identidade-divergente.pdf` | Quarentena obrigatória e `caseId` nulo; bloqueio programático impede vínculo ao caso |
+| 5 · Identificador ausente | `sem-identificador.pdf` | Nome e nascimento compatíveis com `CASO-SYN-001`; exige confirmação manual humana |
+| 6 · Imagem sem texto extraível | `imagem-ilegivel.png` | Sem OCR nesta versão (`readable = false`); permanece em quarentena para conferência visual ou reenvio |
+| 7 · Data e marca a conferir | `solicitacao.pdf`, `laudo-antigo.pdf`, `avaliacao.pdf`, `termo-sem-marca.pdf` | Janela administrativa de 30 dias em UTC (`laudo-antigo.pdf`) e área de assinatura sem marca (`termo-sem-marca.pdf`) geram pendências formais |
+| 8 · Lateralidade divergente (`OD × OE`) | `solicitacao-od.pdf`, `termo-oe.pdf` | Solicitação indica `Olho Direito (OD)` e termo indica `Olho Esquerdo (OE)`; conflito bloqueia conclusão e exige retirada/substituição |
 
-Os PDFs contêm texto, não resultados clínicos. A importação aceita somente bytes exatos do catálogo sintético (`14` arquivos em `documental-manifest.json`); arquivos pessoais ou alterados são recusados por política da demonstração pública (o que não significa que o arquivo seja malicioso nem substitui quarentena técnica de segurança). Conferir e carregar cadastro CSV ou JSON lê e valida apenas o único caso sintético fornecido, sem acrescentar pacientes reais. É uma proteção do protótipo público, não um importador institucional.
+Os PDFs contêm texto sintético em camada pesquisável, não resultados clínicos reais. A importação aceita somente bytes exatos dos **`14` arquivos** listados em `documental-manifest.json`; arquivos reais ou modificados são recusados antes da leitura por política da demonstração pública (não substitui varredura antivírus/CDR de produção). `casos-ficticios.csv` e `casos-ficticios.json` validam exclusivamente o único caso sintético fornecido (`CASO-SYN-001`).
 
-Para uma avaliação futura, criar novo conjunto sintético reservado, com variações reais de layout e gabarito revisado, sem dados pessoais. Os oito cenários atuais são testes funcionais conhecidos; não medem acurácia de OCR, IA ou benefício clínico.
+Para avaliações técnicas futuras (conjuntos de validação e *holdout* cegos), será necessário produzir lote separado e independente dos `14` arquivos do desenvolvimento, com dupla anotação de gabarito, incluindo verificação semântica de que a evidência destacada corresponde ao significado do campo. Estes `8` cenários demonstram comportamento determinístico conhecido; não medem desempenho de OCR, IA ou impacto clínico.
