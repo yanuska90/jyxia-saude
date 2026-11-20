@@ -1,33 +1,37 @@
-# Segurança e privacidade da JYXIA (v3.2.0 + Fundação Backend 0.1.0)
+# Segurança e privacidade da JYXIA (v3.2.0 + Fundação Backend 0.1.0 · Etapa 3.1)
 
 ## 1. Fronteira entre Modalidade A (Pública), Modalidade B (Local) e Modalidade C (Backend)
 
 - **Modalidade A — Demo pública ([`frontend/public/`](../frontend/public/)):** estritamente sintética, sem login e sem envio de arquivos pela rede. O catálogo [`documental-manifest.json`](../frontend/public/documental-manifest.json) (`18` arquivos) recusa qualquer arquivo fora da whitelist SHA-256 antes da leitura textual. Tudo roda apenas na memória da aba.
 - **Modalidade B — Laboratório experimental local ([`frontend/lab/`](../frontend/lab/) + [`tools/serve_lab.py`](../tools/serve_lab.py)):** estritamente isolado em `localhost` (`serve_lab.py` rejeita bind não-loopback e `assertLocalhostEnvironment()` bloqueia origens externas). **Não compõe o pacote do GitHub Pages e retorna HTTP `404` em [`tools/serve_documental.py`](../tools/serve_documental.py)**.
-- **Modalidade C — Fundação institucional inicial ([`backend/`](../backend/) `0.1.0`):** prepara persistência multi-tenant em PostgreSQL e storage isolado em disco sintético fora do repositório (`JYXIA_STORAGE_ROOT`), expondo **exclusivamente** `/api/v1/health/live` e `/api/v1/health/ready` enquanto OIDC + MFA + RBAC reais não forem ativados.
+- **Modalidade C — Fundação institucional inicial ([`backend/`](../backend/) `0.1.0`):** prepara persistência multi-tenant em PostgreSQL e armazenamento controlado sintético fora do repositório (`JYXIA_STORAGE_ROOT`), expondo **exclusivamente** `/api/v1/health/live` e `/api/v1/health/ready`.
 
-**Controles implementados na demo pública e ferramentas locais:**
-- Mozilla PDF.js `6.5.438` em `frontend/public/vendor/` com `isEvalSupported: false`; CSP estrita (`default-src 'self'`, `object-src 'none'`, `form-action 'none'`); cabeçalhos `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` e `frame-ancestors 'none'` nos servidores Python;
-- Inserção segura via `textContent` e neutralização `csvSafeCell()` em downloads CSV;
-- Cadeia local SHA-256 em memória (`actorAuthenticated: false`, apenas demonstrativa);
-- Empacotamento GitHub Pages restrito a `31` arquivos de `frontend/public/`, validado em [`tools/verify_pages_package.py`](../tools/verify_pages_package.py);
-- Verificação básica de higiene em [`tools/check_publication.py`](../tools/check_publication.py) recusando `.env*` (exceto `.env.example`), bancos locais `.db`/`.sqlite*`, pastas `JYXIA_LOCAL_WORK` ou chaves/DSNs externos.
+## 2. Classificação honesta do estado de segurança
 
-**Controles implementados no backend institucional `0.1.0`:**
-- **Fail-closed para autenticação:** `StubOidcAuthenticator` recusa qualquer token enquanto OIDC real não existir; nenhuma rota clínica/administrativa de dados fica ativa em HTTP sem autenticação real;
-- **Isolamento multi-tenant em duas camadas:** `TenantContext` obrigatório nos repositórios e serviços, além de chaves estrangeiras compostas `(organization_id, <fk_id>)` no esquema PostgreSQL/SQLite impedindo vinculação cruzada entre organizações;
-- **Auditoria append-only:** `AuditEvent` com encadeamento SHA-256 por organização e listeners SQLAlchemy impedindo atualização ou exclusão;
-- **Storage sintético confinado:** `LocalControlledSyntheticStorage` exige magic bytes válidos (`%PDF-` ou PNG), respeita teto em bytes, rejeita path traversal (`..`), restringe chaves à subpasta da organização e proíbe gravar dentro da árvore do repositório Git;
-- **Logs sanitizados e readiness sem vazamento:** `SanitizingFilter` mascara tokens, senhas em DSN, padrões de CPF e chaves sensíveis; `/api/v1/health/ready` retorna HTTP `503` sem expor string de conexão ou traceback.
-- **Bind restrito no Compose institucional:** [`compose.institutional.yaml`](../compose.institutional.yaml) publica Postgres e backend apenas em `127.0.0.1` e exclui `MONGO_PASSWORD`/`JYXIA_API_TOKEN` herdados da versão antiga.
+### A) Segurança implementada e verificada em testes
+- **Demo pública e ferramentas:** PDF.js `6.5.438` local com `isEvalSupported: false`, CSP estrita (`frame-ancestors 'none'`), `textContent`, `csvSafeCell()`, pacote Pages restrito a `31` arquivos e higiene [`tools/check_publication.py`](../tools/check_publication.py).
+- **Configuração fail-closed (`backend/app/core/config.py`):** produção proíbe SQLite, storage sintético local, `DEBUG`, OIDC desabilitado/sem HTTPS, CORS `*` ou HTTP, e senhas/placeholders fracos no banco; `main.py` desativa `/docs`, `/redoc` e `/openapi.json` em produção e sanitiza erros.
+- **Isolamento multi-tenant e integridade referencial em 2 camadas:** `TenantContext` obrigatório nos serviços/repositórios **e** FKs compostas de 2 e 3 colunas no banco (`organization_id`, `document_id`, `document_version_id`, `organization_memberships`) impedindo vinculações cross-tenant ou entre documentos/versões diferentes até por SQL direto.
+- **Auditoria encadeada endurecida (`AuditEvent`):** hash canônico determinístico (`jyxia.audit.v1`) incluindo ator e timestamp UTC; serialização transacional concorrente via `SELECT ... FOR UPDATE` em `organizations` no PostgreSQL; bloqueio de chaves sensíveis no payload; listeners ORM **e triggers SQL `BEFORE UPDATE / DELETE`** em PostgreSQL e SQLite (migration `20261120_0002`); e verificador detalhado detectando lacunas, reordenação, duplicidade, alteração e quebras de hash.
+- **Storage sintético local controlado (`LocalControlledSyntheticStorage`):** rejeição de symlinks e junctions NTFS em toda a hierarquia, bloqueio de gravação na árvore Git, bloqueio de path traversal e extensão divergente, validação estrutural PDF (`%PDF-1.`/`2.0` + `%%EOF`) e PNG (`IHDR`..`IEND` + CRC-32), escrita atômica com `tempfile` + `fsync` + `os.replace` + conferência SHA-256 e limpeza automática em erro.
+- **Logs e readiness sanitizados:** `SanitizingFilter` + `build_safe_log_extra` mascaram recursivamente tokens Bearer, JWTs, senhas em DSN, CPFs e chaves PII/documentais; `/api/v1/health/ready` não expõe DSN nem stacktraces.
+- **Container e dependências:** [`compose.institutional.yaml`](../compose.institutional.yaml) publica Postgres e backend apenas em `127.0.0.1` (`read_only: true`, `cap_drop: ALL`, `no-new-privileges`); [`backend/Dockerfile`](../backend/Dockerfile) roda sem root e sem ferramentas de teste/auditoria; dependências unificadas em [`backend/pyproject.toml`](../backend/pyproject.toml) com auditoria `pip-audit` automatizada em CI.
 
-Nenhuma dessas proteções substitui auditoria independente de segurança ou pentest antes de uso com dados reais.
+### B) Segurança apenas preparada (contratos / interfaces sem fluxo operacional ativo)
+- Contratos **OIDC + MFA + RBAC** (`StubOidcAuthenticator` recusando tokens em `security_prep.py`, modelo `User.external_subject` + `mfa_enrolled`, roles em `OrganizationMembership`);
+- Portas e contratos de pipeline/idempotência/OCR (`processing_contracts.py` recusando OCR até validação futura).
 
-## 2. Requisitos antes de tratar dados reais em produção
+### C) Segurança pendente para etapas futuras
+- Autenticação OIDC real com JWKS/PKCE/MFA obrigatório, sessões e autorização RBAC/ABAC efetiva nos endpoints HTTP;
+- APIs HTTP autenticadas de casos, upload e revisão humana;
+- Segregação efetiva de credenciais de banco em PostgreSQL (`migration_owner` separado da role restrita da aplicação sem `TRIGGER`/`ALTER`/`TRUNCATE`).
 
-- **Governança LGPD e contratos (Lei nº 13.709/2018):** formalização de Controlador/Operadora, DPA, RIPD, bases legais (arts. 7º e 11), retenção operacional distinta da guarda legal de 20 anos no PEP (Lei nº 13.787/2018) e plano de comunicação de incidentes (Res. CD/ANPD nº 15/2024);
-- **Autenticação e storage institucionais:** ativação real de OIDC + MFA + RBAC/ABAC no servidor, KMS/object storage cifrado privado e antivírus/CDR em uploads antes de habilitar endpoints HTTP de upload/revisão;
-- **Regulação sanitária e assinaturas:** parecer perante **RDC ANVISA nº 657/2022**, **Resolução CFM nº 2.454/2026** e **Lei nº 14.063/2020** (ICP-Brasil / assinatura avançada).
+### D) Segurança dependente de infraestrutura externa e governança jurídica
+- Object storage privado cifrado com KMS e armazenamento de auditoria resistente a administrador local (WORM / log sink externo);
+- Scanner antivírus/CDR para uploads reais, WAF/TLS de borda, gestão de segredos em cofre externo;
+- Contratos LGPD (Lei nº 13.709/2018: Controlador/Operadora, DPA, RIPD), guarda legal do PEP (Lei nº 13.787/2018), incidente (Res. CD/ANPD nº 15/2024), parecer **RDC ANVISA nº 657/2022**, **Resolução CFM nº 2.454/2026**, assinaturas **Lei nº 14.063/2020** e pentest independente antes de dados reais.
+
+**Limites explícitos:** este trabalho **não garante** imutabilidade absoluta contra administradores de banco privilegiados, não equivale a auditoria/pentest independente e não habilita uso clínico ou com pacientes reais.
 
 ## 3. Versão histórica preservada
 

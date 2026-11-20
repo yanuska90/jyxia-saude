@@ -1,6 +1,6 @@
 # JYXIA Inteligência Documental em Saúde
 
-Demonstração pública **3.2.0** (`frontend/public/`) · Fundação institucional inicial **0.1.0** (`backend/`) · Documentação sincronizada em **20 de novembro de 2026** · Yanuska e João.
+Demonstração pública **3.2.0** (`frontend/public/`) · Fundação institucional endurecida **0.1.0** (`backend/` · Etapa 3.1) · Documentação sincronizada em **20 de novembro de 2026** · Yanuska e João.
 
 A JYXIA é uma camada administrativa de conferência e organização de documentos externos em saúde, complementar ao prontuário eletrônico (PEP), com vinculação visual à página original e revisão humana obrigatória. O primeiro recorte em investigação é a **conferência documental para procedimentos eletivos**.
 
