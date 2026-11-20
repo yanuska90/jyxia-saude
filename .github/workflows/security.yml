@@ -113,7 +113,7 @@ jobs:
           JYXIA_TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
           JYXIA_TEST_APP_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
         run: |
-          /tmp/jyxia-ci-venv/bin/pytest tests/backend -v -rs > /tmp/pytest_ci.log 2>&1 || (cat /tmp/pytest_ci.log; docker logs jyxia-keycloak-ci || true; exit 1)
+          /tmp/jyxia-ci-venv/bin/python -m pytest tests/backend -v -rs > /tmp/pytest_ci.log 2>&1 || (cat /tmp/pytest_ci.log; docker logs jyxia-keycloak-ci || true; exit 1)
           cat /tmp/pytest_ci.log
           if grep -E "SKIPPED|[0-9]+ skipped" /tmp/pytest_ci.log; then
             echo "ERROR: Unexpected skipped test in PostgreSQL/Keycloak CI verification."
