@@ -39,11 +39,21 @@ FORBIDDEN_LOG_KEYS: frozenset[str] = frozenset(
         "password",
         "token",
         "oidc_token",
+        "id_token",
+        "access_token",
+        "refresh_token",
+        "session_token",
+        "csrf_token",
+        "code_verifier",
+        "nonce",
         "secret",
         "client_secret",
+        "session_secret",
+        "csrf_secret",
         "dsn",
         "database_url",
         "authorization",
+        "cookie",
     }
 )
 

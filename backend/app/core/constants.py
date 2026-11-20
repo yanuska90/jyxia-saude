@@ -1,14 +1,19 @@
-"""Domain constants and constrained taxonomies for JYXIA backend 0.1.0."""
+"""Domain constants and constrained taxonomies for JYXIA institutional backend."""
 
 from enum import StrEnum
 
 APP_NAME = "JYXIA Institutional Foundation"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 DEFAULT_POLICY_VERSION = "3.2.0"
 DEFAULT_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024  # 10 MiB ceiling for controlled synthetic binaries
 
 ALLOWED_MIME_TYPES: frozenset[str] = frozenset({"application/pdf", "image/png"})
 ALLOWED_ENVIRONMENTS: frozenset[str] = frozenset({"development", "test", "staging", "production"})
+
+SESSION_COOKIE_NAME = "jyxia_session"
+CSRF_COOKIE_NAME = "jyxia_csrf"
+OIDC_TX_COOKIE_NAME = "jyxia_oidc_tx"
+CSRF_HEADER_NAME = "X-CSRF-Token"
 
 
 class OrganizationStatus(StrEnum):
@@ -18,14 +23,28 @@ class OrganizationStatus(StrEnum):
 
 class OrganizationRole(StrEnum):
     ORG_ADMIN = "org_admin"
+    # Kept as 'clinical_reviewer' in schema/enum for backward compatibility; strictly administrative document reviewer.
     CLINICAL_REVIEWER = "clinical_reviewer"
     ADMIN_OPERATOR = "admin_operator"
     AUDITOR_READONLY = "auditor_readonly"
+    READ_ONLY = "read_only"
 
 
 class MembershipStatus(StrEnum):
     ACTIVE = "active"
+    SUSPENDED = "suspended"
     REVOKED = "revoked"
+
+
+class ExternalIdentityStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
+class SecurityAuditOutcome(StrEnum):
+    SUCCESS = "success"
+    DENIED = "denied"
+    FAILURE = "failure"
 
 
 class CaseReadinessState(StrEnum):
