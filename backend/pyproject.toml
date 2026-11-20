@@ -1,0 +1,10 @@
+[project]
+name = "jyxia-institutional-backend"
+version = "0.1.0"
+description = "Fundacao institucional inicial da JYXIA — Clinical Document Intelligence"
+requires-python = ">=3.13,<3.14"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["../tests/backend"]
+addopts = "-ra"

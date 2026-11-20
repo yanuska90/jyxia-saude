@@ -1,0 +1,90 @@
+"""Domain constants and constrained taxonomies for JYXIA backend 0.1.0."""
+
+from enum import StrEnum
+
+APP_NAME = "JYXIA Institutional Foundation"
+APP_VERSION = "0.1.0"
+DEFAULT_POLICY_VERSION = "3.2.0"
+DEFAULT_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024  # 10 MiB ceiling for controlled synthetic binaries
+
+ALLOWED_MIME_TYPES: frozenset[str] = frozenset({"application/pdf", "image/png"})
+ALLOWED_ENVIRONMENTS: frozenset[str] = frozenset({"development", "test", "staging", "production"})
+
+
+class OrganizationStatus(StrEnum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+
+
+class OrganizationRole(StrEnum):
+    ORG_ADMIN = "org_admin"
+    CLINICAL_REVIEWER = "clinical_reviewer"
+    ADMIN_OPERATOR = "admin_operator"
+    AUDITOR_READONLY = "auditor_readonly"
+
+
+class MembershipStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
+class CaseReadinessState(StrEnum):
+    PENDENTE = "pendente"
+    BLOQUEADO = "bloqueado"
+    ABSTENCAO = "abstencao"
+    CONFERIDA_COM_ESCOPO_LIMITADO = "conferida_com_escopo_limitado"
+    CONFERIDA = "conferida"
+
+
+class AxisName(StrEnum):
+    IDENTIDADE = "identidade"
+    PROCEDIMENTO_CODIGO = "procedimento_codigo"
+    LATERALIDADE = "lateralidade"
+    TEMPORALIDADE = "temporalidade"
+
+
+class AxisStatus(StrEnum):
+    OK = "ok"
+    CONFLITO = "conflito"
+    ABSTENCAO = "abstencao"
+    NAO_AVALIADO = "nao_avaliado"
+    NAO_APLICAVEL = "nao_aplicavel"
+    PENDENTE = "pendente"
+
+
+class DocumentKind(StrEnum):
+    LAUDO = "laudo"
+    PEDIDO = "pedido"
+    TERMO = "termo"
+    IMAGEM = "imagem"
+    DESCONHECIDO = "desconhecido"
+
+
+class ProcessingStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    ABSTAINED = "abstained"
+    QUARANTINED = "quarantined"
+    FAILED = "failed"
+
+
+class ExtractedFieldStatus(StrEnum):
+    EXTRACTED = "extracted"
+    ABSTAINED = "abstained"
+    AMBIGUOUS = "ambiguous"
+    UNREADABLE = "unreadable"
+
+
+class HumanReviewAction(StrEnum):
+    OBSERVED = "observed"
+    NOT_OBSERVED = "not_observed"
+    DATE_CORRECTION = "date_correction"
+    QUARANTINE_ACK = "quarantine_ack"
+    CASE_LINK_CONFIRMATION = "case_link_confirmation"
+    REPLACEMENT_CONFIRMATION = "replacement_confirmation"
+    ABSTENTION_REVIEW = "abstention_review"
+
+
+class StorageDriver(StrEnum):
+    LOCAL_CONTROLLED_SYNTHETIC = "local_controlled_synthetic"
