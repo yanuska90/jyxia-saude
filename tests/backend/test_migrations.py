@@ -27,13 +27,20 @@ EXPECTED_TABLES = {
     "evidence_references",
     "human_reviews",
     "audit_events",
+    "external_identities",
+    "oidc_auth_states",
+    "auth_sessions",
+    "security_auth_events",
 }
 
 
 def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
     tmp_path: Path, alembic_config_builder
 ) -> None:
-    external_url = os.environ.get("JYXIA_TEST_DATABASE_URL", "").strip()
+    external_url = (
+        os.environ.get("JYXIA_TEST_MIGRATION_DATABASE_URL", "").strip()
+        or os.environ.get("JYXIA_TEST_DATABASE_URL", "").strip()
+    )
     url = external_url or f"sqlite:///{(tmp_path / 'migration_cycle.sqlite3').as_posix()}"
     cfg = alembic_config_builder(url)
     engine = create_db_engine(url)
@@ -58,12 +65,26 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
 
+        # Incremental downgrade 0003 -> 0002
+        command.downgrade(cfg, "20261120_0002")
+        with engine.connect() as conn:
+            tables_0002 = set(inspect(conn).get_table_names())
+            assert "external_identities" not in tables_0002
+            assert "security_auth_events" not in tables_0002
+            assert "external_reference" in {
+                c["name"] for c in inspect(conn).get_columns("document_cases")
+            }
+
         # Incremental downgrade 0002 -> 0001
         command.downgrade(cfg, "20261120_0001")
         with engine.connect() as conn:
             inspector = inspect(conn)
-            assert "external_reference" not in {c["name"] for c in inspector.get_columns("document_cases")}
-            assert "schema_version" not in {c["name"] for c in inspector.get_columns("audit_events")}
+            assert "external_reference" not in {
+                c["name"] for c in inspector.get_columns("document_cases")
+            }
+            assert "schema_version" not in {
+                c["name"] for c in inspector.get_columns("audit_events")
+            }
 
         # Full downgrade -> base
         command.downgrade(cfg, "base")
@@ -71,7 +92,7 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             tables_after_down = set(inspect(conn).get_table_names())
             assert not (EXPECTED_TABLES & tables_after_down)
 
-        # Clean re-upgrade from empty DB to head (0002)
+        # Clean re-upgrade from empty DB to head (0003)
         command.upgrade(cfg, "head")
         with engine.connect() as conn:
             assert EXPECTED_TABLES.issubset(set(inspect(conn).get_table_names()))

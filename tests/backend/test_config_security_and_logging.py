@@ -22,13 +22,14 @@ from app.core.processing_contracts import (
     UnimplementedOcrAdapter,
     compute_processing_idempotency_key,
 )
-from app.core.security_prep import (
-    AuthenticatedPrincipal,
-    AuthenticationNotConfiguredError,
+from app.core.oidc import OidcNotConfiguredError, StandardOidcProviderAdapter
+from app.core.rbac import (
+    AuthenticatedSessionPrincipal,
     AuthorizationDeniedError,
+    AuthorizedTenantPrincipal,
     RbacPermission,
-    StubOidcAuthenticator,
-    require_permission,
+    permissions_for_role,
+    require_tenant_permission,
 )
 from app.schemas.tenant import (
     DocumentCreateInput,
@@ -46,11 +47,18 @@ def _valid_prod_env(**overrides: str) -> dict[str, str]:
         "JYXIA_ENV": "production",
         "JYXIA_DEBUG": "false",
         "JYXIA_LOG_LEVEL": "INFO",
-        "JYXIA_DATABASE_URL": "postgresql+psycopg://app_svc:Str0ng_Prod_T3st_Secr3t!@127.0.0.1:5432/jyxia_prod",
+        "JYXIA_DATABASE_URL": "postgresql+psycopg://jyxia_app:Str0ng_Prod_T3st_Secr3t!@127.0.0.1:5432/jyxia_prod",
         "JYXIA_ALLOW_LOCAL_SYNTHETIC_STORAGE": "false",
         "JYXIA_OIDC_ENABLED": "true",
+        "JYXIA_OIDC_ALLOW_HTTP_DEV": "false",
         "JYXIA_OIDC_ISSUER": "https://idp.exemplo.invalid",
         "JYXIA_OIDC_CLIENT_ID": "jyxia-prod-client",
+        "JYXIA_OIDC_CLIENT_SECRET": "Prod_Oidc_Client_Secr3t_V4lue_9981!",
+        "JYXIA_OIDC_REDIRECT_URI": "https://app.exemplo.invalid/api/v1/auth/callback",
+        "JYXIA_APP_BASE_URL": "https://app.exemplo.invalid",
+        "JYXIA_SESSION_SECRET": "Prod_Session_Hmac_Aead_Key_8877665544332211!",
+        "JYXIA_CSRF_SECRET": "Prod_Csrf_Hmac_Key_11223344556677889900!",
+        "JYXIA_SESSION_COOKIE_SECURE": "true",
         "JYXIA_CORS_ALLOWED_ORIGINS": "https://app.exemplo.invalid",
     }
     base.update(overrides)
@@ -97,38 +105,89 @@ def test_environment_configuration_fail_closed_and_dsn_masking() -> None:
         {"JYXIA_CORS_ALLOWED_ORIGINS": "http://insecure-app.local"},
         {"JYXIA_DATABASE_URL": "postgresql+psycopg://jyxia:SYNTHETIC_LOCAL_ONLY_CHANGE_ME@127.0.0.1:5432/db"},
         {"JYXIA_DATABASE_URL": "postgresql+psycopg://jyxia:short@127.0.0.1:5432/db"},
+        {"JYXIA_OIDC_ALLOW_HTTP_DEV": "true"},
+        {"JYXIA_SESSION_COOKIE_SECURE": "false"},
+        {"JYXIA_SESSION_SECRET": "short-secret"},
+        {"JYXIA_CSRF_SECRET": "SYNTHETIC_LOCAL_ONLY_CHANGE_ME_CSRF_001"},
+        {"JYXIA_OIDC_MFA_REQUIRED": "false"},
     ]
     for patch in insecure_cases:
         with pytest.raises(ConfigurationError, match="Invalid JYXIA backend configuration"):
             load_settings(_valid_prod_env(**patch))
 
 
-def test_security_prep_fails_closed_for_unconfigured_oidc_and_cross_org() -> None:
-    stub = StubOidcAuthenticator()
-    with pytest.raises(AuthenticationNotConfiguredError):
-        stub.authenticate_bearer_token("fake.jwt.token")
+def test_rbac_and_oidc_fail_closed_for_unconfigured_and_cross_org() -> None:
+    from datetime import datetime, timezone
 
-    principal = AuthenticatedPrincipal(
+    unconfigured_settings = load_settings({})
+    adapter = StandardOidcProviderAdapter(unconfigured_settings)
+    with pytest.raises(OidcNotConfiguredError):
+        adapter.build_authorization_url(state="s", nonce="n", code_verifier="v" * 44)
+
+    now = datetime.now(timezone.utc)
+    sess_ok = AuthenticatedSessionPrincipal(
+        session_id="sess-1",
         user_id="user-1",
-        organization_id="org-a",
-        role=OrganizationRole.CLINICAL_REVIEWER,
+        external_identity_id="ext-1",
+        issuer="https://idp.exemplo.invalid",
+        subject="sub-1",
+        email="rev@exemplo.invalid",
+        display_name="Reviewer",
         mfa_verified=True,
+        mfa_verified_at=now,
+        auth_time=now,
+        acr="urn:jyxia:loa:mfa",
+        amr=("pwd", "otp"),
+        selected_organization_id="org-a",
     )
-    require_permission(principal, RbacPermission.HUMAN_REVIEW_WRITE, target_organization_id="org-a")
-
-    with pytest.raises(AuthorizationDeniedError):
-        require_permission(None, RbacPermission.CASE_READ, target_organization_id="org-a")
-    with pytest.raises(AuthorizationDeniedError):
-        require_permission(principal, RbacPermission.CASE_READ, target_organization_id="org-b")
-
-    no_mfa = AuthenticatedPrincipal(
-        user_id="user-2",
+    authorized = AuthorizedTenantPrincipal(
+        session=sess_ok,
         organization_id="org-a",
+        membership_id="mem-1",
         role=OrganizationRole.CLINICAL_REVIEWER,
+        permissions=permissions_for_role(OrganizationRole.CLINICAL_REVIEWER),
+    )
+    require_tenant_permission(
+        authorized,
+        RbacPermission.HUMAN_REVIEW_WRITE,
+        target_organization_id="org-a",
+    )
+
+    with pytest.raises(AuthorizationDeniedError):
+        require_tenant_permission(
+            authorized,
+            RbacPermission.CASE_READ,
+            target_organization_id="org-b",
+        )
+
+    sess_no_mfa = AuthenticatedSessionPrincipal(
+        session_id="sess-2",
+        user_id="user-2",
+        external_identity_id="ext-2",
+        issuer="https://idp.exemplo.invalid",
+        subject="sub-2",
+        email="nomfa@exemplo.invalid",
+        display_name="No MFA",
         mfa_verified=False,
+        mfa_verified_at=now,
+        auth_time=now,
+        acr="urn:jyxia:loa:mfa",
+        amr=("pwd",),
+        selected_organization_id="org-a",
+    )
+    no_mfa = AuthorizedTenantPrincipal(
+        session=sess_no_mfa,
+        organization_id="org-a",
+        membership_id="mem-2",
+        role=OrganizationRole.CLINICAL_REVIEWER,
+        permissions=permissions_for_role(OrganizationRole.CLINICAL_REVIEWER),
     )
     with pytest.raises(AuthorizationDeniedError):
-        require_permission(no_mfa, RbacPermission.HUMAN_REVIEW_WRITE, target_organization_id="org-a")
+        require_tenant_permission(
+            no_mfa,
+            RbacPermission.HUMAN_REVIEW_WRITE,
+            target_organization_id="org-a",
+        )
 
 
 def test_processing_contracts_bounds_idempotency_and_ocr_refusal() -> None:

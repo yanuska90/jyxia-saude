@@ -11,16 +11,30 @@ from app.core.config import Settings
 from app.main import create_app
 
 
-def test_app_initialization_exposes_only_health_routes(tmp_path: Path) -> None:
+def test_app_initialization_exposes_health_auth_and_org_routes(tmp_path: Path) -> None:
     app = create_app(
         Settings(
             env="test",
             database_url=f"sqlite:///{(tmp_path / 'init.sqlite3').as_posix()}",
         )
     )
-    assert app.version == "0.1.0"
+    assert app.version == "0.2.0"
     paths = set(app.openapi()["paths"].keys())
-    assert paths == {"/api/v1/health/live", "/api/v1/health/ready"}
+    assert {
+        "/api/v1/health/live",
+        "/api/v1/health/ready",
+        "/api/v1/auth/login",
+        "/api/v1/auth/callback",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/session",
+        "/api/v1/auth/select-organization",
+        "/api/v1/me",
+        "/api/v1/me/organizations",
+        "/api/v1/organizations/{organization_id}/access-context",
+        "/api/v1/organizations/{organization_id}/cases",
+        "/api/v1/organizations/{organization_id}/members",
+        "/api/v1/organizations/{organization_id}/audit-events",
+    } == paths
 
 
 def test_production_mode_disables_all_interactive_and_openapi_docs() -> None:
@@ -34,6 +48,12 @@ def test_production_mode_disables_all_interactive_and_openapi_docs() -> None:
             oidc_enabled=True,
             oidc_issuer="https://idp.exemplo.invalid",
             oidc_client_id="jyxia-prod-client",
+            oidc_client_secret="Prod_Oidc_Client_Secr3t_V4lue_9981!",
+            oidc_redirect_uri="https://app.exemplo.invalid/api/v1/auth/callback",
+            app_base_url="https://app.exemplo.invalid",
+            session_secret="Prod_Session_Hmac_Aead_Key_8877665544332211!",
+            csrf_secret="Prod_Csrf_Hmac_Key_11223344556677889900!",
+            session_cookie_secure=True,
             cors_allowed_origins=("https://app.exemplo.invalid",),
         )
     )
@@ -53,7 +73,7 @@ def test_health_live_and_ready_success(migrated_engine) -> None:
         assert live.json() == {
             "status": "alive",
             "service": "JYXIA Institutional Foundation",
-            "version": "0.1.0",
+            "version": "0.2.0",
         }
 
         ready = client.get("/api/v1/health/ready")
