@@ -1,15 +1,15 @@
-JYXIA — materiais de submissão — versão 3.1.0 (revisão 20/11/2026)
+JYXIA — materiais de submissão — versão 3.2.0 (revisão 20/11/2026)
 
 NOME DO PROJETO
 JYXIA — Inteligência Documental em Saúde (Clinical Document Intelligence)
 
 RESUMO EM UMA FRASE
-A JYXIA organiza documentos externos de saúde para conferência administrativa prévia a procedimentos, ligando cada informação extraída à sua origem na página e sinalizando ausências, versões e divergências sob revisão humana.
+A JYXIA organiza documentos externos de saúde para conferência administrativa prévia a procedimentos, ligando cada informação extraída à sua origem na página e diferenciando compatibilidade, não aplicabilidade explícita, abstenção por dados ausentes e bloqueios sob revisão humana.
 
-DESCRIÇÃO FIEL AO ESTADO ATUAL (VERSÃO 3.1.0)
-A JYXIA desenvolve uma camada de apoio administrativo à conferência documental em saúde, complementar ao prontuário eletrônico (PEP). Na demonstração funcional pública atual (v3.1.0), o usuário testa no navegador um fluxo completo sobre 8 cenários e 14 arquivos sintéticos verificados por SHA-256: o Mozilla PDF.js 6.5.438 extrai texto de PDFs e calcula dinamicamente as coordenadas [x, y, w, h] na página; regras determinísticas estruturam até 10 campos textuais e a marca visual não autenticante; e quatro eixos consistentes conferem Identidade cadastral (com quarentena anti-homônimo), Procedimento/código, Lateralidade (ex.: OD × OE) e Temporalidade UTC/versões por subfamília.
+DESCRIÇÃO FIEL AO ESTADO ATUAL (VERSÃO 3.2.0)
+A JYXIA desenvolve uma camada de apoio administrativo à conferência documental em saúde, complementar ao prontuário eletrônico (PEP). Na demonstração funcional pública atual (Modalidade A, v3.2.0), o usuário testa no navegador um fluxo completo sobre 9 cenários e 18 arquivos sintéticos verificados por SHA-256: o Mozilla PDF.js 6.5.438 extrai texto de PDFs e calcula dinamicamente as coordenadas [x, y, w, h] na página; regras determinísticas estruturam 11 campos textuais prefixados (incluindo código e sistema de código declarado) e identificam o marcador textual literal MARCA FICTICIA — explicitando que se trata de marcador sintético e NÃO de reconhecimento visual nem autenticação de assinatura, mantendo a observação visual humana como ação independente em termos.
 
-O sistema bloqueia conclusão automática diante de divergências ou arquivos sem texto legível (imagem PNG sem OCR nesta etapa), destaca o trecho original ao clicar em "Ver fonte", gera resumo administrativo copiável das pendências e exporta o histórico da sessão em memória em JSON e CSV protegido. Não há OCR de imagens, IA generativa, banco persistente, autenticação institucional nem validação clínica/comercial realizados até esta data; pesquisas com equipes e compradores são o próximo passo imediato antes de construir servidor institucional.
+Os quatro eixos determinísticos (Identidade cadastral, Procedimento informado, Lateralidade e Temporalidade/Versões) usam seis estados explícitos (ok, conflito, abstencao, nao_avaliado, nao_aplicavel, pendente) e cinco estados gerais (pendente, bloqueado, abstencao, conferida_com_escopo_limitado, conferida). O Cenário 1 histórico (que omite procedimento e lateralidade) agora entra corretamente em abstenção em vez de declarar conferência integral, enquanto o novo Cenário 9 avalia os quatro eixos completos. Há ainda separação explícita entre a demo pública (whitelist SHA-256) e um laboratório experimental restrito a localhost (Modalidade B, fora do GitHub Pages) com aliases explícitos e benchmark sintético separado (8 casos), além de exportação JSON/CSV protegida contra fórmulas e histórico em memória encadeado por SHA-256. Não há OCR de imagens, IA generativa, banco persistente, autenticação institucional nem validação clínica/comercial realizados até esta data.
 
 TRILHA PRETENDIDA
 Saúde & bem-estar (conferir enquadramento final e elegibilidade no regulamento vigente).
@@ -26,20 +26,20 @@ ROTEIRO DE VÍDEO — META ATÉ 2 MINUTOS E 45 SEGUNDOS (LIMITE MÁXIMO DO REGUL
 “Eu sou a Yanuska. A ideia da JYXIA surgiu há cerca de seis anos, durante meu tratamento de câncer: exames ficavam separados entre serviços e eu precisava repetir minha história a cada atendimento, além de ter recebido um medicamento ao qual tinha alergia. Isso mostrou na prática o quanto informações organizadas e conferíveis importam.”
 
 [0:35–0:55 — João em câmera]
-“Conheci a Yanuska na faculdade e hoje dividimos a construção da JYXIA. Em vez de prometer um prontuário nacional ou diagnóstico por IA, escolhemos começar por um problema delimitado: conferir documentos recebidos antes de procedimentos eletivos com supervisão humana e fonte visível.”
+“Conheci a Yanuska na faculdade e hoje dividimos a construção da JYXIA. Em vez de prometer um prontuário nacional ou diagnóstico por IA, escolhemos começar por um problema delimitado e honesto: conferir documentos recebidos antes de procedimentos eletivos com supervisão humana e fonte visível.”
 
-[0:55–1:50 — Demonstração real da v3.1.0 na tela, narrada pelos dois]
+[0:55–1:50 — Demonstração real da v3.2.0 na tela, narrada pelos dois]
 Ações sugeridas na tela real HTTPS (sem cortes enganosos):
-1) Carregar Cenário 8 ("8 · Lateralidade divergente (OD × OE)"): mostrar os 4 eixos indicando BLOQUEIO automático em Lateralidade (solicitacao-od.pdf × termo-oe.pdf) e clicar em "Ver fonte" de Lateralidade para destacar o trecho exato na página calculado pelo PDF.js; abrir brevemente o Resumo Administrativo de pendências.
-2) Mostrar Cenário 4 ("4 · Identidade divergente") em quarentena bloqueada e Cenário 6 ("6 · Imagem sem texto extraível") em abstenção por não haver OCR nesta etapa.
-3) Mostrar Cenário 1 ("1 · Conjunto completo"), confirmar identidade e marca visual (explicitando que marca gráfica não autentica assinatura), chegando ao estado exclusivamente administrativo "Documentação conferida (regras do exemplo)", e mostrar exportação JSON/CSV.
-Fala de apoio: “Nesta demo pública, usamos exclusivamente 14 exemplos sintéticos validados por SHA-256 no navegador. O PDF.js lê o PDF e calcula as coordenadas da fonte na hora; divergências críticas de identidade ou lateralidade bloqueiam o avanço, e imagens sem camada de texto entram em abstenção porque ainda não há OCR ou LLM integrados nesta entrega.”
+1) Carregar Cenário 8 ("8 · Lateralidade divergente (OD × OE)"): mostrar o estado BLOQUEADO e clicar em "Ver fonte" de Lateralidade para destacar o trecho exato calculado pelo PDF.js; abrir brevemente o Resumo Administrativo de pendências.
+2) Mostrar Cenário 1 ("1 · Conjunto parcial histórico"): comprovar honestidade técnica ao terminar em ABSTENÇÃO porque procedimento e lateralidade estão ausentes, e Cenário 6 ("6 · Imagem sem texto extraível") sem OCR nem análise visual de assinatura.
+3) Mostrar Cenário 9 ("9 · Conjunto completo (4 eixos avaliados)"): revisar os 4 documentos com sistema de código e observação visual humana separada do marcador literal MARCA FICTICIA, chegando ao estado administrativo "Documentação conferida" e exportando JSON/CSV.
+Fala de apoio: “Nesta demo pública, usamos 18 exemplos sintéticos validados por SHA-256 no navegador. Quando falta dado obrigatório, o sistema se abstém em vez de dar falso positivo; quando há divergência crítica de identidade, procedimento ou lateralidade, bloqueia o avanço; e detecção de marcador textual nunca se passa por autenticação de assinatura.”
 
 [1:50–2:20 — João, com foco em validação e testes]
-“A base v3.1.0 possui 32 testes automatizados v3 (incluindo leitura real no PDF.js), 29 testes históricos preservados e conferência automatizada em navegador do desktop até 320 pixels no celular. A demo guarda tudo apenas na memória da aba, sem servidor nem integração hospitalar pronta — porque priorizamos validar o problema real antes de construir infraestrutura pesada.”
+“A base v3.2.0 reúne 37 testes automatizados de núcleo, PDF.js, laboratório local e benchmark sintético, 29 testes legados preservados, conferência E2E em navegador entre 320 e 1280 pixels com alvos acessíveis e pacote Pages restrito a 31 arquivos públicos.”
 
 [2:20–2:45 — Ambos em câmera]
-“Nosso próximo passo imediato já está estruturado: entrevistar equipes administrativas, de pré-operatório e autorização em hospitais e clínicas para medir onde há mais retrabalho e retorno real antes de evoluir o MVP. Queremos unir utilidade verificável e segurança em cada etapa.”
+“Nosso próximo passo imediato é ir a campo com roteiro neutro entrevistar equipes de pré-operatório e autorização em hospitais e clínicas para medir onde há mais retrabalho e decidir o caminho com base em evidências antes de construir infraestrutura pesada.”
 
 CHECKLIST PRÉ-ENVIO (AÇÃO HUMANA OBRIGATÓRIA)
 1. Conferir elegibilidade integral do histórico do repositório e da equipe na seção aplicável de https://hackbrasil.com/regulamento antes do envio (prazo exibido: 30/11/2026 às 23h59).

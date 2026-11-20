@@ -1,73 +1,56 @@
 # JYXIA Inteligência Documental em Saúde
 
-Versão 3.1.0 · Documentação sincronizada em 20 de novembro de 2026 · Yanuska e João.
+Versão **3.2.0** · Documentação sincronizada em 20 de novembro de 2026 · Yanuska e João.
 
 A JYXIA é uma camada administrativa de conferência e organização de documentos externos em saúde, complementar ao prontuário eletrônico (PEP), com vinculação visual à página original e revisão humana obrigatória. O primeiro recorte em investigação é a **conferência documental para procedimentos eletivos**; a eventual combinação com preparação documental para solicitação de autorização prévia está em avaliação comparativa junto a equipes e decisores, sem validação comercial concluída até esta data.
 
 - [Site HTTPS](https://yanuska90.github.io/jyxia-saude/)
 - [Demo documental HTTPS](https://yanuska90.github.io/jyxia-saude/demo.html)
 - [Projeto completo em DOCX](Projeto_JYXIA_Inteligencia_Documental_v3.docx)
-- [Exemplos fictícios para baixar](fixtures-jyxia.zip)
+- [18 exemplos fictícios para baixar](fixtures-jyxia.zip)
 
-## O que funciona nesta versão (`3.1.0`)
+## Modalidade A (Demonstração pública) vs. Modalidade B (Laboratório local) vs. Modalidade C (Futura)
 
-1. Adicione um dos **`8` cenários** ou anexe arquivos do catálogo fechado (`14` fixtures em [`fixtures-jyxia.zip`](fixtures-jyxia.zip) listados em [`documental-manifest.json`](documental-manifest.json)). Arquivos fora do catálogo têm entrada recusada por SHA-256 antes do parsing por política da demonstração pública.
-2. Para PDFs sintéticos com camada de texto, o **Mozilla PDF.js `6.5.438`** lê o conteúdo localmente e calcula dinamicamente as coordenadas `[x, y, w, h]` na página (`extractPdfLines`), enquanto regras determinísticas por prefixo extraem até **`10` campos textuais** (`Tipo`, `Subfamília`, `Paciente`, `Nascimento`, `Identificador`, `Emissão`, `Procedimento`, `Código documental` quando presente, `Lateralidade` e `Origem`) mais a detecção literal de marca visual (`MARCA FICTICIA`). “Ver fonte” destaca o trecho na página original.
-3. Os **quatro eixos determinísticos de consistência** (**Identidade cadastral**, **Procedimento informado**, **Lateralidade** e **Temporalidade e versões**) apontam divergências bloqueantes (como `OD × OE` no cenário 8 ou troca de cadastro em documento revisado), contradições no mesmo arquivo ou abstenção explícita por evidência ausente/incompleta, sem inferência clínica.
-4. Confira identidade, data de emissão (correções exigem justificativa de 5 a 500 caracteres preservando o valor original), lateralidade e área de assinatura. **Uma marca gráfica aparente não autentica assinatura nem valida certificado digital.**
-5. Acompanhe pendências com responsável fictício (`Revisor A` / `Revisor B`), prazo e justificativa, confirme substituições explícitas dentro da mesma subfamília documental sem ciclos, retire documentos com histórico preservado e gere o resumo administrativo padronizado para retorno ao emissor.
-6. Exporte a sessão em **JSON** desacoplado ou **CSV** (com BOM UTF-8 no download e neutralização contra injeção de fórmulas em células iniciadas por tabulação ou espaços/NBSP seguidos de `=`, `+`, `-`, `@`), além de conferir localmente o encadeamento SHA-256 dos eventos em memória. Não se trata de auditoria institucional imutável.
+1. **Modalidade A — Demonstração pública (`index.html`, `demo.html`):** restrita ao catálogo sintético fechado de **`18` fixtures** validados por SHA-256 em [`documental-manifest.json`](documental-manifest.json) (e [`fixtures-jyxia.zip`](fixtures-jyxia.zip)), executando localmente em memória do navegador com **`9` cenários** (incluindo o novo **Cenário 9 · Quatro eixos avaliados** vs. o **Cenário 1 histórico**, que entra honestamente em `abstencao` por omitir procedimento e lateralidade). Nenhum arquivo desconhecido ou dado real é aceito.
+2. **Modalidade B — Laboratório experimental local (`lab-local.html`, `lab-extractor.mjs`, `serve_lab.py`):** ambiente estritamente isolado em `localhost` (**não incluído no GitHub Pages e bloqueado com HTTP 404 em `serve_documental.py`**) para testar PDFs sintéticos externos com variações de diagramação, fontes (`Helvetica`, `Courier`, `Times-Roman`), rotações (`90°`, `180°`, `270°`), múltiplas páginas e aliases explícitos cadastrados de rótulos (sem fuzzy matching agressivo, sem OCR e sem persistência/logs de conteúdo).
+3. **Modalidade C — Processamento institucional futuro (planejada, não implementada):** backend autenticado, persistência privada, OCR auditado e integrações hospitalares, condicionados à conclusão das entrevistas e testes em conjunto reservado antes da evolução para produção.
 
-As regras são administrativas e versionadas (`policy.version`). A referência do exemplo é `14/11/2026`, com procedimento fictício previsto em `30/11/2026` e janela inicial de `30` dias calculada em UTC (`diffDaysISO`) para a data do laudo. “Documentação conferida (regras do exemplo)” não libera cirurgia nem substitui decisão clínica ou de operadora.
+## O que funciona na versão `3.2.0`
+
+1. **Extração real via PDF.js e coordenadas dinâmicas:** o Mozilla PDF.js `6.5.438` lê texto de PDFs sintéticos localmente no navegador (`extractPdfLines`) e calcula dinamicamente as caixas `[x, y, w, h]` (inclusive em páginas rotacionadas), extraindo até **`11` chaves prefixadas** (`Tipo`, `Subfamília`, `Paciente`, `Nascimento`, `Identificador`, `Emissão`, `Procedimento`, `Código documental`, `Sistema do código`, `Origem do sistema` derivada e `Lateralidade`, além de `Origem`).
+2. **Marcador textual sintético separado da observação humana:** a detecção da expressão literal `'MARCA FICTICIA'` (`syntheticMarkerCue`) sinaliza exclusivamente presença textual na camada PDF (**não executa reconhecimento visual nem autentica assinatura, signatário, CRM ou validade jurídica**). A observação visual humana na página (`humanVisualObservation`: `unknown` / `observed` / `not_observed`) é ação separada em termos. Documentos PNG sem texto nunca são apresentados como analisados quanto à assinatura.
+3. **Seis estados explícitos por eixo e cinco estados gerais (`readinessState`):**
+   - **Estados por eixo (`consistencyAxes`):** `ok`, `conflito`, `abstencao`, `nao_avaliado`, `nao_aplicavel` (apenas por declaração explícita — campo ausente nunca vira `nao_aplicavel`) e `pendente`.
+   - **Estados gerais:** `pendente`, `bloqueado` (quarentena, conflito ou abstenção bloqueante), `abstencao` (informação insuficiente em eixo obrigatório), `conferida_com_escopo_limitado` (eixo explicitamente declarado não aplicável) e `conferida` (quatro eixos avaliados e compatíveis nas regras do exemplo). **Nenhum estado aprova ou libera procedimento clínico.**
+4. **Comparação conservadora de procedimentos e códigos:** diferencia correspondência textual exata, correspondência após normalização superficial, correspondência por código com sistema identificado (`procedureCodeSystem` declarado por `Sistema:` ou prefixo explícito `TUSS:`/`SIGTAP:`/`CBHPM:`/`SUS:`), divergência textual, divergência de códigos e ambiguidade de múltiplos candidatos. Sem dicionários clínicos inventados — nunca equipara `"Cirurgia de catarata"` e `"Facoemulsificação"` automaticamente. Quando um código não declara sistema, emite explicitamente: `"Código encontrado, sistema de codificação não identificado."`
+5. **Temporalidade explícita e versões:** regra configurável em dias UTC (`diffDaysISO`) caracterizada como **ilustrativa/configurável do exemplo** (`14/11/2026` referência, `30/11/2026` procedimento, janela inicial de `30` dias aplicada somente à categoria `Laudo`), diferenciando `atualizado`, `antigo`, `fora_janela`, `prazo_desconhecido`, `data_invalida`, `data_futura` e `validade_nao_definida`. Datas mais recentes nunca substituem versões anteriores sem `replace()` explícito do mesmo tipo e subfamília sem ciclos.
+6. **Rastreabilidade local e exportações:** histórico em memória, cadeia local SHA-256 (`events[]` com `actorAuthenticated: false`, preservando `originalValue`, `revisedValue`, referência documental/espacial e `policyVersion`), resumo administrativo copiável e exportações **JSON** (`schema: 'jyxia.documental-session.v2'`, diferenciando os 5 níveis de rastreabilidade, extração vs. revisão e limitações) e **CSV** (`19` colunas com BOM UTF-8 no download e `csvSafeCell()` neutralizando fórmulas iniciadas por tabulação ou espaços/NBSP + `=`, `+`, `-`, `@`). **Cadeia local em memória não é auditoria institucional imutável.**
 
 ## Estado real, lacunas e limites
 
-- **Sem OCR nem IA nesta versão:** arquivos de imagem (`imagem-ilegivel.png`) ou PDFs sem camada de texto selecionável recebem `readable = false` e ficam em quarentena/abstenção para reenvio ou conferência manual.
-- **Execução estritamente local e volátil:** o protótipo funciona na memória da aba, sem backend persistente, banco PostgreSQL, armazenamento S3, autenticação OIDC/MFA ou integração ativa com MV, Tasy (Bionexo), RNDS ou operadoras. Importar `casos-ficticios.csv`/`.json` valida apenas o cadastro sintético permitido por hash. **Não insira dados reais de pacientes em nenhum campo ou observação.**
-- **Validação de mercado e regulatória pendentes:** ainda não foram executadas entrevistas com usuários/compradores (`0`), testes em hospitais (`0`), contratos comerciais (`0`), busca/registro oficial da marca pretendida **JYXIA** no INPI, nem parecer jurídico LGPD/DPA ou parecer técnico-regulatório ANVISA (RDC nº 657/2022). As métricas automatizadas atuais validam apenas o comportamento determinístico sobre os exemplos conhecidos de desenvolvimento. Veja [arquitetura](ARQUITETURA.md), [segurança](SEGURANCA.md), [dados fictícios](DADOS_FICTICIOS.md) e [validação](VALIDACAO_DOCUMENTAL.md).
+- **Sem OCR nem IA:** imagens PNG (`imagem-ilegivel.png`) e PDFs sem texto selecionável (`readable = false`) entram em quarentena/abstenção imediata.
+- **Sem persistência, login ou integração ativa:** execução integralmente volátil na aba do navegador; sem backend PostgreSQL, S3, OIDC/MFA ou integração hospitalar (MV, Tasy/Bionexo, RNDS ou operadoras). **Não insira dados reais de pacientes em nenhum arquivo ou campo.**
+- **Validação de campo e regulatória pendentes:** `0` entrevistas em campo executadas até esta data, `0` testes em hospitais reais, `0` contratos, marca pretendida **JYXIA** ainda não protocolada no INPI e pareceres LGPD/DPA/ANVISA pendentes antes de piloto com dados reais. Resultados do benchmark sintético interno (`benchmark/`) medem apenas robustez determinística em casos artificiais criados pela equipe.
 
 ## Como executar e testar
 
-Para desenvolvimento local, sirva por HTTP com Python 3 (abrir `demo.html` diretamente via `file://` bloqueia módulos ES e worker PDF.js):
-
 ```sh
+# 1. Demonstração pública (Modalidade A — localhost)
 python serve_documental.py --bind 127.0.0.1 --port 8000
-node --test test_documental.mjs test_documental_pdfjs.mjs
+
+# 2. Laboratório experimental local (Modalidade B — localhost exclusivo)
+python serve_lab.py --bind 127.0.0.1 --port 8099
+
+# 3. Suítes automatizadas completas (Núcleo, PDF.js, Lab/Benchmark, Regressão v2, Higiene, E2E e Pages local)
+node --test test_documental.mjs test_documental_pdfjs.mjs test_lab_and_benchmark.mjs test_security.cjs test_synthetic_import.cjs
+python -m unittest test_integration.py -v
 python check_publication.py
 node test_documental_e2e.mjs
+python test_pages_package_local.py
 ```
 
-*(Observação: `node test_documental_e2e.mjs` requer Chromium/Edge instalado localmente ou caminho via `JYXIA_BROWSER_BIN`. O workflow `.github/workflows/pages.yml` publica uma lista explícita de `27` arquivos estáticos em `main`/`workflow_dispatch`, excluindo servidor local, testes e arquivos v2.x.)*
+*(O workflow `.github/workflows/pages.yml` publica estritamente `31` arquivos estáticos da Modalidade A, mantendo laboratório experimental, benchmark e suítes de teste fora do pacote público.)*
 
-Testes históricos preservados da versão anterior v2.x (executados isoladamente para regressão):
+## Origem, equipe e dependências
 
-```sh
-node --test test_security.cjs test_synthetic_import.cjs
-python -m unittest test_integration.py -v
-```
-
-Alternativa Docker para a demo documental estática (usuário sem privilégios, somente leitura, porta vinculada a `127.0.0.1`, sem banco):
-
-```sh
-docker compose -f compose.documental.yaml up --build
-```
-
-## Origem e equipe
-
-A ideia surgiu quando eu, Yanuska, vivenciei um câncer há cerca de seis anos. Meus exames não estavam reunidos e eu precisava repetir minha história nos atendimentos. Também recebi um medicamento ao qual tinha alergia. Essa experiência mostrou a importância de informações acessíveis, organizadas e disponíveis para quem cuida do paciente.
-
-Conheci o João durante a faculdade e compartilhei a ideia. Aprendemos muito juntos ao longo deste ano. Hoje dividimos a responsabilidade e o compromisso de investigar, validar em campo e construir a JYXIA com disciplina e evidências reais antes de escalar. *(Este relato registra a motivação humana fundadora, não substitui validação clínica ou comercial.)*
-
-## Estratégia e histórico
-
-- O núcleo atual prioriza conferência documental administrativa em procedimentos eletivos, mantendo acessibilidade como requisito contínuo. Teleconsulta, prescrições, prontuário único nacional e predição clínica ficam fora do escopo do produto.
-- `demo-v2.html` e seus módulos/APIs históricos (`app.py`, `compose.yaml`) permanecem preservados para rastreabilidade e regressão, sem compor o fluxo documental `3.1.0`.
-- Os materiais completos de revisão estratégica e descoberta permanecem em documentação interna de governança para evitar confundir hipóteses e análises em curso com entregas implementadas no repositório público.
-
-## Hack Brasil
-
-Trilha pretendida: Saúde & bem-estar. [Regulamento oficial](https://hackbrasil.com/regulamento) (prazo até `30/11/2026 às 23h59`; critérios com pesos iguais: execução técnica, implementação técnica, impacto e comunicação; exigência de dados sintéticos em saúde). Roteiro e checklist em [Submissao_e_video_JYXIA.txt](Submissao_e_video_JYXIA.txt). Vídeo, aceites e elegibilidade final do histórico Git dependem de conferência e ação da equipe.
-
-## Dependência de terceiros e licenciamento
-
-Mozilla PDF.js `6.5.438`, distribuído localmente em `vendor/` sob licença Apache 2.0 ([`vendor/PDFJS-LICENSE.txt`](vendor/PDFJS-LICENSE.txt)), com integridade descrita em [DEPENDENCIAS.md](DEPENDENCIAS.md). Nenhuma dependência externa ou API de IA recebe documentos nesta versão. A definição de licença própria para o código-fonte da JYXIA permanece pendente de decisão dos fundadores.
+A ideia surgiu quando Yanuska vivenciou um câncer há cerca de seis anos e enfrentou fragmentação de exames e recebimento de medicamento ao qual tinha alergia; junto com João, construiu este protótipo administrativo para investigar evidências antes de escalar. Dependência runtime única: Mozilla PDF.js `6.5.438` em `vendor/` (Apache 2.0; ver [DEPENDENCIAS.md](DEPENDENCIAS.md)). Demais arquivos estratégicos detalhados em [ARQUITETURA.md](ARQUITETURA.md), [VALIDACAO_DOCUMENTAL.md](VALIDACAO_DOCUMENTAL.md), [DADOS_FICTICIOS.md](DADOS_FICTICIOS.md), [SEGURANCA.md](SEGURANCA.md), [INTEGRACOES.md](INTEGRACOES.md) e [CHANGELOG.md](CHANGELOG.md).
