@@ -29,7 +29,7 @@ jobs:
 
   backend-checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -57,15 +57,65 @@ jobs:
           python3 -m venv /tmp/jyxia-ci-venv
           /tmp/jyxia-ci-venv/bin/pip install --no-cache-dir -r backend/requirements-dev.txt
           /tmp/jyxia-ci-venv/bin/pip-audit
-      - name: Verificar ciclo completo e incremental Alembic em PostgreSQL 16
+      - name: Inicializar role restrita jyxia_app no PostgreSQL 16 e verificar migracoes Alembic
         env:
-          JYXIA_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_APP_PW: jyxia_ci_app_ephemeral_pw
+          JYXIA_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
         run: |
+          echo "::add-mask::$JYXIA_APP_PW"
+          /tmp/jyxia-ci-venv/bin/python -c "
+          import os, psycopg
+          pw = os.environ['JYXIA_APP_PW']
+          with psycopg.connect(os.environ['JYXIA_MIGRATION_DATABASE_URL'].replace('+psycopg', ''), autocommit=True) as conn:
+              with conn.cursor() as cur:
+                  cur.execute(\"\"\"
+                  DO \$\$
+                  BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'jyxia_app') THEN
+                          CREATE ROLE jyxia_app LOGIN PASSWORD 'jyxia_ci_app_ephemeral_pw'
+                              NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+                      END IF;
+                  END \$\$;
+                  REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+                  GRANT USAGE ON SCHEMA public TO jyxia_app;
+                  GRANT CONNECT ON DATABASE jyxia_test TO jyxia_app;
+                  \"\"\")
+          "
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0002
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0001
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade base
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
-      - name: Executar suite Pytest completa contra PostgreSQL 16 real
+      - name: Iniciar Keycloak 26.8.2 e provisionar realm jyxia-dev + TOTP efemero
+        run: |
+          KC_PW="CiKcAdmin_$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+          echo "::add-mask::$KC_PW"
+          echo "KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin" >> "$GITHUB_ENV"
+          echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$KC_PW" >> "$GITHUB_ENV"
+          docker run -d --name jyxia-keycloak-ci \
+            -p 127.0.0.1:8080:8080 \
+            -p 127.0.0.1:9000:9000 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin \
+            -e "KC_BOOTSTRAP_ADMIN_PASSWORD=$KC_PW" \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8080 \
+            -e KC_HOSTNAME_STRICT=false \
+            -v "$GITHUB_WORKSPACE/backend/keycloak/jyxia-dev-realm.json:/opt/keycloak/data/import/jyxia-dev-realm.json:ro" \
+            quay.io/keycloak/keycloak:26.8.2 start-dev --import-realm
+          export KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin
+          export KC_BOOTSTRAP_ADMIN_PASSWORD="$KC_PW"
+          /tmp/jyxia-ci-venv/bin/python tools/ci_setup_keycloak_e2e.py
+      - name: Executar suite Pytest completa (PostgreSQL 16 RLS + Keycloak 26.8.2 MFA E2E, zero skips)
         env:
-          JYXIA_TEST_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
-        run: /tmp/jyxia-ci-venv/bin/pytest tests/backend -v
+          JYXIA_TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_TEST_APP_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
+        run: |
+          /tmp/jyxia-ci-venv/bin/pytest tests/backend -v -rs > /tmp/pytest_ci.log 2>&1 || (cat /tmp/pytest_ci.log; docker logs jyxia-keycloak-ci || true; exit 1)
+          cat /tmp/pytest_ci.log
+          if grep -E "SKIPPED|[0-9]+ skipped" /tmp/pytest_ci.log; then
+            echo "ERROR: Unexpected skipped test in PostgreSQL/Keycloak CI verification."
+            exit 1
+          fi
+      - name: Parar container Keycloak efemero
+        if: always()
+        run: docker rm -f jyxia-keycloak-ci || true
