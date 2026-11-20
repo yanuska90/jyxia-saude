@@ -12,13 +12,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.constants import MembershipStatus
 from app.core.logging import FORBIDDEN_LOG_KEYS, redact_sensitive_text
-from app.db.base import utc_now
+from app.db.base import new_uuid, utc_now
+from app.db.session import apply_pg_rls_context
 from app.models.entities import (
     AUDIT_SCHEMA_VERSION,
     AuditEvent,
@@ -225,6 +226,11 @@ def _require_tenant_row(
     record_id: str,
     label: str,
 ) -> ModelT:
+    apply_pg_rls_context(
+        session,
+        organization_id=ctx.organization_id,
+        user_id=ctx.actor_user_id,
+    )
     row = session.scalar(
         select(model).where(
             getattr(model, "id") == record_id,
@@ -277,6 +283,7 @@ class OrganizationRepository:
         user_id: str,
         role: str,
     ) -> OrganizationMembership:
+        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
         org = session.get(Organization, ctx.organization_id)
         if org is None:
             raise TenantScopeError(f"Organization '{ctx.organization_id}' does not exist.")
@@ -296,6 +303,7 @@ class OrganizationRepository:
     def get_active_membership(
         session: Session, ctx: TenantContext, *, user_id: str
     ) -> OrganizationMembership | None:
+        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
         return session.scalar(
             select(OrganizationMembership).where(
                 OrganizationMembership.organization_id == ctx.organization_id,
@@ -306,6 +314,7 @@ class OrganizationRepository:
 
     @staticmethod
     def list_memberships(session: Session, ctx: TenantContext) -> list[OrganizationMembership]:
+        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
         return list(
             session.scalars(
                 select(OrganizationMembership)
@@ -313,6 +322,19 @@ class OrganizationRepository:
                 .order_by(OrganizationMembership.created_at.asc())
             )
         )
+
+    @staticmethod
+    def list_memberships_with_users(
+        session: Session, ctx: TenantContext
+    ) -> list[tuple[OrganizationMembership, User]]:
+        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
+        rows = session.execute(
+            select(OrganizationMembership, User)
+            .join(User, User.id == OrganizationMembership.user_id)
+            .where(OrganizationMembership.organization_id == ctx.organization_id)
+            .order_by(OrganizationMembership.created_at.asc())
+        ).all()
+        return [(membership, user) for membership, user in rows]
 
 
 class CaseAndDocumentRepository:
@@ -329,6 +351,9 @@ class CaseAndDocumentRepository:
         declared_laterality: str | None,
         readiness_state: str,
     ) -> DocumentCase:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         case = DocumentCase(
             organization_id=ctx.organization_id,
             case_code=case_code,
@@ -346,6 +371,9 @@ class CaseAndDocumentRepository:
 
     @staticmethod
     def get_case(session: Session, ctx: TenantContext, case_id: str) -> DocumentCase | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return session.scalar(
             select(DocumentCase).where(
                 DocumentCase.id == case_id,
@@ -355,6 +383,9 @@ class CaseAndDocumentRepository:
 
     @staticmethod
     def list_cases(session: Session, ctx: TenantContext) -> list[DocumentCase]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return list(
             session.scalars(
                 select(DocumentCase)
@@ -375,6 +406,9 @@ class CaseAndDocumentRepository:
         quarantined: bool,
         quarantine_reason: str | None,
     ) -> Document:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         if case_id is not None:
             _require_tenant_row(session, DocumentCase, ctx, case_id, "DocumentCase")
         document = Document(
@@ -392,6 +426,9 @@ class CaseAndDocumentRepository:
 
     @staticmethod
     def get_document(session: Session, ctx: TenantContext, document_id: str) -> Document | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return session.scalar(
             select(Document).where(
                 Document.id == document_id,
@@ -435,6 +472,9 @@ class CaseAndDocumentRepository:
     def get_document_version(
         session: Session, ctx: TenantContext, version_id: str
     ) -> DocumentVersion | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return session.scalar(
             select(DocumentVersion).where(
                 DocumentVersion.id == version_id,
@@ -605,15 +645,30 @@ class AuditEventRepository:
         created_at: datetime | None = None,
     ) -> AuditEvent:
         safe_payload = assert_safe_audit_payload(payload_json)
-        # Lock parent Organization row inside active transaction so concurrent workers on the
-        # same tenant serialize head reads without creating sequence collisions or chain forks.
-        locked_org_id = session.scalar(
-            select(Organization.id)
-            .where(Organization.id == ctx.organization_id)
-            .with_for_update()
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
         )
-        if locked_org_id is None:
-            raise TenantScopeError(f"Organization '{ctx.organization_id}' does not exist.")
+        bind = session.get_bind()
+        is_pg = bind is not None and bind.dialect.name == "postgresql"
+
+        if is_pg:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext('audit:' || :org_id))"),
+                {"org_id": ctx.organization_id},
+            )
+            org_exists = session.scalar(
+                select(Organization.id).where(Organization.id == ctx.organization_id)
+            )
+            if org_exists is None:
+                raise TenantScopeError(f"Organization '{ctx.organization_id}' does not exist.")
+        else:
+            locked_org_id = session.scalar(
+                select(Organization.id)
+                .where(Organization.id == ctx.organization_id)
+                .with_for_update()
+            )
+            if locked_org_id is None:
+                raise TenantScopeError(f"Organization '{ctx.organization_id}' does not exist.")
 
         if ctx.actor_user_id is not None:
             actor_membership = OrganizationRepository.get_active_membership(
@@ -645,6 +700,35 @@ class AuditEventRepository:
             payload_json=safe_payload,
             prev_event_hash=prev_hash,
         )
+        if is_pg:
+            event_id = new_uuid()
+            session.execute(
+                text(
+                    "SELECT public.jyxia_append_audit_event("
+                    ":p_id, :p_organization_id, :p_schema_version, :p_sequence_number, "
+                    ":p_actor_user_id, :p_event_type, :p_target_entity_type, "
+                    ":p_target_entity_id, :p_payload_json, :p_prev_event_hash, "
+                    ":p_event_hash, :p_created_at)"
+                ),
+                {
+                    "p_id": event_id,
+                    "p_organization_id": ctx.organization_id,
+                    "p_schema_version": AUDIT_SCHEMA_VERSION,
+                    "p_sequence_number": next_seq,
+                    "p_actor_user_id": ctx.actor_user_id,
+                    "p_event_type": event_type,
+                    "p_target_entity_type": target_entity_type,
+                    "p_target_entity_id": target_entity_id,
+                    "p_payload_json": json.dumps(safe_payload, ensure_ascii=True),
+                    "p_prev_event_hash": prev_hash,
+                    "p_event_hash": event_hash,
+                    "p_created_at": timestamp,
+                },
+            )
+            inserted = session.scalar(select(AuditEvent).where(AuditEvent.id == event_id))
+            assert inserted is not None
+            return inserted
+
         row = AuditEvent(
             organization_id=ctx.organization_id,
             schema_version=AUDIT_SCHEMA_VERSION,
@@ -707,6 +791,9 @@ class AuditEventRepository:
 
     @staticmethod
     def list_events(session: Session, ctx: TenantContext) -> list[AuditEvent]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return list(
             session.scalars(
                 select(AuditEvent)
@@ -717,6 +804,9 @@ class AuditEventRepository:
 
     @staticmethod
     def count_events(session: Session, ctx: TenantContext) -> int:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return int(
             session.scalar(
                 select(func.count(AuditEvent.id)).where(

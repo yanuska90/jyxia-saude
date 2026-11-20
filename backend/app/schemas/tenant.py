@@ -44,7 +44,9 @@ class TenantContext(BaseModel):
 
     organization_id: str = Field(min_length=1, max_length=36)
     actor_user_id: str | None = Field(default=None, min_length=1, max_length=36)
-    source: Literal["internal_service", "test", "cli"] = "internal_service"
+    source: Literal["internal_service", "authenticated_request", "test", "cli"] = (
+        "internal_service"
+    )
 
 
 class OrganizationCreateInput(BaseModel):
