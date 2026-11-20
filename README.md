@@ -1,68 +1,50 @@
 # JYXIA Inteligência Documental em Saúde
 
-Versão 3.0.0 · 14 de novembro de 2026 · Yanuska e João.
+Demonstração pública **3.2.0** (`frontend/public/`) · Backend institucional **0.2.0** (`backend/` · Etapa 3.2) · Documentação sincronizada em **20 de novembro de 2026** · Yanuska e João.
 
-A JYXIA organiza documentos, mostra a origem de informações e acompanha pendências com revisão humana. O primeiro módulo é a **conferência documental para procedimentos eletivos**. A hipótese de valor é reduzir procura, redigitação e retrabalho; ainda não há benefício operacional ou clínico validado.
+A JYXIA é uma camada administrativa de conferência e organização de documentos externos em saúde, complementar ao prontuário eletrônico (PEP), com vinculação visual à página original e revisão humana obrigatória. O primeiro recorte em investigação é a **conferência documental para procedimentos eletivos**.
 
-- [Site HTTPS](https://yanuska90.github.io/jyxia-saude/)
+- [Site HTTPS (Modalidade A)](https://yanuska90.github.io/jyxia-saude/)
 - [Demo documental HTTPS](https://yanuska90.github.io/jyxia-saude/demo.html)
-- [Projeto completo em DOCX](Projeto_JYXIA_Inteligencia_Documental_v3.docx)
-- [Exemplos fictícios para baixar](fixtures-jyxia.zip)
+- [Projeto completo em DOCX](frontend/public/assets/Projeto_JYXIA_Inteligencia_Documental_v3.docx)
+- [18 exemplos fictícios para baixar](frontend/public/assets/fixtures-jyxia.zip)
 
-## O que funciona
+## Modalidades e estrutura canônica (`Etapas 3.0–3.2`)
 
-1. Adicione um dos sete cenários ou anexe os arquivos fornecidos. O conteúdo deve corresponder ao catálogo sintético por SHA256; arquivos pessoais ou modificados são recusados.
-2. A demo extrai texto de PDFs com PDF.js, localiza nome, nascimento, identificador, emissão, tipo e origem informada. “Ver fonte” destaca o trecho na página original.
-3. Confira a identidade, a data e, em termos, a área de assinatura. Correções de data exigem observação e preservam o valor extraído. Uma marca visual não autentica assinatura.
-4. Trate pendências, atribua responsável fictício e prazo. Exceções exigem justificativa. Documentos divergentes ficam em quarentena sem vínculo confirmado ao caso.
-5. Confirme substituições entre documentos revisados do mesmo tipo; ambos ficam preservados. Arquivos idênticos não geram cópias adicionais.
-6. Exporte a sessão em JSON e verifique a sequência de hashes dos eventos. Não se trata de auditoria imutável ou autenticação de autoria.
+1. **Modalidade A — Demonstração pública (`frontend/public/`):** exatos **`31` arquivos** estáticos publicados seletivamente pelo [`.github/workflows/pages.yml`](.github/workflows/pages.yml), restritos ao catálogo sintético fechado de `18` fixtures validados por SHA-256 (`documental-manifest.json`) e `9` cenários no navegador, com Mozilla PDF.js `6.5.438` (`frontend/public/vendor/`). Permanece 100% estática e desconectada do backend.
+2. **Modalidade B — Laboratório experimental local (`frontend/lab/` + `tools/serve_lab.py`):** ambiente estritamente isolado em `127.0.0.1` / `localhost` (**fora do GitHub Pages e bloqueado com HTTP `404` em `tools/serve_documental.py`**) para testes de diagramação, rotações e aliases explícitos sem OCR e sem persistência em disco.
+3. **Modalidade C — Backend institucional (`backend/` `0.2.0`):** FastAPI com BFF OpenID Connect (PKCE `S256` + JWKS + **MFA obrigatório**, Keycloak `26.8.2` em dev/CI), cookies opacos com proteção CSRF/`Origin`, vinculação `(issuer, subject)`, matriz RBAC administrativa em `5` papéis, `15` modelos relacionais em SQLAlchemy 2.x, PostgreSQL 16 com separação `jyxia_app` vs. `migration_owner`, **Row-Level Security (`RLS`)**, trilha append-only (`AuditEvent` e `SecurityAuditEvent` via `SECURITY DEFINER` + triggers `UPDATE`/`DELETE`/`TRUNCATE`) e `LocalControlledSyntheticStorage`. **Upload/processamento HTTP completo de dossiês, OCR, LLM, S3 e conectores hospitalares permanecem intencionalmente fora desta entrega.**
+4. **Arquivo histórico preservado isoladamente (`legacy/v2/`):** artefatos da fase `v2.x` mantidos exclusivamente para as regressões em `tests/legacy/`, sem conexão com `frontend/public/` e sem reutilização em `backend/`.
 
-As regras são administrativas e versionadas. A referência do exemplo é 14/11/2026, com procedimento fictício em 30/11/2026 e janela inicial de 30 dias para a data do laudo. “Sem pendências” não libera procedimento.
-
-## Estado real e limites
-
-O fluxo atual usa **extração determinística de PDFs com texto**, não IA generativa nem OCR de imagens. A imagem fictícia vai para revisão/reenvio. Há um caso sintético; a importação CSV/JSON confirma o cadastro fornecido. Não há busca por CPF real.
-
-Arquivos e alterações permanecem na memória da aba e desaparecem ao recarregar. A demo não envia arquivos ao servidor, não possui login institucional, banco documental persistente, integração hospitalar, RNDS ou assinatura digital. Não inserir dados reais, mesmo nas observações. A hospedagem recebe requisições normais de acesso ao site.
-
-OCR, extração assistida por IA, autenticação, autorização por instituição/caso, processamento isolado e armazenamento privado são próximas fases. Veja [arquitetura](ARQUITETURA.md), [segurança](SEGURANCA.md) e [validação](VALIDACAO_DOCUMENTAL.md).
-
-## Como executar e testar
-
-A banca pode usar diretamente a demo HTTPS, sem instalação. Para desenvolvimento, use um servidor estático local com Python 3 e abra a página servida; abrir o HTML como arquivo não carrega os módulos:
+## Como executar e verificar localmente
 
 ```sh
-python -m http.server 8000 --bind 127.0.0.1
-node --test test_documental.mjs test_security.cjs test_synthetic_import.cjs
-python -m unittest test_integration.py -v
-python check_publication.py
+# 1. Demonstração pública (Modalidade A — localhost)
+python tools/serve_documental.py --bind 127.0.0.1 --port 8000
+
+# 2. Laboratório experimental local (Modalidade B — localhost exclusivo)
+python tools/serve_lab.py --bind 127.0.0.1 --port 8099
+
+# 3. API institucional (Modalidade C — health, BFF auth OIDC/MFA e endpoints RBAC organizacionais)
+# Requer PostgreSQL + IdP OIDC configurados localmente (ver .env.example e compose.institutional.yaml)
+uvicorn --app-dir backend app.main:app --host 127.0.0.1 --port 8001
+
+# 4. Suítes automatizadas completas
+node --test tests/frontend/test_documental.mjs tests/frontend/test_documental_pdfjs.mjs tests/frontend/test_lab_and_benchmark.mjs tests/legacy/test_security.cjs tests/legacy/test_synthetic_import.cjs
+python -m unittest discover -s tests/legacy -v
+pytest tests/backend -v
+python tools/check_publication.py
+node tests/e2e/test_documental_e2e.mjs
+python tools/verify_pages_package.py
 ```
 
-Alternativa Docker para a demo documental, sem banco ou senha:
+## Documentação canônica (`docs/`)
 
-```sh
-docker compose -f compose.documental.yaml up --build
-```
-
-O endereço local serve apenas para desenvolvimento; a entrega pública usa o HTTPS acima. O Docker documental executa um servidor estático restrito aos arquivos de publicação, como usuário sem privilégios, sistema de arquivos somente leitura e porta vinculada a 127.0.0.1. Isso não o torna um ambiente clínico.
-
-## Origem e equipe
-
-A ideia surgiu quando eu, Yanuska, vivenciei um câncer há cerca de seis anos. Meus exames não estavam reunidos e eu precisava repetir minha história nos atendimentos. Também recebi um medicamento ao qual tinha alergia. Essa experiência mostrou a importância de informações acessíveis, organizadas e disponíveis para quem cuida do paciente.
-
-Conheci o João durante a faculdade e compartilhei a ideia. Aprendemos muito juntos ao longo deste ano. Hoje dividimos a responsabilidade e o sonho de fazer a JYXIA acontecer e contribuir para uma saúde mais ágil e acessível.
-
-## Estratégia e histórico
-
-O foco atual segue os quatro materiais enviados pela equipe sobre Clinical Document Intelligence. Acessibilidade continua como requisito transversal. Teleconsulta, prescrições, terapias, vacinas e integração ampla de prontuários ficam fora do primeiro produto e dependem de validação futura ou parceiros.
-
-`demo-v2.html` preserva a demonstração anterior e seus registros locais; não é o produto documental atual. Os módulos antigos de cofre, teleconsulta e API MongoDB permanecem para referência e regressão. `compose.yaml` é o ambiente histórico; `compose.documental.yaml` é a execução recomendada desta versão. Nenhuma migração ou exclusão de registros do navegador foi feita.
-
-## Hack Brasil
-
-Trilha pretendida: Saúde & bem-estar. [Regulamento oficial](https://hackbrasil.com/regulamento), consultado em 14/11/2026: execução técnica, implementação técnica, impacto e comunicação. O roteiro e os campos estão em [Submissao_e_video_JYXIA.txt](Submissao_e_video_JYXIA.txt). Confirmar elegibilidade do histórico do código, prazo e condições no portal antes de enviar. Não houve submissão automática nem gravação do vídeo.
-
-## Dependência de terceiros
-
-PDF.js 6.5.438, distribuído localmente, licença Apache 2.0 em `vendor/PDFJS-LICENSE.txt`. A origem e a integridade do pacote constam em [DEPENDENCIAS.md](DEPENDENCIAS.md). Nenhum CDN ou serviço de IA recebe documentos nesta versão.
+Consulte exclusivamente [`docs/`](docs/):
+- [`docs/ESTRUTURA_DO_PROJETO.md`](docs/ESTRUTURA_DO_PROJETO.md) — mapa definitivo de diretórios e justificativa de `legacy/v2/`.
+- [`docs/ARQUITETURA_INSTITUCIONAL.md`](docs/ARQUITETURA_INSTITUCIONAL.md) — arquitetura `backend/` `0.2.0`, modelos multi-tenant, migrações e hardening.
+- [`docs/IDENTIDADE_E_AUTORIZACAO.md`](docs/IDENTIDADE_E_AUTORIZACAO.md) — fluxo BFF OIDC PKCE/MFA, sessões, CSRF, `(issuer, subject)`, RBAC em 5 papéis e PostgreSQL RLS/`jyxia_app`.
+- [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) — visão consolidada das Modalidades A, B e C.
+- [`docs/SEGURANCA.md`](docs/SEGURANCA.md) — fronteiras, controles atuais, lacunas e requisitos para dados reais.
+- [`docs/VALIDACAO_DOCUMENTAL.md`](docs/VALIDACAO_DOCUMENTAL.md) — métricas observadas e pendências honestas.
+- [`docs/DADOS_FICTICIOS.md`](docs/DADOS_FICTICIOS.md), [`docs/DEPENDENCIAS.md`](docs/DEPENDENCIAS.md), [`docs/INTEGRACOES.md`](docs/INTEGRACOES.md), [`docs/AGENTS.md`](docs/AGENTS.md) e [`docs/CHANGELOG.md`](docs/CHANGELOG.md).

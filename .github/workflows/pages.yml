@@ -1,0 +1,116 @@
+name: Publicar demonstracao seletiva no GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Montar pacote publico com lista explicita de frontend/public
+        run: |
+          python3 - <<'PY'
+          import json
+          import shutil
+          from pathlib import Path
+
+          root = Path(".").resolve()
+          public_src = (root / "frontend" / "public").resolve()
+          site = root / "_site"
+          if site.exists():
+              shutil.rmtree(site)
+          site.mkdir(parents=True, exist_ok=True)
+
+          PUBLIC_FILES = [
+              ".nojekyll",
+              "index.html",
+              "demo.html",
+              "documental.css",
+              "documental-core.mjs",
+              "documental-ui.mjs",
+              "documental-manifest.json",
+              "assets/favicon.svg",
+              "assets/fixtures-jyxia.zip",
+              "assets/Projeto_JYXIA_Inteligencia_Documental_v3.docx",
+              "vendor/pdf.min.mjs",
+              "vendor/pdf.worker.min.mjs",
+              "vendor/PDFJS-LICENSE.txt",
+              "fixtures/avaliacao-completa.pdf",
+              "fixtures/avaliacao.pdf",
+              "fixtures/casos-ficticios.csv",
+              "fixtures/casos-ficticios.json",
+              "fixtures/identidade-divergente.pdf",
+              "fixtures/imagem-ilegivel.png",
+              "fixtures/laudo-antigo.pdf",
+              "fixtures/laudo-atualizado.pdf",
+              "fixtures/laudo-completo.pdf",
+              "fixtures/laudo.pdf",
+              "fixtures/sem-identificador.pdf",
+              "fixtures/solicitacao-completa.pdf",
+              "fixtures/solicitacao-od.pdf",
+              "fixtures/solicitacao.pdf",
+              "fixtures/termo-completo.pdf",
+              "fixtures/termo-oe.pdf",
+              "fixtures/termo-sem-marca.pdf",
+              "fixtures/termo.pdf",
+          ]
+
+          manifest = json.loads((public_src / "documental-manifest.json").read_text(encoding="utf-8"))
+          manifest_paths = sorted(f["path"] for f in manifest["files"])
+          listed_fixtures = sorted(p for p in PUBLIC_FILES if p.startswith("fixtures/"))
+          assert manifest_paths == listed_fixtures, f"Divergencia com manifesto: {manifest_paths} vs {listed_fixtures}"
+
+          staged = []
+          for rel in PUBLIC_FILES:
+              src = (public_src / rel).resolve()
+              assert src.is_file() and public_src in src.parents, f"Arquivo ausente ou invalido em frontend/public: {rel}"
+              dst = site / rel
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(src, dst)
+              staged.append(rel)
+
+          actual = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.is_file())
+          assert actual == sorted(PUBLIC_FILES), f"Contagem divergente: {len(actual)} vs {len(PUBLIC_FILES)}"
+          print(f"Pacote Pages preparado com {len(staged)}/{len(PUBLIC_FILES)} arquivos permitidos.")
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "_site"
+          include-hidden-files: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

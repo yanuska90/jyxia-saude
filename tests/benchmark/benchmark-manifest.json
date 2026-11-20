@@ -1,0 +1,405 @@
+{
+  "schema": "jyxia.synthetic-benchmark.v1",
+  "version": "3.2.0",
+  "synthetic": true,
+  "independentRealHoldout": false,
+  "isolatedFromPublicCatalog": true,
+  "excludedFromGitHubPages": true,
+  "methodologyNote": "Conjunto sintético interno separado do catálogo público da demonstração. Inclui divisões development, regression e reserved_evaluation para medir aderência determinística e expor limitações. Por ser gerado pela equipe, não representa holdout independente nem prova de generalização em documentos hospitalares reais.",
+  "cases": [
+    {
+      "id": "DEV-01",
+      "split": "development",
+      "scenario": "Padrao baseline Helvetica 1 pagina",
+      "path": "fixtures/dev-01-padrao-helvetica.pdf",
+      "sha256": "5076658b909267d6ddce5c7c4f19d8865fe28a2932d713d43f11d45410ad4383",
+      "size": 1493,
+      "pages": 1,
+      "rotate": 0,
+      "font": "Helvetica",
+      "expected": {
+        "patient": {
+          "status": "extraido",
+          "value": "Pessoa Benchmarking Um",
+          "alias": "Paciente",
+          "page": 1
+        },
+        "birthDate": {
+          "status": "extraido",
+          "value": "10/05/1982",
+          "alias": "Nascimento",
+          "page": 1
+        },
+        "identifier": {
+          "status": "extraido",
+          "value": "BM-001",
+          "alias": "Identificador",
+          "page": 1
+        },
+        "issueDate": {
+          "status": "extraido",
+          "value": "12/11/2026",
+          "alias": "Emissao",
+          "page": 1
+        },
+        "type": {
+          "status": "extraido",
+          "value": "solicitacao",
+          "alias": "Tipo",
+          "page": 1
+        },
+        "procedure": {
+          "status": "extraido",
+          "value": "Facoemulsificacao com implante de LIO",
+          "alias": "Procedimento",
+          "page": 1
+        },
+        "procedureCode": {
+          "status": "extraido",
+          "value": "04.05.05.011-9",
+          "alias": "Codigo",
+          "page": 1
+        },
+        "procedureCodeSystem": {
+          "status": "extraido",
+          "value": "SIGTAP-FICTICIO",
+          "alias": "Sistema",
+          "page": 1
+        },
+        "laterality": {
+          "status": "extraido",
+          "normalized": "direito",
+          "alias": "Lateralidade",
+          "page": 1
+        },
+        "origin": {
+          "status": "extraido",
+          "value": "Unidade Ficticia Sul",
+          "alias": "Origem",
+          "page": 1
+        }
+      }
+    },
+    {
+      "id": "REG-01",
+      "split": "regression",
+      "scenario": "Documento rotacionado 90 graus com campos em 2 paginas",
+      "path": "fixtures/reg-01-rotacionado-90-multipagina.pdf",
+      "sha256": "bd86f2399bb5cafb6d8a5794f4dc2c83520fa79512c86bad89640624c069384d",
+      "size": 1561,
+      "pages": 2,
+      "rotate": 90,
+      "font": "Helvetica",
+      "expected": {
+        "patient": {
+          "status": "extraido",
+          "value": "Pessoa Rotacionada Alfa",
+          "alias": "Nome do paciente",
+          "page": 1
+        },
+        "birthDate": {
+          "status": "extraido",
+          "value": "29/02/2024",
+          "alias": "Data de nascimento",
+          "page": 1
+        },
+        "identifier": {
+          "status": "extraido",
+          "value": "BM-REG-01",
+          "alias": "ID",
+          "page": 1
+        },
+        "issueDate": {
+          "status": "extraido",
+          "value": "01/03/2026",
+          "alias": "Emitido em",
+          "page": 1
+        },
+        "type": {
+          "status": "extraido",
+          "value": "laudo",
+          "alias": "Tipo documental",
+          "page": 1
+        },
+        "procedure": {
+          "status": "extraido",
+          "value": "Artroscopia de joelho",
+          "alias": "Procedimento solicitado",
+          "page": 2
+        },
+        "laterality": {
+          "status": "extraido",
+          "normalized": "esquerdo",
+          "alias": "Regiao lateral",
+          "page": 2
+        },
+        "origin": {
+          "status": "extraido",
+          "value": "Servico Ficticio Norte",
+          "alias": "Instituicao",
+          "page": 2
+        }
+      }
+    },
+    {
+      "id": "REG-02",
+      "split": "regression",
+      "scenario": "Campos duplicados com divergencia critica de identidade e lateralidade",
+      "path": "fixtures/reg-02-duplicado-conflito-identidade.pdf",
+      "sha256": "5a5bb70a393ec7cf9f4ca6526eb240e02ffc09c573ab5e20ca95c4900621bcc0",
+      "size": 1402,
+      "pages": 1,
+      "rotate": 180,
+      "font": "Courier",
+      "expected": {
+        "patient": {
+          "status": "ambiguo"
+        },
+        "laterality": {
+          "status": "ambiguo"
+        },
+        "procedure": {
+          "status": "extraido",
+          "value": "Colecistectomia videolaparoscopica",
+          "alias": "Procedimento",
+          "page": 1
+        }
+      }
+    },
+    {
+      "id": "REG-03",
+      "split": "regression",
+      "scenario": "PDF sem texto extraivel (abstencao total sem OCR)",
+      "path": "fixtures/reg-03-sem-camada-texto.pdf",
+      "sha256": "5b486dc78b9990d5f78b667c99a0a06eb90e0a012f9b16af6d848cd424225e6f",
+      "size": 814,
+      "pages": 1,
+      "rotate": 0,
+      "font": "Helvetica",
+      "expected": {
+        "readable": false,
+        "patient": {
+          "status": "abstencao"
+        },
+        "laterality": {
+          "status": "abstencao"
+        },
+        "procedure": {
+          "status": "abstencao"
+        }
+      }
+    },
+    {
+      "id": "EVAL-01",
+      "split": "reserved_evaluation",
+      "scenario": "Layout tabular em duas colunas com Times-Roman e acentuacao",
+      "path": "fixtures/eval-01-tabular-times-acentos.pdf",
+      "sha256": "dcedb9e2d248c8a6df2bd23438091d1f3c344ce791f74ddba44776f5b45b2fdb",
+      "size": 1890,
+      "pages": 1,
+      "rotate": 0,
+      "font": "Times-Roman",
+      "expected": {
+        "patient": {
+          "status": "extraido",
+          "value": "Conceição de São João Fictícia",
+          "alias": "Nome completo",
+          "page": 1
+        },
+        "birthDate": {
+          "status": "extraido",
+          "value": "03/01/1975",
+          "alias": "Data de nascimento",
+          "page": 1
+        },
+        "identifier": {
+          "status": "extraido",
+          "value": "BM-EV-01",
+          "alias": "Codigo do paciente",
+          "page": 1
+        },
+        "issueDate": {
+          "status": "extraido",
+          "value": "11/11/2026",
+          "alias": "Emissao",
+          "alias_any": [
+            "Data de emissao",
+            "Emissao"
+          ],
+          "page": 1
+        },
+        "procedure": {
+          "status": "extraido",
+          "value": "Hernioplastia inguinal unilateral sem prótese com descrição extensa demonstrativa",
+          "alias": "Procedimento solicitado",
+          "page": 1
+        },
+        "procedureCode": {
+          "status": "extraido",
+          "value": "04.07.04.010-2",
+          "alias": "Codigo do procedimento",
+          "page": 1
+        },
+        "procedureCodeSystem": {
+          "status": "extraido",
+          "value": "SIGTAP-FICTICIO",
+          "alias": "Tabela",
+          "page": 1
+        },
+        "laterality": {
+          "status": "extraido",
+          "normalized": "direito",
+          "alias": "Regiao lateral",
+          "page": 1
+        },
+        "origin": {
+          "status": "extraido",
+          "value": "Ambulatório Fictício Esperança",
+          "alias": "Unidade",
+          "page": 1
+        }
+      }
+    },
+    {
+      "id": "EVAL-02",
+      "split": "reserved_evaluation",
+      "scenario": "Courier com rotulos ausentes, datas soltas sem rotulo e rotulo desconhecido",
+      "path": "fixtures/eval-02-courier-sem-rotulo-e-campos-ausentes.pdf",
+      "sha256": "a93c98896bd71db13d5316066afc3881659372380a0a4389191886fa0fe2bc3b",
+      "size": 1581,
+      "pages": 2,
+      "rotate": 270,
+      "font": "Courier",
+      "expected": {
+        "patient": {
+          "status": "extraido",
+          "value": "Pessoa Espacos Ficticia",
+          "alias": "Nome do paciente",
+          "page": 1
+        },
+        "birthDate": {
+          "status": "abstencao"
+        },
+        "identifier": {
+          "status": "abstencao"
+        },
+        "procedure": {
+          "status": "abstencao"
+        },
+        "laterality": {
+          "status": "extraido",
+          "normalized": "nao_aplicavel",
+          "alias": "Lado",
+          "page": 2
+        },
+        "issueDate": {
+          "status": "extraido",
+          "value": "11/11/2026",
+          "alias": "Emissao",
+          "page": 2
+        },
+        "unrecognizedMin": 1,
+        "unlabeledMin": 2
+      }
+    },
+    {
+      "id": "EVAL-03",
+      "split": "reserved_evaluation",
+      "scenario": "Multi-pagina 3 paginas com repeticao de identificador e espacos irregulares",
+      "path": "fixtures/eval-03-multipagina-3p-duplicidade-identica.pdf",
+      "sha256": "fc18dabdc8cf485786a47e8a7d64afbdf3b71b75c1c396c0a80ec3e9d254a9a2",
+      "size": 1883,
+      "pages": 3,
+      "rotate": 0,
+      "font": "Helvetica",
+      "expected": {
+        "patient": {
+          "status": "extraido",
+          "value": "Pessoa Tres Paginas",
+          "alias": "Nome do paciente",
+          "page": 1
+        },
+        "identifier": {
+          "status": "ambiguo",
+          "duplicateIdentical": true
+        },
+        "procedure": {
+          "status": "extraido",
+          "value": "Artroplastia total de quadril",
+          "alias": "Procedimento solicitado",
+          "page": 2
+        },
+        "procedureCode": {
+          "status": "extraido",
+          "value": "30724031",
+          "alias": "Codigo",
+          "page": 2
+        },
+        "laterality": {
+          "status": "extraido",
+          "normalized": "bilateral",
+          "alias": "Lateralidade",
+          "page": 3
+        },
+        "issueDate": {
+          "status": "extraido",
+          "value": "14/11/2026",
+          "alias": "Emissao",
+          "page": 3
+        }
+      }
+    },
+    {
+      "id": "EVAL-04",
+      "split": "reserved_evaluation",
+      "scenario": "Documento de 5 paginas com virada de ano, datas conflitantes e marcador na pagina 5",
+      "path": "fixtures/eval-04-5-paginas-conflito-datas-e-virada-ano.pdf",
+      "sha256": "5c46ed898342243c4f7bdd1a8924242224e7fba6ad8e79bd05b6f9cc03dd9e63",
+      "size": 2511,
+      "pages": 5,
+      "rotate": 0,
+      "font": "Times-Roman",
+      "expected": {
+        "patient": {
+          "status": "extraido",
+          "value": "Pessoa Cinco Paginas Acento Águia Conceição",
+          "alias": "Nome completo",
+          "page": 1
+        },
+        "birthDate": {
+          "status": "extraido",
+          "value": "31/12/1979",
+          "alias": "Nascimento",
+          "page": 1
+        },
+        "identifier": {
+          "status": "extraido",
+          "value": "BM-EV-04",
+          "alias": "Identificador",
+          "page": 2
+        },
+        "issueDate": {
+          "status": "ambiguo"
+        },
+        "procedure": {
+          "status": "extraido",
+          "value": "Colecistectomia aberta",
+          "alias": "Procedimento solicitado",
+          "page": 4
+        },
+        "laterality": {
+          "status": "extraido",
+          "normalized": "nao_aplicavel",
+          "alias": "Lateralidade",
+          "page": 4
+        },
+        "origin": {
+          "status": "extraido",
+          "value": "Hospital Regional Fictício de Demonstração Prolongada",
+          "alias": "Origem",
+          "page": 5
+        }
+      }
+    }
+  ]
+}

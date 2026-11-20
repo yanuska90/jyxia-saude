@@ -1,0 +1,48 @@
+JYXIA — materiais de submissão — versão 3.2.0 (revisão 20/11/2026)
+
+NOME DO PROJETO
+JYXIA — Inteligência Documental em Saúde (Clinical Document Intelligence)
+
+RESUMO EM UMA FRASE
+A JYXIA organiza documentos externos de saúde para conferência administrativa prévia a procedimentos, ligando cada informação extraída à sua origem na página e diferenciando compatibilidade, não aplicabilidade explícita, abstenção por dados ausentes e bloqueios sob revisão humana.
+
+DESCRIÇÃO FIEL AO ESTADO ATUAL (VERSÃO 3.2.0)
+A JYXIA desenvolve uma camada de apoio administrativo à conferência documental em saúde, complementar ao prontuário eletrônico (PEP). Na demonstração funcional pública atual (Modalidade A, v3.2.0), o usuário testa no navegador um fluxo completo sobre 9 cenários e 18 arquivos sintéticos verificados por SHA-256: o Mozilla PDF.js 6.5.438 extrai texto de PDFs e calcula dinamicamente as coordenadas [x, y, w, h] na página; regras determinísticas estruturam 11 campos textuais prefixados (incluindo código e sistema de código declarado) e identificam o marcador textual literal MARCA FICTICIA — explicitando que se trata de marcador sintético e NÃO de reconhecimento visual nem autenticação de assinatura, mantendo a observação visual humana como ação independente em termos.
+
+Os quatro eixos determinísticos (Identidade cadastral, Procedimento informado, Lateralidade e Temporalidade/Versões) usam seis estados explícitos (ok, conflito, abstencao, nao_avaliado, nao_aplicavel, pendente) e cinco estados gerais (pendente, bloqueado, abstencao, conferida_com_escopo_limitado, conferida). O Cenário 1 histórico (que omite procedimento e lateralidade) agora entra corretamente em abstenção em vez de declarar conferência integral, enquanto o novo Cenário 9 avalia os quatro eixos completos. Há ainda separação explícita entre a demo pública (whitelist SHA-256) e um laboratório experimental restrito a localhost (Modalidade B, fora do GitHub Pages) com aliases explícitos e benchmark sintético separado (8 casos), além de exportação JSON/CSV protegida contra fórmulas e histórico em memória encadeado por SHA-256. Não há OCR de imagens, IA generativa, banco persistente, autenticação institucional nem validação clínica/comercial realizados até esta data.
+
+TRILHA PRETENDIDA
+Saúde & bem-estar (conferir enquadramento final e elegibilidade no regulamento vigente).
+
+LINKS PÚBLICOS
+Repositório: https://github.com/yanuska90/jyxia-saude
+Site público: https://yanuska90.github.io/jyxia-saude/
+Demo funcional: https://yanuska90.github.io/jyxia-saude/demo.html
+Vídeo: pendente de gravação e publicação por Yanuska e João (nenhuma URL inventada).
+
+ROTEIRO DE VÍDEO — META ATÉ 2 MINUTOS E 45 SEGUNDOS (LIMITE MÁXIMO DO REGULAMENTO: 3 MINUTOS)
+
+[0:00–0:35 — Yanuska em câmera]
+“Eu sou a Yanuska. A ideia da JYXIA surgiu há cerca de seis anos, durante meu tratamento de câncer: exames ficavam separados entre serviços e eu precisava repetir minha história a cada atendimento, além de ter recebido um medicamento ao qual tinha alergia. Isso mostrou na prática o quanto informações organizadas e conferíveis importam.”
+
+[0:35–0:55 — João em câmera]
+“Conheci a Yanuska na faculdade e hoje dividimos a construção da JYXIA. Em vez de prometer um prontuário nacional ou diagnóstico por IA, escolhemos começar por um problema delimitado e honesto: conferir documentos recebidos antes de procedimentos eletivos com supervisão humana e fonte visível.”
+
+[0:55–1:50 — Demonstração real da v3.2.0 na tela, narrada pelos dois]
+Ações sugeridas na tela real HTTPS (sem cortes enganosos):
+1) Carregar Cenário 8 ("8 · Lateralidade divergente (OD × OE)"): mostrar o estado BLOQUEADO e clicar em "Ver fonte" de Lateralidade para destacar o trecho exato calculado pelo PDF.js; abrir brevemente o Resumo Administrativo de pendências.
+2) Mostrar Cenário 1 ("1 · Conjunto parcial histórico"): comprovar honestidade técnica ao terminar em ABSTENÇÃO porque procedimento e lateralidade estão ausentes, e Cenário 6 ("6 · Imagem sem texto extraível") sem OCR nem análise visual de assinatura.
+3) Mostrar Cenário 9 ("9 · Conjunto completo (4 eixos avaliados)"): revisar os 4 documentos com sistema de código e observação visual humana separada do marcador literal MARCA FICTICIA, chegando ao estado administrativo "Documentação conferida" e exportando JSON/CSV.
+Fala de apoio: “Nesta demo pública, usamos 18 exemplos sintéticos validados por SHA-256 no navegador. Quando falta dado obrigatório, o sistema se abstém em vez de dar falso positivo; quando há divergência crítica de identidade, procedimento ou lateralidade, bloqueia o avanço; e detecção de marcador textual nunca se passa por autenticação de assinatura.”
+
+[1:50–2:20 — João, com foco em validação, arquitetura e testes]
+“A demonstração pública v3.2.0 é publicada estritamente por whitelist de 31 arquivos em frontend/public/, separada do laboratório local e da fundação institucional do backend. Reunimos testes automatizados de núcleo e PDF.js, E2E em navegador entre 320 e 1280 pixels, testes legados isolados e a suíte institucional de backend cobrindo migrações Alembic, modelos relacionais e isolamento multi-tenant.”
+
+[2:20–2:45 — Ambos em câmera]
+“Nosso próximo passo imediato é ir a campo com roteiro neutro entrevistar equipes de pré-operatório e autorização em hospitais e clínicas para medir onde há mais retrabalho e decidir o caminho com base em evidências antes de construir infraestrutura pesada.”
+
+CHECKLIST PRÉ-ENVIO (AÇÃO HUMANA OBRIGATÓRIA)
+1. Conferir elegibilidade integral do histórico do repositório e da equipe na seção aplicável de https://hackbrasil.com/regulamento antes do envio (prazo exibido: 30/11/2026 às 23h59).
+2. Gravar vídeo com Yanuska e João respeitando o teto estrito de 3 minutos, usando exclusivamente os dados fictícios da demo.
+3. Testar links do site, demo e repositório em janela anônima sem login (e após eventual merge autorizado para main).
+4. Realizar os aceites formais individualmente no portal oficial do Hack Brasil; atualizar documentos não equivale a submissão enviada.

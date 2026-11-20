@@ -1,6 +1,12 @@
 .git
 .env
 .env.*
+.pytest_cache
+__pycache__
+*.pyc
+*.db
+*.sqlite
+*.sqlite3
 *.pem
 *.key
 *.p12
@@ -10,10 +16,10 @@ secrets
 private-data
 patient-data
 qa-*
-__pycache__
+_site
 *.docx
 *.zip
 work
 outputs
-!fixtures-jyxia.zip
-!Projeto_JYXIA_Inteligencia_Documental_v3.docx
+!frontend/public/assets/fixtures-jyxia.zip
+!frontend/public/assets/Projeto_JYXIA_Inteligencia_Documental_v3.docx

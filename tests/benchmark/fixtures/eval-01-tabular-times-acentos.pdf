@@ -1,0 +1,62 @@
+%PDF-1.4
+% JYXIA Synthetic Benchmark PDF
+1 0 obj
+<< /F1 2 0 R /F2 3 0 R >>
+endobj
+2 0 obj
+<< /BaseFont /Times-Roman /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font >>
+endobj
+3 0 obj
+<< /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font >>
+endobj
+4 0 obj
+<< /Pages 5 0 R /Type /Catalog >>
+endobj
+5 0 obj
+<< /Count 1 /Kids [ 7 0 R ] /Type /Pages >>
+endobj
+6 0 obj
+<< /Length 1076 >>
+stream
+BT
+/F2 10 Tf 1 0 0 1 48 770 Tm (Tipo documental:) Tj
+/F1 10 Tf 1 0 0 1 220 770 Tm (avaliacao) Tj
+/F2 10 Tf 1 0 0 1 48 748 Tm (Nome completo:) Tj
+/F1 10 Tf 1 0 0 1 220 748 Tm (Conceição de São João Fictícia) Tj
+/F2 10 Tf 1 0 0 1 48 726 Tm (Data de nascimento:) Tj
+/F1 10 Tf 1 0 0 1 220 726 Tm (03/01/1975) Tj
+/F2 10 Tf 1 0 0 1 48 704 Tm (Código do paciente:) Tj
+/F1 10 Tf 1 0 0 1 220 704 Tm (BM-EV-01) Tj
+/F2 10 Tf 1 0 0 1 48 682 Tm (Data de emissão:) Tj
+/F1 10 Tf 1 0 0 1 220 682 Tm (11/11/2026) Tj
+/F2 10 Tf 1 0 0 1 48 660 Tm (Unidade:) Tj
+/F1 10 Tf 1 0 0 1 220 660 Tm (Ambulatório Fictício Esperança) Tj
+/F2 10 Tf 1 0 0 1 48 638 Tm (Procedimento solicitado:) Tj
+/F1 10 Tf 1 0 0 1 220 638 Tm (Hernioplastia inguinal unilateral sem prótese com descrição extensa demonstrativa) Tj
+/F2 10 Tf 1 0 0 1 48 616 Tm (Código do procedimento:) Tj
+/F1 10 Tf 1 0 0 1 220 616 Tm (04.07.04.010-2) Tj
+/F2 10 Tf 1 0 0 1 48 594 Tm (Tabela:) Tj
+/F1 10 Tf 1 0 0 1 220 594 Tm (SIGTAP-FICTICIO) Tj
+/F2 10 Tf 1 0 0 1 48 572 Tm (Região lateral:) Tj
+/F1 10 Tf 1 0 0 1 220 572 Tm (Lado direito) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Contents 6 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000041 00000 n 
+0000000082 00000 n 
+0000000191 00000 n 
+0000000303 00000 n 
+0000000352 00000 n 
+0000000411 00000 n 
+0000001538 00000 n 
+trailer
+<< /Root 4 0 R /Size 8 >>
+startxref
+1666
+%%EOF
