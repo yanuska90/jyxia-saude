@@ -299,12 +299,16 @@ def test_pkce_encryption_at_rest_state_replay_and_outage_fail_closed(migrated_en
             assert out_resp.status_code == 503
 
         # MFA bypass header/query parameter attempts without session MUST fail 401
-        unauth_client = TestClient(app, base_url="http://127.0.0.1:8000")
-        assert (
-            unauth_client.get(
-                "/api/v1/me?mfa_verified=true",
-                headers={"X-MFA-Verified": "true", "Authorization": f"Bearer {idp.issued_codes['code-1']['id_token']}"},
-            ).status_code
-            == 401
-        )
-        assert SecurityAuditRepository.verify_chain(factory())
+        with TestClient(app, base_url="http://127.0.0.1:8000") as unauth_client:
+            assert (
+                unauth_client.get(
+                    "/api/v1/me?mfa_verified=true",
+                    headers={
+                        "X-MFA-Verified": "true",
+                        "Authorization": f"Bearer {idp.issued_codes['code-1']['id_token']}",
+                    },
+                ).status_code
+                == 401
+            )
+        with factory() as verify_session:
+            assert SecurityAuditRepository.verify_chain(verify_session)

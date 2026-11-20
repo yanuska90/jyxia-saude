@@ -169,7 +169,8 @@ def test_identity_issuer_subject_binding_blocks_unprovisioned_and_email_spoof(
         )
         assert cb.status_code == 403
 
-    assert SecurityAuditRepository.verify_chain(factory())
+    with factory() as verify_session:
+        assert SecurityAuditRepository.verify_chain(verify_session)
 
 
 def test_session_timeouts_csrf_origin_logout_and_user_suspension(migrated_engine) -> None:
@@ -296,7 +297,8 @@ def test_session_timeouts_csrf_origin_logout_and_user_suspension(migrated_engine
             db_suspend.close()
         assert client.get("/api/v1/me").status_code == 401
 
-    assert SecurityAuditRepository.verify_chain(factory())
+    with factory() as verify_session:
+        assert SecurityAuditRepository.verify_chain(verify_session)
 
 
 def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engine) -> None:

@@ -6,11 +6,13 @@ import os
 import sys
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, event, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,29 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.db.session import create_db_engine, create_session_factory  # noqa: E402
+
+_PG_TRUNCATE_SQL = (
+    "SET LOCAL lock_timeout = '8s'; "
+    "ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_no_truncate; "
+    "ALTER TABLE security_auth_events DISABLE TRIGGER trg_security_auth_events_no_truncate; "
+    "TRUNCATE TABLE security_auth_events, auth_sessions, oidc_auth_states, "
+    "external_identities, audit_events, human_reviews, evidence_references, "
+    "extracted_fields, processing_runs, document_versions, documents, "
+    "document_cases, organization_memberships, users, organizations CASCADE; "
+    "ALTER TABLE security_auth_events ENABLE TRIGGER trg_security_auth_events_no_truncate; "
+    "ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_no_truncate;"
+)
+
+
+def _attach_pg_test_timeouts(engine: Engine) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+
+    @event.listens_for(engine, "connect")
+    def _set_pg_timeouts(dbapi_connection: Any, _connection_record: Any) -> None:
+        with dbapi_connection.cursor() as cur:
+            cur.execute("SET SESSION lock_timeout = '8s'")
+            cur.execute("SET SESSION statement_timeout = '30s'")
 
 
 def build_alembic_config(database_url: str) -> Config:
@@ -55,29 +80,32 @@ def database_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
 def migrated_engine(database_url: str) -> Generator[Engine, None, None]:
     cfg = build_alembic_config(database_url)
     engine = create_db_engine(database_url)
+    _attach_pg_test_timeouts(engine)
 
-    # Ensure PostgreSQL CI test runs start cleanly even when reusing one shared database.
-    if not database_url.startswith("sqlite"):
-        command.downgrade(cfg, "base")
-    command.upgrade(cfg, "head")
+    if database_url.startswith("sqlite"):
+        command.upgrade(cfg, "head")
+    else:
+        already_head = False
+        try:
+            with engine.connect() as conn:
+                ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+                already_head = ver == "20261120_0003"
+        except SQLAlchemyError:
+            already_head = False
+
+        if already_head:
+            with engine.begin() as conn:
+                conn.execute(text(_PG_TRUNCATE_SQL))
+        else:
+            command.downgrade(cfg, "base")
+            command.upgrade(cfg, "head")
 
     try:
         yield engine
     finally:
         if not database_url.startswith("sqlite"):
             with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_no_truncate; "
-                        "ALTER TABLE security_auth_events DISABLE TRIGGER trg_security_auth_events_no_truncate; "
-                        "TRUNCATE TABLE security_auth_events, auth_sessions, oidc_auth_states, "
-                        "external_identities, audit_events, human_reviews, evidence_references, "
-                        "extracted_fields, processing_runs, document_versions, documents, "
-                        "document_cases, organization_memberships, users, organizations CASCADE; "
-                        "ALTER TABLE security_auth_events ENABLE TRIGGER trg_security_auth_events_no_truncate; "
-                        "ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_no_truncate;"
-                    )
-                )
+                conn.execute(text(_PG_TRUNCATE_SQL))
         engine.dispose()
 
 
@@ -89,6 +117,7 @@ def app_engine(migrated_engine: Engine) -> Generator[Engine, None, None]:
         yield migrated_engine
         return
     engine = create_db_engine(app_url)
+    _attach_pg_test_timeouts(engine)
     try:
         yield engine
     finally:
