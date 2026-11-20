@@ -26,6 +26,13 @@ def _wait_for_keycloak(client: httpx.Client, health_url: str, realm_discovery_ur
     raise RuntimeError("Timed out waiting for Keycloak /health/ready and jyxia-dev OIDC discovery.")
 
 
+def _assert_ok(resp: httpx.Response, *, step: str) -> None:
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Keycloak admin step '{step}' failed: HTTP {resp.status_code}: {resp.text[:500]}"
+        )
+
+
 def _get_admin_token(
     client: httpx.Client, base_url: str, username: str, password: str
 ) -> str:
@@ -39,7 +46,7 @@ def _get_admin_token(
         },
         timeout=10.0,
     )
-    resp.raise_for_status()
+    _assert_ok(resp, step="admin_token")
     return str(resp.json()["access_token"])
 
 
@@ -86,15 +93,14 @@ def _create_user_with_mfa(
         ],
     }
     resp = client.post(f"{admin_realm}/users", json=payload, headers=headers, timeout=10.0)
-    if resp.status_code not in {201, 204}:
-        raise RuntimeError(f"Failed creating user {username}: {resp.status_code} {resp.text}")
+    _assert_ok(resp, step=f"create_user_{username}")
     loc = resp.headers.get("location", "")
     if loc and "/" in loc:
         return loc.rstrip("/").rsplit("/", 1)[-1]
     lookup = client.get(
         f"{admin_realm}/users", params={"username": username, "exact": "true"}, headers=headers
     )
-    lookup.raise_for_status()
+    _assert_ok(lookup, step=f"lookup_user_{username}")
     return str(lookup.json()[0]["id"])
 
 
@@ -120,13 +126,16 @@ def main() -> int:
         clients_resp = client.get(
             f"{admin_realm}/clients", params={"clientId": "jyxia-backend-dev"}, headers=headers
         )
-        clients_resp.raise_for_status()
-        mfa_client = clients_resp.json()[0]
+        _assert_ok(clients_resp, step="get_mfa_client")
+        mfa_clients = clients_resp.json()
+        if not mfa_clients:
+            raise RuntimeError("Client jyxia-backend-dev not found after realm import.")
+        mfa_client = mfa_clients[0]
         mfa_client["secret"] = mfa_client_secret
         put_res = client.put(
             f"{admin_realm}/clients/{mfa_client['id']}", json=mfa_client, headers=headers
         )
-        put_res.raise_for_status()
+        _assert_ok(put_res, step="update_mfa_client_secret")
 
         # Provision ephemeral password-only browser flow & client to assert MFA fail-closed
         pwd_flow_alias = "ci-ephemeral-pwd-only-browser"
@@ -141,28 +150,36 @@ def main() -> int:
             },
             headers=headers,
         )
-        flow_create.raise_for_status()
+        _assert_ok(flow_create, step="create_pwd_flow")
+
         exec_add = client.post(
             f"{admin_realm}/authentication/flows/{pwd_flow_alias}/executions/execution",
             json={"provider": "auth-username-password-form"},
             headers=headers,
         )
-        exec_add.raise_for_status()
+        _assert_ok(exec_add, step="add_pwd_exec")
+
         execs = client.get(
             f"{admin_realm}/authentication/flows/{pwd_flow_alias}/executions", headers=headers
         )
-        execs.raise_for_status()
+        _assert_ok(execs, step="get_pwd_execs")
         first_exec = execs.json()[0]
         first_exec["requirement"] = "REQUIRED"
-        client.put(
+        put_exec = client.put(
             f"{admin_realm}/authentication/flows/{pwd_flow_alias}/executions",
             json=first_exec,
             headers=headers,
-        ).raise_for_status()
+        )
+        _assert_ok(put_exec, step="enable_pwd_exec")
 
         all_flows = client.get(f"{admin_realm}/authentication/flows", headers=headers)
-        all_flows.raise_for_status()
+        _assert_ok(all_flows, step="list_flows")
         pwd_flow_id = next(f["id"] for f in all_flows.json() if f["alias"] == pwd_flow_alias)
+
+        cloned_mappers = [
+            {k: v for k, v in mapper.items() if k != "id"}
+            for mapper in mfa_client.get("protocolMappers", [])
+        ]
 
         pwd_client_id = "jyxia-pwd-only-ci"
         pwd_client_secret = f"CiEphemeralPwdOnly_{secrets.token_hex(16)}"
@@ -179,9 +196,12 @@ def main() -> int:
             "webOrigins": ["http://127.0.0.1:8000"],
             "attributes": {"pkce.code.challenge.method": "S256"},
             "authenticationFlowBindingOverrides": {"browser": pwd_flow_id},
-            "protocolMappers": mfa_client.get("protocolMappers", []),
+            "protocolMappers": cloned_mappers,
         }
-        client.post(f"{admin_realm}/clients", json=pwd_client_payload, headers=headers).raise_for_status()
+        client_res = client.post(
+            f"{admin_realm}/clients", json=pwd_client_payload, headers=headers
+        )
+        _assert_ok(client_res, step="create_pwd_only_client")
 
         # Provision 2 ephemeral test users + RFC 6238 Base32 TOTP credentials
         mfa_username = f"kc_mfa_{secrets.token_hex(4)}"

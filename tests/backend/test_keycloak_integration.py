@@ -75,9 +75,15 @@ def _complete_keycloak_login(
     action2 = _extract_form_action(step2.text, str(step2.url))
 
     otp_code = _generate_totp(totp_secret)
+    cred_match = re.search(
+        r'name="selectedCredentialId"[^>]+value="([^"]+)"', step2.text, re.IGNORECASE
+    )
+    otp_data = {"otp": otp_code}
+    if cred_match:
+        otp_data["selectedCredentialId"] = html.unescape(cred_match.group(1))
     step3 = kc_http.post(
         action2,
-        data={"otp": otp_code},
+        data=otp_data,
         follow_redirects=False,
     )
     assert step3.status_code in {302, 303}, f"Expected callback redirect after OTP, got {step3.status_code}: {step3.text[:500]}"

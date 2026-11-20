@@ -104,7 +104,10 @@ jobs:
             quay.io/keycloak/keycloak:26.8.2 start-dev --import-realm
           export KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin
           export KC_BOOTSTRAP_ADMIN_PASSWORD="$KC_PW"
-          /tmp/jyxia-ci-venv/bin/python tools/ci_setup_keycloak_e2e.py
+          /tmp/jyxia-ci-venv/bin/python tools/ci_setup_keycloak_e2e.py || {
+            docker logs jyxia-keycloak-ci | tail -n 80 || true
+            exit 1
+          }
       - name: Executar suite Pytest completa (PostgreSQL 16 RLS + Keycloak 26.8.2 MFA E2E, zero skips)
         env:
           JYXIA_TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
