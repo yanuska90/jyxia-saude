@@ -31,17 +31,20 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.constants import (
     CaseReadinessState,
     DocumentKind,
+    ExternalIdentityStatus,
     ExtractedFieldStatus,
     HumanReviewAction,
     MembershipStatus,
     OrganizationRole,
     OrganizationStatus,
     ProcessingStatus,
+    SecurityAuditOutcome,
     StorageDriver,
 )
 from app.db.base import JSON_VARIANT, Base, new_uuid, utc_now
 
 AUDIT_SCHEMA_VERSION = "jyxia.audit.v1"
+SECURITY_AUDIT_SCHEMA_VERSION = "jyxia.sec_audit.v1"
 
 
 def _enum_values_sql(enum_cls: type[StrEnum]) -> str:
@@ -106,6 +109,9 @@ class User(Base):
     )
 
     memberships: Mapped[list[OrganizationMembership]] = relationship(
+        back_populates="user", passive_deletes="all"
+    )
+    external_identities: Mapped[list[ExternalIdentity]] = relationship(
         back_populates="user", passive_deletes="all"
     )
 
@@ -630,3 +636,208 @@ def _forbid_audit_update(_mapper: Any, _connection: Any, _target: AuditEvent) ->
 @event.listens_for(AuditEvent, "before_delete")
 def _forbid_audit_delete(_mapper: Any, _connection: Any, _target: AuditEvent) -> None:
     raise ValueError("AuditEvent is strictly append-only and cannot be deleted.")
+
+
+class ExternalIdentity(Base):
+    """Canonical federated OIDC identity binding (issuer, subject) -> institutional User.
+
+    Authentication matching strictly uses (issuer, subject) and NEVER email alone.
+    """
+
+    __tablename__ = "external_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="uq_external_identities_iss_sub"),
+        CheckConstraint("length(trim(issuer)) >= 8", name="issuer_min_len"),
+        CheckConstraint("length(trim(subject)) >= 1", name="subject_nonempty"),
+        CheckConstraint(
+            "email_at_binding IS NULL OR email_at_binding = lower(email_at_binding)",
+            name="email_lowercase",
+        ),
+        CheckConstraint(
+            f"status IN ({_enum_values_sql(ExternalIdentityStatus)})",
+            name="status_valid",
+        ),
+        Index("ix_external_identities_user", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    issuer: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    email_at_binding: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=ExternalIdentityStatus.ACTIVE.value
+    )
+    last_authenticated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="external_identities")
+
+
+class OidcAuthState(Base):
+    """Short-lived server-side OIDC transaction storing hashed state/nonce and AEAD PKCE verifier."""
+
+    __tablename__ = "oidc_auth_states"
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_oidc_auth_states_state_hash"),
+        CheckConstraint(
+            "length(trim(state_hash)) = 64 AND state_hash = lower(state_hash)",
+            name="state_hash_hex64",
+        ),
+        CheckConstraint(
+            "length(trim(nonce_hash)) = 64 AND nonce_hash = lower(nonce_hash)",
+            name="nonce_hash_hex64",
+        ),
+        CheckConstraint("length(trim(code_verifier_ciphertext)) >= 16", name="verifier_cipher"),
+        CheckConstraint("length(trim(issuer)) >= 8", name="issuer_min_len"),
+        CheckConstraint("length(trim(redirect_uri)) >= 8", name="redirect_uri_min_len"),
+        Index("ix_oidc_auth_states_expires", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    issuer: Mapped[str] = mapped_column(String(255), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(500), nullable=False)
+    next_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class AuthSession(Base):
+    """Server-side authenticated session referencing hashed cookie/CSRF digests and MFA proof.
+
+    Raw OIDC ID/access/refresh tokens and plaintext session secrets are never persisted here.
+    """
+
+    __tablename__ = "auth_sessions"
+    __table_args__ = (
+        UniqueConstraint("session_token_hash", name="uq_auth_sessions_token_hash"),
+        CheckConstraint(
+            "length(trim(session_token_hash)) = 64 AND session_token_hash = lower(session_token_hash)",
+            name="session_hash_hex64",
+        ),
+        CheckConstraint(
+            "length(trim(csrf_token_hash)) = 64 AND csrf_token_hash = lower(csrf_token_hash)",
+            name="csrf_hash_hex64",
+        ),
+        CheckConstraint("length(trim(auth_method)) >= 3", name="auth_method_min_len"),
+        CheckConstraint("length(trim(acr)) >= 1", name="acr_nonempty"),
+        CheckConstraint("absolute_expires_at >= created_at", name="abs_exp_after_created"),
+        CheckConstraint("idle_expires_at >= created_at", name="idle_exp_after_created"),
+        Index("ix_auth_sessions_user", "user_id"),
+        Index("ix_auth_sessions_abs_exp", "absolute_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    external_identity_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("external_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    active_organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=True
+    )
+    session_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    auth_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    acr: Mapped[str] = mapped_column(String(255), nullable=False)
+    amr_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    mfa_verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    oidc_auth_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    absolute_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class SecurityAuditEvent(Base):
+    """Global append-only hash-chained ledger for OIDC, MFA, session, and RBAC refusal events."""
+
+    __tablename__ = "security_auth_events"
+    __table_args__ = (
+        UniqueConstraint("sequence_number", name="uq_security_auth_events_seq"),
+        UniqueConstraint("event_hash", name="uq_security_auth_events_hash"),
+        CheckConstraint("sequence_number >= 1", name="sequence_number_positive"),
+        CheckConstraint(
+            "length(trim(prev_event_hash)) = 64 AND prev_event_hash = lower(prev_event_hash)",
+            name="prev_hash_len_64",
+        ),
+        CheckConstraint(
+            "length(trim(event_hash)) = 64 AND event_hash = lower(event_hash)",
+            name="event_hash_len_64",
+        ),
+        CheckConstraint("length(trim(schema_version)) >= 3", name="schema_version_nonempty"),
+        CheckConstraint("length(trim(event_type)) >= 2", name="event_type_min_len"),
+        CheckConstraint(
+            f"outcome IN ({_enum_values_sql(SecurityAuditOutcome)})",
+            name="outcome_valid",
+        ),
+        CheckConstraint("length(trim(reason_code)) >= 2", name="reason_code_min_len"),
+        CheckConstraint(
+            "subject_hash IS NULL OR (length(trim(subject_hash)) = 64 AND subject_hash = lower(subject_hash))",
+            name="subject_hash_hex64",
+        ),
+        Index("ix_security_auth_events_created", "created_at"),
+        Index("ix_security_auth_events_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    schema_version: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=SECURITY_AUDIT_SCHEMA_VERSION,
+        server_default=text(f"'{SECURITY_AUDIT_SCHEMA_VERSION}'"),
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    organization_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=True
+    )
+    issuer: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subject_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON_VARIANT, nullable=False)
+    prev_event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+@event.listens_for(SecurityAuditEvent, "before_update")
+def _forbid_security_audit_update(
+    _mapper: Any, _connection: Any, _target: SecurityAuditEvent
+) -> None:
+    raise ValueError("SecurityAuditEvent is strictly append-only and cannot be modified.")
+
+
+@event.listens_for(SecurityAuditEvent, "before_delete")
+def _forbid_security_audit_delete(
+    _mapper: Any, _connection: Any, _target: SecurityAuditEvent
+) -> None:
+    raise ValueError("SecurityAuditEvent is strictly append-only and cannot be deleted.")

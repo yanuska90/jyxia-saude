@@ -20,6 +20,9 @@ target_metadata = Base.metadata
 
 
 def _resolve_url() -> str:
+    migration_url = os.environ.get("JYXIA_MIGRATION_DATABASE_URL", "").strip()
+    if migration_url:
+        return migration_url
     env_url = os.environ.get("JYXIA_DATABASE_URL", "").strip()
     if env_url:
         return env_url

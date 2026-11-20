@@ -56,6 +56,38 @@ def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=Session)
 
 
+def apply_pg_rls_context(
+    session: Session,
+    *,
+    organization_id: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    """Bind transaction-local PostgreSQL session GUCs used by Row-Level Security policies."""
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text(
+            "SELECT set_config('app.current_organization_id', :org_id, true), "
+            "set_config('app.current_user_id', :user_id, true)"
+        ),
+        {"org_id": organization_id or "", "user_id": user_id or ""},
+    )
+
+
+def clear_pg_rls_context(session: Session) -> None:
+    """Reset PostgreSQL transaction-local tenant and user RLS context to empty strings."""
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text(
+            "SELECT set_config('app.current_organization_id', '', true), "
+            "set_config('app.current_user_id', '', true)"
+        )
+    )
+
+
 def check_db_connectivity(engine: Engine | None) -> DatabaseConnectivityStatus:
     """Execute lightweight connectivity probe without leaking credentials or DSN details."""
     if engine is None:
