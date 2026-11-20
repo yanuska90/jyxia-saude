@@ -100,6 +100,9 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             payload_json={"seed": True},
         )
         owner_db.commit()
+        org_a_id = str(org_a.id)
+        org_b_id = str(org_b.id)
+        user_a_id = str(user_a.id)
 
         # Verify BEFORE TRUNCATE trigger blocks even migration owner when trigger is enabled
         with pytest.raises(Exception):
@@ -133,7 +136,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         assert app_db.execute(text("SELECT count(*) FROM audit_events")).scalar() == 0
 
         # 2. With Org A RLS context, runtime sees ONLY Org A (0 Org B rows!)
-        apply_pg_rls_context(app_db, organization_id=org_a.id, user_id=None)
+        apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=None)
         visible_cases = app_db.execute(text("SELECT case_code FROM document_cases")).scalars().all()
         assert visible_cases == ["RLS-A-1"]
         visible_audits = app_db.execute(text("SELECT event_type FROM audit_events")).scalars().all()
@@ -147,7 +150,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
                     "(id, organization_id, case_code, readiness_state, administrative_only, clinical_approval, created_at, updated_at) "
                     "VALUES ('bad-rls-id', :org_b, 'ROGUE-B', 'pendente', TRUE, FALSE, now(), now())"
                 ),
-                {"org_b": org_b.id},
+                {"org_b": org_b_id},
             )
         app_db.rollback()
 
@@ -161,16 +164,16 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             "ALTER TABLE audit_events DISABLE TRIGGER ALL",
         ):
             with pytest.raises(Exception):
-                app_db.execute(text(forbidden_sql), {"org_a": org_a.id})
+                app_db.execute(text(forbidden_sql), {"org_a": org_a_id})
             app_db.rollback()
 
         # 5. Runtime CAN append via SECURITY DEFINER functions (Audit & SecurityAudit repositories)
         appended = AuditEventRepository.append_event(
             app_db,
-            TenantContext(organization_id=org_a.id, actor_user_id=user_a.id),
+            TenantContext(organization_id=org_a_id, actor_user_id=user_a_id),
             event_type="RUNTIME_SECURITY_DEFINER_OK",
             target_entity_type="organization",
-            target_entity_id=org_a.id,
+            target_entity_id=org_a_id,
             payload_json={"via": "jyxia_append_audit_event"},
         )
         assert appended.sequence_number == 2
@@ -180,8 +183,8 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             outcome=SecurityAuditOutcome.SUCCESS,
             reason_code="security_definer_verified",
             payload_json={"role": "jyxia_app"},
-            organization_id=org_a.id,
-            user_id=user_a.id,
+            organization_id=org_a_id,
+            user_id=user_a_id,
         )
         assert sec_ev.sequence_number >= 1
         app_db.commit()
@@ -191,7 +194,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
     # Final chain integrity verification from owner connection
     verify_db = owner_factory()
     try:
-        assert AuditEventRepository.verify_chain(verify_db, TenantContext(organization_id=org_a.id))
+        assert AuditEventRepository.verify_chain(verify_db, TenantContext(organization_id=org_a_id))
         assert SecurityAuditRepository.verify_chain(verify_db)
     finally:
         verify_db.close()

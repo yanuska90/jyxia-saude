@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import email.message
 import hashlib
 import hmac
 import html
+import http.cookiejar as http_cookiejar
 import os
-import re
 import struct
 import time
-from urllib.parse import urljoin, urlparse
+import urllib.request
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse, urlsplit
 
 import httpx
 import pytest
@@ -26,7 +29,116 @@ from app.repositories.identity import IdentityAndSessionRepository, SecurityAudi
 from app.repositories.institutional import CaseAndDocumentRepository, OrganizationRepository
 from app.schemas.tenant import TenantContext
 
-_FORM_ACTION_RE = re.compile(r'<form[^>]+action="([^"]+)"', re.IGNORECASE)
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+class _LoopbackSecureCookiePolicy(http_cookiejar.DefaultCookiePolicy):
+    """Mirror W3C Secure Context browser behavior for loopback HTTP origins (127.0.0.1/localhost).
+
+    Keycloak 26 marks AUTH_SESSION_ID with Secure on loopback origins; stdlib CookieJar omits
+    Secure cookies over http:// unless the target hostname is explicitly loopback.
+    """
+
+    def return_ok_secure(
+        self,
+        cookie: http_cookiejar.Cookie,
+        request: urllib.request.Request,
+    ) -> bool:
+        host = (urlsplit(request.get_full_url()).hostname or "").lower()
+        if host in _LOOPBACK_HOSTS:
+            return True
+        return super().return_ok_secure(cookie, request)
+
+
+class _HttpxCookieResponseAdapter:
+    """Expose httpx Set-Cookie headers through urllib/http.cookiejar's .info() interface."""
+
+    def __init__(self, headers: httpx.Headers) -> None:
+        msg = email.message.Message()
+        for value in headers.get_list("set-cookie"):
+            msg.add_header("Set-Cookie", value)
+        self._msg = msg
+
+    def info(self) -> email.message.Message:
+        return self._msg
+
+
+def _new_loopback_keycloak_client(
+    *, transport: httpx.BaseTransport | None = None
+) -> tuple[httpx.Client, http_cookiejar.CookieJar]:
+    """Create an httpx.Client preserving Secure Keycloak session cookies only on loopback HTTP."""
+    jar = http_cookiejar.CookieJar(policy=_LoopbackSecureCookiePolicy())
+
+    def _attach_cookies(request: httpx.Request) -> None:
+        urllib_req = urllib.request.Request(
+            url=str(request.url),
+            headers=dict(request.headers),
+            method=request.method,
+        )
+        jar.add_cookie_header(urllib_req)
+        cookie_hdr = urllib_req.get_header("Cookie")
+        if cookie_hdr:
+            request.headers["Cookie"] = cookie_hdr
+
+    def _store_cookies(response: httpx.Response) -> None:
+        urllib_req = urllib.request.Request(
+            url=str(response.request.url),
+            headers=dict(response.request.headers),
+            method=response.request.method,
+        )
+        jar.extract_cookies(_HttpxCookieResponseAdapter(response.headers), urllib_req)
+
+    kwargs: dict[str, object] = {
+        "event_hooks": {"request": [_attach_cookies], "response": [_store_cookies]},
+    }
+    if transport is not None:
+        kwargs["transport"] = transport
+    client = httpx.Client(**kwargs)  # type: ignore[arg-type]
+    return client, jar
+
+
+class _KeycloakHtmlParser(HTMLParser):
+    """Parse Keycloak login/OTP HTML forms, hidden inputs and page title without fragile regexes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.forms: list[dict[str, object]] = []
+        self._current_form: dict[str, object] | None = None
+        self._in_title = False
+        self._title_parts: list[str] = []
+
+    @property
+    def title(self) -> str:
+        return " ".join("".join(self._title_parts).split())
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag_lower = tag.lower()
+        attr_map = {k.lower(): (v or "") for k, v in attrs}
+        if tag_lower == "title":
+            self._in_title = True
+        elif tag_lower == "form":
+            self._current_form = {
+                "id": attr_map.get("id", ""),
+                "action": attr_map.get("action", ""),
+                "hidden_inputs": {},
+            }
+        elif tag_lower == "input" and self._current_form is not None:
+            if attr_map.get("type", "").lower() == "hidden" and attr_map.get("name"):
+                hidden = self._current_form["hidden_inputs"]
+                assert isinstance(hidden, dict)
+                hidden[attr_map["name"]] = attr_map.get("value", "")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = tag.lower()
+        if tag_lower == "title":
+            self._in_title = False
+        elif tag_lower == "form" and self._current_form is not None:
+            self.forms.append(self._current_form)
+            self._current_form = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_parts.append(data)
 
 
 def _generate_totp(base32_secret: str, *, for_time: int | None = None, step: int = 30) -> str:
@@ -41,15 +153,49 @@ def _generate_totp(base32_secret: str, *, for_time: int | None = None, step: int
     return f"{code_int % 1_000_000:06d}"
 
 
-def _extract_form_action(html_body: str, base_url: str) -> str:
-    match = _FORM_ACTION_RE.search(html_body)
-    assert match is not None, f"Expected HTML form action in Keycloak response:\n{html_body[:1000]}"
-    action = html.unescape(match.group(1))
-    return urljoin(base_url, action)
+def _extract_keycloak_form(
+    html_body: str,
+    base_url: str,
+    *,
+    preferred_form_ids: tuple[str, ...],
+) -> tuple[str, dict[str, str], str]:
+    parser = _KeycloakHtmlParser()
+    parser.feed(html_body)
+    parser.close()
+    forms = parser.forms
+    selected: dict[str, object] | None = None
+    for form_id in preferred_form_ids:
+        selected = next((f for f in forms if f.get("id") == form_id and f.get("action")), None)
+        if selected is not None:
+            break
+    if selected is None:
+        selected = next((f for f in forms if f.get("action")), None)
+    assert selected is not None, (
+        f"Expected HTML form in Keycloak response (title={parser.title!r}):\n{html_body[:1000]}"
+    )
+    action = html.unescape(str(selected["action"]))
+    hidden = dict(selected["hidden_inputs"])  # type: ignore[arg-type]
+    return urljoin(base_url, action), hidden, parser.title
+
+
+def _describe_keycloak_response(
+    resp: httpx.Response,
+    jar: http_cookiejar.CookieJar,
+) -> str:
+    parser = _KeycloakHtmlParser()
+    parser.feed(resp.text)
+    parser.close()
+    cookie_names = sorted({c.name for c in jar})
+    path = urlsplit(str(resp.url)).path
+    return (
+        f"status={resp.status_code} path={path!r} title={parser.title!r} "
+        f"cookie_names={cookie_names}"
+    )
 
 
 def _complete_keycloak_login(
     kc_http: httpx.Client,
+    jar: http_cookiejar.CookieJar,
     auth_url: str,
     *,
     username: str,
@@ -58,36 +204,110 @@ def _complete_keycloak_login(
 ) -> str:
     """Drive real Keycloak HTML auth form + optional TOTP form, returning callback redirect URL."""
     page1 = kc_http.get(auth_url, follow_redirects=False)
-    assert page1.status_code == 200, f"Unexpected Keycloak login page status {page1.status_code}"
-    action1 = _extract_form_action(page1.text, str(page1.url))
-
-    step2 = kc_http.post(
-        action1,
-        data={"username": username, "password": password, "credentialId": ""},
-        follow_redirects=False,
+    assert page1.status_code == 200, (
+        f"Unexpected Keycloak login page: {_describe_keycloak_response(page1, jar)}"
     )
+    action1, hidden1, _ = _extract_keycloak_form(
+        page1.text,
+        str(page1.url),
+        preferred_form_ids=("kc-form-login",),
+    )
+
+    login_data = {**hidden1, "username": username, "password": password}
+    login_data.setdefault("credentialId", "")
+    step2 = kc_http.post(action1, data=login_data, follow_redirects=False)
     if step2.status_code in {302, 303}:
         # Password-only flow/client completed without OTP form
         return step2.headers["location"]
 
-    assert step2.status_code == 200, f"Expected Keycloak OTP challenge or redirect, got {step2.status_code}"
+    assert step2.status_code == 200, (
+        f"Expected Keycloak OTP challenge or redirect: {_describe_keycloak_response(step2, jar)}"
+    )
     assert totp_secret is not None, "Keycloak challenged for OTP without totp_secret configured."
-    action2 = _extract_form_action(step2.text, str(step2.url))
+    action2, hidden2, _ = _extract_keycloak_form(
+        step2.text,
+        str(step2.url),
+        preferred_form_ids=("kc-otp-login-form",),
+    )
 
     otp_code = _generate_totp(totp_secret)
-    cred_match = re.search(
-        r'name="selectedCredentialId"[^>]+value="([^"]+)"', step2.text, re.IGNORECASE
+    otp_data = {**hidden2, "otp": otp_code}
+    step3 = kc_http.post(action2, data=otp_data, follow_redirects=False)
+    assert step3.status_code in {302, 303}, (
+        f"Expected callback redirect after OTP: {_describe_keycloak_response(step3, jar)}"
     )
-    otp_data = {"otp": otp_code}
-    if cred_match:
-        otp_data["selectedCredentialId"] = html.unescape(cred_match.group(1))
-    step3 = kc_http.post(
-        action2,
-        data=otp_data,
-        follow_redirects=False,
-    )
-    assert step3.status_code in {302, 303}, f"Expected callback redirect after OTP, got {step3.status_code}: {step3.text[:500]}"
     return step3.headers["location"]
+
+
+def test_loopback_keycloak_http_client_transmits_secure_session_cookies_only_to_loopback() -> None:
+    """Verify W3C loopback Secure cookie behavior for Keycloak 26 integration harness."""
+    observed: list[tuple[str, str | None, bytes]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        observed.append((str(request.url), request.headers.get("cookie"), request.content))
+        if "protocol/openid-connect/auth" in str(request.url):
+            return httpx.Response(
+                200,
+                headers=[
+                    (
+                        "set-cookie",
+                        "AUTH_SESSION_ID=loop-sess; Path=/realms/jyxia-dev/; Secure; SameSite=None; HttpOnly",
+                    ),
+                ],
+                text=(
+                    "<html><head><title>Sign in</title></head><body>"
+                    '<form id="kc-form-login" method="post" '
+                    'action="http://127.0.0.1:8080/realms/jyxia-dev/login-actions/authenticate?session_code=s1&amp;tab_id=t1">'
+                    '<input type="hidden" name="credentialId" value="" />'
+                    "</form></body></html>"
+                ),
+            )
+        if "execution=otp" in str(request.url):
+            if request.headers.get("cookie") != "AUTH_SESSION_ID=loop-sess":
+                return httpx.Response(400, text="<title>Missing session cookie</title>")
+            return httpx.Response(
+                302,
+                headers={"location": "http://127.0.0.1:8000/api/v1/auth/callback?code=c1&state=st"},
+            )
+        if "login-actions/authenticate" in str(request.url):
+            if request.headers.get("cookie") != "AUTH_SESSION_ID=loop-sess":
+                return httpx.Response(400, text="<title>Missing session cookie</title>")
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><head><title>OTP</title></head><body>"
+                    '<form id="kc-otp-login-form" method="post" '
+                    'action="http://127.0.0.1:8080/realms/jyxia-dev/login-actions/authenticate?session_code=s1&amp;execution=otp">'
+                    '<input type="hidden" name="selectedCredentialId" value="cred-1" />'
+                    "</form></body></html>"
+                ),
+            )
+        return httpx.Response(200, text="<title>External</title>")
+
+    client, jar = _new_loopback_keycloak_client(transport=httpx.MockTransport(_handler))
+    with client:
+        cb = _complete_keycloak_login(
+            client,
+            jar,
+            "http://127.0.0.1:8080/realms/jyxia-dev/protocol/openid-connect/auth?client_id=test",
+            username="u1",
+            password="p1",
+            totp_secret="JBSWY3DPEHPK3PXP",
+        )
+        assert cb == "http://127.0.0.1:8000/api/v1/auth/callback?code=c1&state=st"
+        # External non-loopback HTTP MUST NOT receive Secure cookies
+        client.get("http://example.com/realms/jyxia-dev/login-actions/authenticate")
+
+    assert observed[1][:2] == (
+        "http://127.0.0.1:8080/realms/jyxia-dev/login-actions/authenticate?session_code=s1&tab_id=t1",
+        "AUTH_SESSION_ID=loop-sess",
+    )
+    assert observed[2][:2] == (
+        "http://127.0.0.1:8080/realms/jyxia-dev/login-actions/authenticate?session_code=s1&execution=otp",
+        "AUTH_SESSION_ID=loop-sess",
+    )
+    assert b"selectedCredentialId=cred-1" in observed[2][2]
+    assert observed[-1][1] is None
 
 
 @pytest.mark.skipif(
@@ -145,6 +365,8 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
             readiness_state=CaseReadinessState.PENDENTE.value,
         )
         owner_db.commit()
+        org_id = str(org.id)
+        user_id = str(user.id)
     finally:
         owner_db.close()
 
@@ -174,11 +396,13 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
     )
 
     # 1. Valid Keycloak Password + TOTP MFA -> Callback -> Session -> Protected Org Data -> Logout
-    with TestClient(app, base_url="http://127.0.0.1:8000") as bff_client, httpx.Client() as kc_http:
+    kc_http, kc_jar = _new_loopback_keycloak_client()
+    with TestClient(app, base_url="http://127.0.0.1:8000") as bff_client, kc_http:
         login_res = bff_client.get("/api/v1/auth/login?next=/workspace", follow_redirects=False)
         assert login_res.status_code == 302
         callback_url = _complete_keycloak_login(
             kc_http,
+            kc_jar,
             login_res.headers["location"],
             username=mfa_username,
             password=mfa_password,
@@ -196,9 +420,9 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
 
         me = bff_client.get("/api/v1/me")
         assert me.status_code == 200
-        assert me.json()["user_id"] == user.id
+        assert me.json()["user_id"] == user_id
 
-        cases = bff_client.get(f"/api/v1/organizations/{org.id}/cases")
+        cases = bff_client.get(f"/api/v1/organizations/{org_id}/cases")
         assert cases.status_code == 200
         assert cases.json()["cases"][0]["case_code"] == "KC-CASE-001"
 
@@ -213,10 +437,12 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
         assert bff_client.get("/api/v1/me").status_code == 401
 
     # 2. Authenticated unbound Keycloak user with MFA -> JYXIA rejects 403 & NEVER auto-provisions
-    with TestClient(app, base_url="http://127.0.0.1:8000") as unbound_bff, httpx.Client() as kc_http_2:
+    kc_http_2, kc_jar_2 = _new_loopback_keycloak_client()
+    with TestClient(app, base_url="http://127.0.0.1:8000") as unbound_bff, kc_http_2:
         login_res = unbound_bff.get("/api/v1/auth/login", follow_redirects=False)
         callback_url = _complete_keycloak_login(
             kc_http_2,
+            kc_jar_2,
             login_res.headers["location"],
             username=unbound_username,
             password=unbound_password,
@@ -248,10 +474,12 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
         engine=app_engine,
         oidc_adapter=StandardOidcProviderAdapter(pwd_only_settings),
     )
-    with TestClient(app_pwd_only, base_url="http://127.0.0.1:8000") as weak_bff, httpx.Client() as kc_http_3:
+    kc_http_3, kc_jar_3 = _new_loopback_keycloak_client()
+    with TestClient(app_pwd_only, base_url="http://127.0.0.1:8000") as weak_bff, kc_http_3:
         login_res = weak_bff.get("/api/v1/auth/login", follow_redirects=False)
         callback_url = _complete_keycloak_login(
             kc_http_3,
+            kc_jar_3,
             login_res.headers["location"],
             username=mfa_username,
             password=mfa_password,

@@ -2,7 +2,7 @@
   "realm": "jyxia-dev",
   "enabled": true,
   "displayName": "JYXIA Local Development Realm (Synthetic Only)",
-  "sslRequired": "external",
+  "sslRequired": "none",
   "registrationAllowed": false,
   "resetPasswordAllowed": false,
   "rememberMe": false,
