@@ -1,47 +1,42 @@
-# Arquitetura Institucional da JYXIA — Fundação Endurecida (`0.1.0` · Etapa 3.1)
+# Arquitetura Institucional da JYXIA — Identidade, OIDC/MFA, RBAC e Hardening (`0.2.0` · Etapa 3.2)
 
-Documento técnico atualizado na **Etapa 3.1** (`backend/` `0.1.0`), detalhando a fundação relacional multi-tenant após auditoria estrutural e correções de integridade, auditoria concorrente, armazenamento sintético e gestão determinística de dependências.
+Documento técnico atualizado na **Etapa 3.2** (`backend/` `0.2.0`), evoluindo a fundação relacional multi-tenant para autenticação institucional via OIDC/PKCE/MFA obrigatório, sessões seguras no servidor, autorização RBAC em 5 papéis, separação de roles no PostgreSQL 16 e políticas Row-Level Security (`RLS`). Detalhamento completo do fluxo de identidade em [`IDENTIDADE_E_AUTORIZACAO.md`](IDENTIDADE_E_AUTORIZACAO.md).
 
-## 1. Camadas e endurecimentos implementados (`backend/app/`)
+## 1. Camadas e controles implementados (`backend/app/`)
 
-- **`core/` (`config.py`, `constants.py`, `logging.py`, `security_prep.py`, `processing_contracts.py`):**
-  - **Configuração (`config.py`):** `Settings` fail-closed recusa em `JYXIA_ENV=production`: SQLite, armazenamento local sintético (`JYXIA_ALLOW_LOCAL_SYNTHETIC_STORAGE=true`), `debug=True`, `JYXIA_LOG_LEVEL=DEBUG`, OIDC inativo (`oidc_enabled=false`), OIDC sem HTTPS, CORS com `*` ou HTTP, além de senhas fracas/placeholders (`SYNTHETIC_LOCAL_ONLY_CHANGE_ME`, `< 12` caracteres etc.). `mask_database_url()` remove usuário, senha e query strings sensíveis;
-  - **Logs (`logging.py`):** `SanitizingFilter` e `build_safe_log_extra` mascaram recursivamente tokens Bearer, JWTs (`eyJ...`), senhas em DSN, CPFs e chaves proibidas (`document_text`, `raw_value`, `quote_excerpt`, `patient_name`, `birth_date`, `cpf`, `client_secret`, `oidc_token`);
-  - **Contratos preparatórios OIDC + MFA + RBAC (`security_prep.py`):** `StubOidcAuthenticator` falha fechado por padrão; `require_permission` valida organização, MFA obrigatório para escrita/admin e papel RBAC (`OrganizationRole`);
-  - **Contratos puros de processamento (`processing_contracts.py`):** `NormalizedBoundingBox` valida limites em `[0, 1]` com `x + w <= 1.00001` e `y + h <= 1.00001`; `ExtractionOutcomeStatus` e `FieldCandidateContract` distinguem extração falhada/incompleta, campo ausente/ambíguo/ilegível e revisão humana obrigatória (`human_reviewed: Literal[False]`); `compute_processing_idempotency_key` e `ReprocessingPolicyContract` garantem preservação de runs anteriores e revisões humanas; `UnimplementedOcrAdapter` recusa OCR.
+- **`core/` (`config.py`, `constants.py`, `logging.py`, `session_crypto.py`, `oidc.py`, `rbac.py`, `processing_contracts.py`):**
+  - **Configuração (`config.py`):** `Settings` fail-closed recusa em `JYXIA_ENV=production`: SQLite, armazenamento local sintético, `debug=True`, `JYXIA_LOG_LEVEL=DEBUG`, OIDC inativo, `oidc_allow_http_dev=true`, OIDC/CORS sem HTTPS ou com `*`, além de `session_secret`/`csrf_secret`/senhas fracas ou placeholders. Inclui `migration_database_url` separado do runtime;
+  - **Criptografia de sessão e PKCE (`session_crypto.py`):** tokens opacos aleatórios, digests HMAC-SHA256 com chaves/contextos separados e cifra AES-256-GCM para `code_verifier` em repouso;
+  - **Adaptador OIDC padrão (`oidc.py`):** discovery com pinning de `issuer`, cache JWKS limitado com cooldown anti-DoS, verificação `RS256`/`ES256` via `PyJWT`, separação estrita de ID Token vs. Access Token (`at+jwt` / `token_use=access` recusados) e validação obrigatória de MFA (`acr`, `amr`, `auth_time`, bloqueando `["pwd"]` isolado);
+  - **RBAC centralizado (`rbac.py`):** matriz declarativa `ROLE_PERMISSIONS` para `org_admin`, `admin_operator`, `clinical_reviewer` (mantido para compatibilidade apenas na revisão de campos/evidências), `auditor_readonly` e `read_only`;
+  - **Logs e contratos (`logging.py`, `processing_contracts.py`):** sanitização recursiva estendida para cookies/tokens/verifiers PKCE/nonces e contratos de extração sem OCR/LLM.
 
 - **`db/` (`base.py`, `session.py`):**
-  - Engine compatível com `postgresql+psycopg` (`connect_timeout=2`, `pool_pre_ping=True`) e SQLite local (`PRAGMA foreign_keys=ON`, `PRAGMA busy_timeout=5000`); `check_db_connectivity()` retorna apenas `reachable` / `unconfigured` / `unavailable` sem vazar DSN.
+  - `apply_pg_rls_context()` vincula `app.current_organization_id` e `app.current_user_id` transacionalmente via `set_config(..., true)` para enforcement efetivo do RLS no PostgreSQL 16.
 
-- **`models/entities.py` (`11` modelos relacionais multi-tenant + políticas `ON DELETE`):**
-  1. `Organization` (`organizations`) — preserva membros e casos (`passive_deletes="all"`, sem `cascade="all, delete-orphan"`);
-  2. `User` (`users`) — identidade global preparatória (`external_subject` nullable único para OIDC, e-mail em minúsculas);
-  3. `OrganizationMembership` (`organization_memberships`) — papel e status por organização com `UNIQUE(organization_id, user_id)` e `ON DELETE RESTRICT`;
-  4. `DocumentCase` (`document_cases`) — `case_code` único por organização, **`external_reference` opcional com índice único parcial `WHERE external_reference IS NOT NULL`** por organização (permitindo nulos múltiplos sem colisões), `CheckConstraint` garantindo `administrative_only = TRUE` e `clinical_approval = FALSE`, e FK composta `fk_document_cases_org_creator` (`created_by_user_id` vinculado à membership na mesma organização, `ON DELETE RESTRICT`);
-  5. `Document` (`documents`) — FK composta `fk_documents_org_case` impedindo vínculo cross-tenant de caso; descarte exige justificativa mínima de 3 caracteres;
-  6. `DocumentVersion` (`document_versions`) — SHA-256 em minúsculas com 64 caracteres, MIME restrito (`application/pdf`, `image/png`), tamanho positivo, `original_filename` opcional sanitizado sem `/`, `\`, `..`, e **auto-FK composta de 3 colunas `fk_doc_versions_org_doc_supersede`** garantindo que substituições pertençam à mesma organização e ao mesmo `document_id`;
-  7. `ProcessingRun` (`processing_runs`) — `idempotency_key` opcional único por organização, constraint `finished_at >= started_at`, e chave composta `(organization_id, document_version_id, id)`;
-  8. `ExtractedField` (`extracted_fields`) — **FK composta de 3 colunas `fk_extracted_fields_org_ver_run`** vinculando campo, run e versão documental; coerência obrigatória `(status <> 'abstained') OR (abstained = TRUE)`; nunca misturado com `HumanReview`;
-  9. `EvidenceReference` (`evidence_references`) — coordenadas normalizadas top-left `[0.0, 1.0]` (`bbox_x`, `bbox_y`, `bbox_w`, `bbox_h` com checks `bbox_x + bbox_w <= 1.00001` e `bbox_y + bbox_h <= 1.00001`), **FK composta de 3 colunas `fk_evidence_refs_org_ver_field`**;
-  10. `HumanReview` (`human_reviews`) — **FK composta `fk_human_reviews_org_reviewer`** exigindo associação do revisor na organização em `organization_memberships`, e **FK composta de 3 colunas `fk_human_reviews_org_ver_evidence`** garantindo evidência da mesma organização e versão;
-  11. `AuditEvent` (`audit_events`) — `schema_version` (`jyxia.audit.v1`), `fk_audit_events_org_actor` vinculado à membership quando `actor_user_id` presente, trilha encadeada por `sequence_number` e `event_hash` canônico.
+- **`models/entities.py` (`15` modelos relacionais multi-tenant + identidade):**
+  - Preserva integralmente os `11` modelos multi-tenant (`Organization`, `User`, `OrganizationMembership` incluindo `read_only` e status `suspended`/`revoked`, `DocumentCase`, `Document`, `DocumentVersion`, `ProcessingRun`, `ExtractedField`, `EvidenceReference`, `HumanReview`, `AuditEvent`);
+  - Adiciona **`4` modelos de identidade e segurança:**
+    12. `ExternalIdentity` (`external_identities`) — vinculação única `(issuer, subject)` -> `user_id` sem matching por e-mail;
+    13. `OidcAuthState` (`oidc_auth_states`) — transação PKCE efêmera com `state_hash`, `nonce_hash`, `code_verifier_ciphertext` (AES-256-GCM) e consumo único atômico (`consumed_at`);
+    14. `AuthSession` (`auth_sessions`) — sessão BFF server-side com digests `session_token_hash` / `csrf_token_hash`, `acr`, `amr_json`, `mfa_verified_at`, timeouts de ociosidade/absoluto e `revoked_at` (sem tokens OIDC em claro);
+    15. `SecurityAuditEvent` (`security_auth_events`) — trilha global append-only encadeada (`jyxia.sec_audit.v1`) para logins, recusas MFA, CSRF, cross-tenant e negações RBAC.
 
-  *Política de exclusão:* todas as relações críticas utilizam `ON DELETE RESTRICT` visando preservação controlada de histórico até definição jurídica/operacional de retenção.
+## 2. Separação de privilégios no PostgreSQL 16, RLS e trilha append-only
 
-## 2. Auditoria institucional concorrente, canonicalização e triggers
+- **Migration `20261120_0003` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
+  - Separa `migration_owner` (dona do schema/DDL/funções `SECURITY DEFINER`) da role restrita de runtime `jyxia_app` (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION`, sem `DDL`, sem `DELETE`/`TRUNCATE` e sem `INSERT` direto nas tabelas de auditoria);
+  - Habilita **Row-Level Security (RLS)** nas tabelas organizacionais e de auditoria vinculadas a `app.current_organization_id` (e `app.current_user_id` em `organization_memberships`);
+  - Instala triggers **`BEFORE TRUNCATE`** em `audit_events` e triggers `BEFORE UPDATE / DELETE / TRUNCATE` em `security_auth_events`;
+  - Em PostgreSQL, `AuditEventRepository` e `SecurityAuditRepository` gravam via funções **`SECURITY DEFINER SET search_path = pg_catalog, public`** (`jyxia_append_audit_event`, `jyxia_append_security_event`, `jyxia_get_security_audit_head`).
 
-- **Canonicalização (`AUDIT_SCHEMA_VERSION = 'jyxia.audit.v1'`):** `compute_audit_event_hash()` serializa em JSON ordenado e determinístico: `schema_version`, `organization_id`, `sequence_number`, `actor_user_id`, `event_type`, `target_entity_type`, `target_entity_id`, `created_at` normalizado em UTC ISO-8601 (`%Y-%m-%dT%H:%M:%S.%fZ`), `payload_json` validado contra chaves/valores sensíveis (`AuditPayloadError`) e `prev_event_hash`.
-- **Serialização concorrente por organização:** `AuditEventRepository.append_event()` adquire bloqueio transacional `SELECT id FROM organizations WHERE id = :org_id FOR UPDATE` no PostgreSQL (serializando transações concorrentes na mesma organização sem bloquear outras organizações), combinado com `UNIQUE(organization_id, sequence_number)` e `append_event_atomic()` com bloqueio local por organização para SQLite e retentativas limitadas.
-- **Proteção no banco contra `UPDATE`/`DELETE` SQL diretos:** a migration incremental [`20261120_0002_harden_constraints_audit_triggers.py`](../backend/migrations/versions/20261120_0002_harden_constraints_audit_triggers.py) instala os triggers `trg_audit_events_no_update` e `trg_audit_events_no_delete` no PostgreSQL (`BEFORE UPDATE / DELETE`) e triggers equivalentes no SQLite local (`RAISE(ABORT, ...)`), além dos listeners ORM em `AuditEvent`.
-- **Limite obrigatório:** triggers **não conferem imutabilidade absoluta**. Um administrador privilegiado do banco (`superuser` / role dona da tabela) ainda pode desabilitar triggers, executar `TRUNCATE` ou restaurar backups alterados; garantia mais forte exigirá futuramente separação de roles (`app_user` sem DDL/TRIGGER vs. `migration_owner`) e ancoragem/armazenamento WORM externo.
+## 3. Endpoints HTTP (`backend/` `0.2.0`)
 
-## 3. Storage controlado sintético e API HTTP (`0.1.0`)
+- **Públicos / infraestrutura:** `/api/v1/health/live`, `/api/v1/health/ready`, `/api/v1/auth/login`, `/api/v1/auth/callback`;
+- **Sessão autenticada (com CSRF + `Origin` em mutações):** `POST /api/v1/auth/logout`, `GET /api/v1/auth/session`, `POST /api/v1/auth/select-organization`, `GET /api/v1/me`, `GET /api/v1/me/organizations`;
+- **Organizacionais protegidos por RBAC + vínculo ativo + RLS:** `/api/v1/organizations/{organization_id}/access-context`, `/cases`, `/members` e `/audit-events`.
 
-- [`LocalControlledSyntheticStorage`](../backend/app/services/storage.py) bloqueia symlinks e junctions NTFS em toda a cadeia de diretórios, rejeita nomes e chaves maliciosas, valida assinaturas estruturais de PDF (`%PDF-1.`/`2.0` com trailer `%%EOF`) e PNG (cabeçalho + walk completo de chunks `IHDR`..`IEND` com verificação CRC-32), grava via arquivo temporário + `fsync` + verificação SHA-256 + `os.replace()` atômico e limpa arquivos parciais em falhas. **Uso restrito a binários sintéticos em dev/teste.**
-- A API expõe **apenas** `GET /api/v1/health/live` e `GET /api/v1/health/ready` (`200` ou `503` sanitizado) e desativa `/docs` + `/openapi.json` quando `JYXIA_ENV=production`.
+## 4. Storage sintético local e validação PostgreSQL 16 + Keycloak 26.8.2
 
-## 4. Migrações e validação PostgreSQL 16 vs. local
-
-- Migrações incrementais preservadas em [`backend/migrations/versions/`](../backend/migrations/versions): `20261120_0001` (esquema inicial) e `20261120_0002` (hardening relacional + triggers append-only).
-- Localmente (estação Windows sem Docker Desktop nem PostgreSQL nativo): `22/22` testes em `tests/backend/` executados contra SQLite com `PRAGMA foreign_keys=ON` e verificação de DDL PostgreSQL;
-- Em CI ([`.github/workflows/security.yml`](../.github/workflows/security.yml)): validação real contra **`postgres:16-alpine`** cobrindo ciclo `upgrade head` -> `downgrade 20261120_0001` -> `downgrade base` -> `upgrade head` e toda a suíte `tests/backend/` (incluindo concorrência em múltiplas sessões PostgreSQL e rejeição de `UPDATE`/`DELETE` pelos triggers).
+- **Storage (`services/storage.py`):** preservado integralmente (`LocalControlledSyntheticStorage` fora do Git com rejeição de symlinks/junctions e CRC-32).
+- **Local vs. CI:** localmente no Windows (sem Docker Desktop/PostgreSQL instalados), os testes executam contra SQLite + JWKS/IdP simulados com criptografia RSA/EC real; em CI ([`.github/workflows/security.yml`](../.github/workflows/security.yml)), toda a suíte é validada contra **`postgres:16-alpine` real com role `jyxia_app` + RLS** e **`quay.io/keycloak/keycloak:26.8.2` real com fluxo MFA/TOTP**.
