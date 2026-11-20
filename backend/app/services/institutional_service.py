@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.logging import LOGGER_NAME, build_safe_log_extra
 from app.models.entities import (
@@ -21,6 +22,7 @@ from app.models.entities import (
     User,
 )
 from app.repositories.institutional import (
+    AuditChainVerificationResult,
     AuditEventRepository,
     CaseAndDocumentRepository,
     OrganizationRepository,
@@ -108,6 +110,7 @@ class InstitutionalService:
             session,
             ctx,
             case_code=payload.case_code,
+            external_reference=payload.external_reference,
             procedure_reference=payload.procedure_reference,
             declared_laterality=payload.declared_laterality,
             readiness_state=payload.readiness_state.value,
@@ -180,6 +183,7 @@ class InstitutionalService:
             mime_type=payload.mime_type,
             byte_size=payload.byte_size,
             page_count=payload.page_count,
+            original_filename=payload.original_filename,
             storage_driver=payload.storage_driver.value,
             storage_key=payload.storage_key,
         )
@@ -209,11 +213,13 @@ class InstitutionalService:
         mime_type: str,
         content: bytes,
         page_count: int | None = None,
+        original_filename: str | None = None,
     ) -> DocumentVersion:
         stored = storage.store_synthetic_bytes(
             organization_id=ctx.organization_id,
             mime_type=mime_type,
             content=content,
+            original_filename=original_filename,
         )
         return InstitutionalService.register_document_version(
             session,
@@ -225,6 +231,7 @@ class InstitutionalService:
                 mime_type=mime_type,  # type: ignore[arg-type]
                 byte_size=stored.byte_size,
                 page_count=page_count,
+                original_filename=stored.original_filename,
                 storage_key=stored.storage_key,
             ),
         )
@@ -240,10 +247,13 @@ class InstitutionalService:
             document_version_id=payload.document_version_id,
             policy_version=payload.policy_version,
             extractor_version=payload.extractor_version,
+            idempotency_key=payload.idempotency_key,
             status=payload.status.value,
             readable=payload.readable,
             readiness_state=payload.readiness_state.value if payload.readiness_state else None,
             axes_summary=payload.axes_summary,
+            started_at=payload.started_at,
+            finished_at=payload.finished_at,
         )
         AuditEventRepository.append_event(
             session,
@@ -276,7 +286,6 @@ class InstitutionalService:
             abstained=payload.abstained,
             metadata_json=payload.metadata_json,
         )
-        # Do not log raw field text values into structured application logs.
         logger.info(
             "Extracted field persisted.",
             extra=build_safe_log_extra(
@@ -340,9 +349,34 @@ class InstitutionalService:
         return review
 
     @staticmethod
+    def append_audit_event_atomic(
+        session_factory: sessionmaker[Session] | Callable[[], Session],
+        ctx: TenantContext,
+        *,
+        event_type: str,
+        target_entity_type: str,
+        target_entity_id: str,
+        payload_json: dict[str, str | int | bool | None],
+    ) -> AuditEvent:
+        return AuditEventRepository.append_event_atomic(
+            session_factory,
+            ctx,
+            event_type=event_type,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+            payload_json=dict(payload_json),
+        )
+
+    @staticmethod
     def list_audit_events(session: Session, ctx: TenantContext) -> list[AuditEvent]:
         return AuditEventRepository.list_events(session, ctx)
 
     @staticmethod
     def verify_audit_chain(session: Session, ctx: TenantContext) -> bool:
         return AuditEventRepository.verify_chain(session, ctx)
+
+    @staticmethod
+    def verify_audit_chain_detailed(
+        session: Session, ctx: TenantContext
+    ) -> AuditChainVerificationResult:
+        return AuditEventRepository.verify_chain_detailed(session, ctx)
