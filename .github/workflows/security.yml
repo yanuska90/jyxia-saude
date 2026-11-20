@@ -117,8 +117,13 @@ jobs:
           if ! /tmp/jyxia-ci-venv/bin/python -u -m pytest tests/backend -v -rs 2>&1 | tee /tmp/pytest_ci.log; then
             python3 -c "
           from pathlib import Path
-          lines = [l for l in Path('/tmp/pytest_ci.log').read_text(errors='replace').splitlines() if l.startswith(('FAILED ', 'ERROR ', 'E   ', 'psycopg.', 'sqlalchemy.', 'tests/backend/'))]
-          for line in lines[:16]:
+          raw_lines = Path('/tmp/pytest_ci.log').read_text(errors='replace').splitlines()
+          failed_lines = [l for l in raw_lines if l.startswith(('FAILED ', 'ERROR '))]
+          error_lines = [l for l in raw_lines if l.startswith(('E   ', 'psycopg.', 'sqlalchemy.'))]
+          priority = failed_lines + error_lines
+          if not priority:
+              priority = [l for l in raw_lines if 'Error' in l or 'Traceback' in l][-10:]
+          for line in priority[:10]:
               print(f'::error::{line}')
           " || true
             docker logs jyxia-keycloak-ci | tail -n 60 || true

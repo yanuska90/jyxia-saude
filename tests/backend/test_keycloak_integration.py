@@ -106,16 +106,26 @@ class _KeycloakHtmlParser(HTMLParser):
         self._current_form: dict[str, object] | None = None
         self._in_title = False
         self._title_parts: list[str] = []
+        self._in_notice = False
+        self._notice_parts: list[str] = []
 
     @property
     def title(self) -> str:
         return " ".join("".join(self._title_parts).split())
 
+    @property
+    def notice(self) -> str:
+        return " ".join("".join(self._notice_parts).split())[:240]
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_lower = tag.lower()
         attr_map = {k.lower(): (v or "") for k, v in attrs}
+        cls = attr_map.get("class", "").lower()
+        elem_id = attr_map.get("id", "").lower()
         if tag_lower == "title":
             self._in_title = True
+        elif tag_lower == "h1" or "alert" in cls or "feedback" in cls or "instruction" in elem_id or "error" in cls:
+            self._in_notice = True
         elif tag_lower == "form":
             self._current_form = {
                 "id": attr_map.get("id", ""),
@@ -132,6 +142,8 @@ class _KeycloakHtmlParser(HTMLParser):
         tag_lower = tag.lower()
         if tag_lower == "title":
             self._in_title = False
+        elif tag_lower in {"h1", "div", "span", "p"}:
+            self._in_notice = False
         elif tag_lower == "form" and self._current_form is not None:
             self.forms.append(self._current_form)
             self._current_form = None
@@ -139,6 +151,8 @@ class _KeycloakHtmlParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self._title_parts.append(data)
+        if self._in_notice:
+            self._notice_parts.append(data)
 
 
 def _generate_totp(base32_secret: str, *, for_time: int | None = None, step: int = 30) -> str:
@@ -189,7 +203,7 @@ def _describe_keycloak_response(
     path = urlsplit(str(resp.url)).path
     return (
         f"status={resp.status_code} path={path!r} title={parser.title!r} "
-        f"cookie_names={cookie_names}"
+        f"notice={parser.notice!r} cookie_names={cookie_names}"
     )
 
 
