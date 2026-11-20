@@ -162,8 +162,14 @@ async function main() {
       '/app.py',
       '/demo-v2.html',
       '/serve_documental.py',
+      '/serve_lab.py',
+      '/lab-local.html',
+      '/lab-local.mjs',
+      '/lab-extractor.mjs',
+      '/benchmark/benchmark-manifest.json',
       '/test_documental.mjs',
       '/test_documental_pdfjs.mjs',
+      '/test_lab_and_benchmark.mjs',
       '/test_documental_e2e.mjs',
       '/integration.py',
       '/README.md',
@@ -222,30 +228,36 @@ async function main() {
 
     const waitIdle = () => waitUntil(() => cdp.eval(`!document.body.hasAttribute('aria-busy')`));
 
-    // 2. index.html
+    // 2. index.html across desktop & mobile viewports
     await cdp.send('Page.navigate', { url: `${baseUrl}/index.html` });
     await waitUntil(() => cdp.eval(`document.readyState === 'complete' && document.body.innerText.includes('JYXIA')`));
     const indexFavHref = await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`);
     assert.equal(indexFavHref, 'favicon.svg');
+    for (const vw of [320, 390, 768, 1024, 1280]) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: vw, height: 844, deviceScaleFactor: 1, mobile: vw < 768 });
+      assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false, `Overflow em index.html a ${vw}px`);
+    }
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    const navMinH = await cdp.eval(`Math.min(...[...document.querySelectorAll('header nav a')].map(el => el.getBoundingClientRect().height))`);
+    assert(navMinH >= 44, `Alvos de navegacao desktop devem ter >=44px de altura, obtido ${navMinH}`);
     console.log('E2E_2_INDEX_OK');
 
-    // 3. demo.html
+    // 3. demo.html (9 scenarios + keyboard navigation)
     await cdp.send('Page.navigate', { url: `${baseUrl}/demo.html` });
     await waitUntil(() => cdp.eval(`
       document.readyState === 'complete' &&
       !document.body.hasAttribute('aria-busy') &&
-      document.getElementById('scenario')?.options?.length === 8 &&
+      document.getElementById('scenario')?.options?.length === 9 &&
       document.getElementById('case-meta')?.textContent?.includes('12/04/1986')
     `));
     assert.equal(await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`), 'favicon.svg');
-    // Verify keyboard Tab navigation moves focus to an interactive control cleanly
     await cdp.eval(`document.getElementById('scenario').focus()`);
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     assert.equal(await cdp.eval(`document.activeElement?.id`), 'load');
     console.log('E2E_3_DEMO_INIT_OK');
 
-    // 4. Manual upload via #files: PDF + PNG + altered file rejection
+    // 4. Manual upload via #files: PDF + PNG (no signature analysis claim!) + altered file rejection
     const fixturesBase = opts.staticDir || ROOT_DIR;
     const uploadFiles = async files => {
       const docNode = await cdp.send('DOM.getDocument', { depth: -1 });
@@ -256,6 +268,8 @@ async function main() {
 
     await uploadFiles([path.join(fixturesBase, 'fixtures', 'laudo.pdf')]);
     await waitUntil(() => cdp.eval(`document.getElementById('document-name')?.textContent === 'laudo.pdf'`));
+    const verFonteH = await cdp.eval(`document.querySelector('button[aria-label*="Data de emissão"]')?.getBoundingClientRect().height || 0`);
+    assert(verFonteH >= 44, `Botao Ver fonte em desktop deve ter altura >=44px, obtido ${verFonteH}`);
     await cdp.eval(`document.querySelector('button[aria-label*="Data de emissão"]')?.click()`);
     await waitIdle();
     await waitUntil(() => cdp.eval(`!document.getElementById('source-highlight').hidden && document.getElementById('pdf-canvas').width > 100`));
@@ -280,11 +294,14 @@ async function main() {
     const manualPngState = await cdp.eval(`({
       imgHidden: document.getElementById('source-image').hidden,
       caption: document.getElementById('source-caption').textContent,
+      fieldsText: document.getElementById('fields').textContent,
       reviewFormHidden: document.getElementById('review-form').hidden,
       docsCount: document.querySelectorAll('#document-list .doc-button').length,
     })`);
     assert.equal(manualPngState.imgHidden, false);
     assert(manualPngState.caption.includes('Sem OCR nesta versão'));
+    assert(manualPngState.caption.includes('nenhuma assinatura'));
+    assert(!/assinatura ausente|assinatura validada/i.test(manualPngState.fieldsText));
     assert.equal(manualPngState.reviewFormHidden, true);
     assert.equal(manualPngState.docsCount, 2);
     assert.equal(await cdp.eval(`document.getElementById('quarantine-guidance').hidden`), false);
@@ -292,10 +309,12 @@ async function main() {
     await uploadFiles([invalidPdfPath]);
     const rejectedManualState = await cdp.eval(`({
       isErr: document.getElementById('message').classList.contains('error'),
+      role: document.getElementById('message').getAttribute('role'),
       msg: document.getElementById('message').textContent,
       docsCount: document.querySelectorAll('#document-list .doc-button').length,
     })`);
     assert.equal(rejectedManualState.isErr, true);
+    assert.equal(rejectedManualState.role, 'alert');
     assert(rejectedManualState.msg.startsWith('Erro: '));
     assert.equal(rejectedManualState.docsCount, 2);
     console.log('E2E_4_MANUAL_FILES_PDF_AND_PNG_OK:', { manualPdfPixels, docsCount: manualPngState.docsCount });
@@ -305,22 +324,11 @@ async function main() {
     await waitIdle();
     assert.equal(await cdp.eval(`document.querySelectorAll('#document-list .doc-button').length`), 0);
 
-    // 5. Scenario 1 + 390px responsiveness + validation preservation + verify + export + case-file CSV/JSON
+    // 5A. Scenario 1 (historical partial set) -> MUST reach abstencao, NOT false conferida!
     await cdp.eval(`document.getElementById('scenario').value = 'completo'; document.getElementById('load').click();`);
     await waitIdle();
     await cdp.eval(`[...document.querySelectorAll('#document-list .doc-button')].find(b => b.textContent.includes('laudo.pdf')).click()`);
     await waitIdle();
-    await cdp.eval(`document.querySelector('button[aria-label*="Data de emissão"]')?.click()`);
-    await waitIdle();
-
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: 390, height: 844, deviceScaleFactor: 1, mobile: true,
-    });
-    const mobileOverflow = await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`);
-    assert.equal(mobileOverflow, false, 'Nao deve haver overflow horizontal em 390px');
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
-    });
 
     await cdp.eval(`
       document.getElementById('identity-confirm').checked = true;
@@ -329,7 +337,7 @@ async function main() {
       document.getElementById('review-form').requestSubmit();
     `);
     await waitIdle();
-    assert.equal(await cdp.eval(`document.getElementById('identity-confirm').checked`), true);
+    assert.equal(await cdp.eval(`document.getElementById('review-note').getAttribute('aria-invalid')`), 'true');
     assert.equal(await cdp.eval(`document.getElementById('issue-date').value`), '2026-11-12');
 
     await cdp.eval(`
@@ -342,14 +350,35 @@ async function main() {
       await waitIdle();
       await cdp.eval(`
         document.getElementById('identity-confirm').checked = true;
-        if (!document.getElementById('signature-group').hidden) document.getElementById('signature').value = 'present';
+        if (!document.getElementById('visual-observation-group').hidden) document.getElementById('human-visual-observation').value = 'observed';
         document.getElementById('review-form').requestSubmit();
       `);
       await waitIdle();
     }
-    assert.equal(await cdp.eval(`document.getElementById('readiness').textContent`), 'Documentação conferida (regras do exemplo)');
+    const partialReadiness = await cdp.eval(`document.getElementById('readiness').textContent`);
+    assert(partialReadiness.includes('Abstenção documental'), `Cenario 1 historico nao pode concluir como conferida; obtido: ${partialReadiness}`);
 
-    // Non-destructive draft preservation when assigning a task or recalculating rule
+    // Clear and run Scenario 9 (quatro_eixos) -> reaches Documentação conferida!
+    await cdp.eval(`document.getElementById('reset-confirm').checked = true; document.getElementById('reset').click();`);
+    await waitIdle();
+    await cdp.eval(`document.getElementById('scenario').value = 'quatro_eixos'; document.getElementById('load').click();`);
+    await waitIdle();
+    for (const name of ['solicitacao-completa.pdf', 'laudo-completo.pdf', 'avaliacao-completa.pdf', 'termo-completo.pdf']) {
+      await cdp.eval(`[...document.querySelectorAll('#document-list .doc-button')].find(b => b.textContent.includes(${JSON.stringify(name)})).click()`);
+      await waitIdle();
+      await cdp.eval(`
+        document.getElementById('identity-confirm').checked = true;
+        if (!document.getElementById('visual-observation-group').hidden) document.getElementById('human-visual-observation').value = 'observed';
+        document.getElementById('review-form').requestSubmit();
+      `);
+      await waitIdle();
+    }
+    const fullReadiness = await cdp.eval(`document.getElementById('readiness').textContent`);
+    assert(fullReadiness.startsWith('Documentação conferida'), `Cenario 9 devia concluir; obtido: ${fullReadiness}`);
+    const termoMarkerText = await cdp.eval(`document.getElementById('fields').textContent`);
+    assert(termoMarkerText.includes('Marcador textual sintético detectado'), 'Termo deve mostrar detecção textual honesta');
+
+    // Non-destructive draft preservation when recalculating rule + 5 viewports accessibility check
     await cdp.eval(`document.getElementById('review-note').value = 'Rascunho em edicao.'; document.getElementById('rule').click();`);
     await waitIdle();
     assert.equal(await cdp.eval(`document.getElementById('review-note').value`), 'Rascunho em edicao.');
@@ -373,10 +402,16 @@ async function main() {
       await waitIdle();
       assert(await cdp.eval(`document.getElementById('message').textContent.includes('CASO-SYN-001 (SYN-P01)')`));
     }
-    console.log('E2E_5_SCENARIO_MOBILE_REVIEW_CASEFILE_OK');
+    console.log('E2E_5_SCENARIO_1_9_MOBILE_REVIEW_CASEFILE_OK');
 
-    // 6. Replace (versao) + Quarantine (divergente) + Prazo (janela) + #reset
+    // 6. Replace (versao) + Quarantine (divergente) + Lateralidade (OD x OE) + 5 viewports + Janela + Reset
+    await cdp.eval(`document.getElementById('reset-confirm').checked = true; document.getElementById('reset').click();`);
+    await waitIdle();
     await cdp.eval(`document.getElementById('scenario').value = 'versao'; document.getElementById('load').click();`);
+    await waitIdle();
+    await cdp.eval(`[...document.querySelectorAll('#document-list .doc-button')].find(b => b.textContent.includes('laudo.pdf')).click()`);
+    await waitIdle();
+    await cdp.eval(`document.getElementById('identity-confirm').checked = true; document.getElementById('review-form').requestSubmit();`);
     await waitIdle();
     await cdp.eval(`[...document.querySelectorAll('#document-list .doc-button')].find(b => b.textContent.includes('laudo-atualizado.pdf')).click()`);
     await waitIdle();
@@ -395,7 +430,7 @@ async function main() {
     assert.equal(await cdp.eval(`document.getElementById('review-form').hidden`), true);
     assert.equal(await cdp.eval(`document.getElementById('quarantine-guidance').hidden`), false);
 
-    // Scenario 8: Lateralidade divergente (OD x OE) + Ver fonte em Lateralidade + Eixo 3 bloqueante + mobile 390px sem overflow
+    // Scenario 8: Lateralidade divergente (OD x OE) + Ver fonte + Eixo 3 bloqueante + 5 viewports
     await cdp.eval(`document.getElementById('reset-confirm').checked = true; document.getElementById('reset').click();`);
     await waitIdle();
     await cdp.eval(`document.getElementById('scenario').value = 'lateralidade'; document.getElementById('load').click();`);
@@ -415,12 +450,23 @@ async function main() {
     assert(latE2e.caption.includes('Lateralidade: Olho Esquerdo (OE)'));
     assert(latE2e.notice.includes('Divergência de lateralidade'));
     assert(latE2e.readiness.includes('Divergência bloqueante'));
-    for (const vw of [320, 390, 768]) {
+
+    const viewportMetrics = [];
+    for (const vw of [320, 390, 768, 1024, 1280]) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: vw, height: 844, deviceScaleFactor: 1, mobile: vw < 768 });
-      assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false, `Overflow horizontal em ${vw}px`);
+      const vm = await cdp.eval(`(() => {
+        const overflow = document.documentElement.scrollWidth > window.innerWidth;
+        const targets = [...document.querySelectorAll('header nav a, .text-link, summary, .field button, #load, #save-review')].filter(el => el.offsetParent !== null);
+        const minH = Math.min(...targets.map(el => el.getBoundingClientRect().height));
+        const minW = Math.min(...targets.map(el => el.getBoundingClientRect().width));
+        return { overflow, minH: Math.round(minH * 10) / 10, minW: Math.round(minW * 10) / 10 };
+      })()`);
+      assert.equal(vm.overflow, false, `Overflow horizontal em demo.html a ${vw}px`);
+      assert(vm.minH >= 44, `Alvo interativo <44px em ${vw}px (minH=${vm.minH})`);
+      assert(vm.minW >= 44, `Alvo interativo <44px largura em ${vw}px (minW=${vm.minW})`);
+      viewportMetrics.push({ vw, ...vm });
     }
-    const minSummaryH = await cdp.eval(`Math.min(...[...document.querySelectorAll('summary')].map(el => el.getBoundingClientRect().height))`);
-    assert(minSummaryH >= 44, `Altura mínima de touch target <summary> esperada >=44px, obtida ${minSummaryH}`);
+    console.log('E2E_VIEWPORTS_A11Y_OK:', JSON.stringify(viewportMetrics));
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
 
     await cdp.eval(`document.getElementById('scenario').value = 'janela'; document.getElementById('load').click();`);
@@ -436,6 +482,34 @@ async function main() {
     assert.equal(await cdp.eval(`document.getElementById('message').classList.contains('error')`), false);
     assert.equal(await cdp.eval(`document.querySelectorAll('#document-list .doc-button').length`), 0);
     console.log('E2E_6_REPLACE_QUARANTINE_TASKS_RESET_OK');
+
+    // 7. In live workspace mode (!staticMode), also test isolated localhost Modalidade B lab server end-to-end
+    if (!staticMode) {
+      const labPort = opts.httpPort + 10;
+      const labServer = spawn('python', ['serve_lab.py', '--bind', '127.0.0.1', '--port', String(labPort)], {
+        cwd: ROOT_DIR,
+        stdio: 'ignore',
+      });
+      try {
+        await waitForHttp(`http://127.0.0.1:${labPort}/lab-local.html`);
+        const blockedPublicDemoFromLab = await fetch(`http://127.0.0.1:${labPort}/demo.html`);
+        assert.equal(blockedPublicDemoFromLab.status, 404);
+        await cdp.send('Page.navigate', { url: `http://127.0.0.1:${labPort}/lab-local.html` });
+        await waitUntil(() => cdp.eval(`document.readyState === 'complete' && document.body.innerText.includes('MODALIDADE B')`));
+        const docNode = await cdp.send('DOM.getDocument', { depth: -1 });
+        const labInput = await cdp.send('DOM.querySelector', { nodeId: docNode.root.nodeId, selector: '#lab-file' });
+        await cdp.send('DOM.setFileInputFiles', {
+          nodeId: labInput.nodeId,
+          files: [path.join(ROOT_DIR, 'benchmark', 'fixtures', 'eval-01-tabular-times-acentos.pdf')],
+        });
+        await waitUntil(() => cdp.eval(`!document.getElementById('lab-workspace').hidden && document.getElementById('lab-fields').textContent.includes('Nome completo')`));
+        const labText = await cdp.eval(`document.getElementById('lab-message').textContent`);
+        assert(labText.includes('Arquivo processado localmente em memória'), `Mensagem esperada do lab: ${labText}`);
+        console.log('E2E_7_MODALIDADE_B_LAB_LOCALHOST_OK');
+      } finally {
+        labServer.kill();
+      }
+    }
 
     const nonExternalCspLogs = browserLogEntries.filter(
       e => !((e.source === 'security' || e.source === 'worker') && /child-src|the only source expression/i.test(e.text || ''))

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-// Shims apenas no runner Node 24 para executar o bundle browser vendor/pdf.min.mjs sem alterá-lo.
 Uint8Array.prototype.toHex ??= function () { return Buffer.from(this).toString('hex'); };
 
 const pdfjs = await import('./vendor/pdf.min.mjs');
@@ -14,7 +13,7 @@ import {
   allowedFixture,
   brazilDate,
   extractPdfLines,
-  verifyEvents
+  verifyEvents,
 } from './documental-core.mjs';
 
 const manifest = JSON.parse(await readFile(new URL('./documental-manifest.json', import.meta.url), 'utf8'));
@@ -22,8 +21,8 @@ const manifest = JSON.parse(await readFile(new URL('./documental-manifest.json',
 function buildMinimalPdf({ pages = [{ text: '' }], rotate = 0 } = {}) {
   const objects = [];
   const addObj = body => { objects.push(body); return objects.length; };
-  const catalogId = addObj(''); // placeholder 1
-  const pagesId = addObj('');   // placeholder 2
+  const catalogId = addObj('');
+  const pagesId = addObj('');
   const fontId = addObj('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
   const pageIds = [];
   for (const p of pages) {
@@ -62,8 +61,10 @@ async function parseRealPdf(bytes) {
   }
 }
 
-test('PDF.js extracts all 6 fields and valid normalized coordinates from every synthetic PDF fixture', async () => {
-  for (const f of manifest.files.filter(x => x.mime === 'application/pdf')) {
+test('PDF.js extracts core fields and valid normalized coordinates from all 15 synthetic PDF fixtures', async () => {
+  const pdfFixtures = manifest.files.filter(x => x.mime === 'application/pdf');
+  assert.equal(pdfFixtures.length, 15);
+  for (const f of pdfFixtures) {
     const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
     const fixture = await allowedFixture(bytes, manifest, ['application/pdf']);
     const { lines } = await parseRealPdf(bytes);
@@ -90,7 +91,7 @@ test('PDF.js extracts all 6 fields and valid normalized coordinates from every s
   }
 });
 
-test('real PDF.js integration runs all 7 scenarios end-to-end without mocked lines', async () => {
+test('real PDF.js integration runs scenarios 1-7 and 9 cleanly with honest readiness semantics', async () => {
   const s = new DocumentarySession(manifest);
   const loadReal = async name => {
     const f = manifest.files.find(x => x.name === name);
@@ -99,7 +100,7 @@ test('real PDF.js integration runs all 7 scenarios end-to-end without mocked lin
     return s.ingest(f, lines, 5);
   };
 
-  // Scenario 1: completo
+  // Scenario 1: historical partial set ends in abstencao (lacks procedure/laterality)
   const solicitacao = (await loadReal('solicitacao.pdf')).document;
   const laudo = (await loadReal('laudo.pdf')).document;
   const avaliacao = (await loadReal('avaliacao.pdf')).document;
@@ -107,8 +108,9 @@ test('real PDF.js integration runs all 7 scenarios end-to-end without mocked lin
   await s.review(solicitacao.id, { identityChecked: true, issueDate: brazilDate(solicitacao.fields.issueDate.value) });
   await s.review(laudo.id, { identityChecked: true, issueDate: brazilDate(laudo.fields.issueDate.value) });
   await s.review(avaliacao.id, { identityChecked: true, issueDate: brazilDate(avaliacao.fields.issueDate.value) });
-  await s.review(termo.id, { identityChecked: true, issueDate: brazilDate(termo.fields.issueDate.value), signature: 'present' });
+  await s.review(termo.id, { identityChecked: true, issueDate: brazilDate(termo.fields.issueDate.value), humanVisualObservation: 'observed' });
   assert.equal(s.summary().pending, 0);
+  assert.equal(s.readinessState().code, 'abstencao');
 
   // Scenario 2: duplicado
   const dup = await loadReal('laudo.pdf');
@@ -138,7 +140,7 @@ test('real PDF.js integration runs all 7 scenarios end-to-end without mocked lin
   assert.equal(img.identity, 'unreadable');
   await assert.rejects(s.review(img.id, { identityChecked: true }));
 
-  // Scenario 7: laudo-antigo window task + assign + resolve + rule v2 invalidation + export + verifyEvents
+  // Scenario 7: laudo-antigo window task
   const antigo = (await loadReal('laudo-antigo.pdf')).document;
   await s.review(antigo.id, { identityChecked: true, issueDate: '2026-10-16' });
   const winTask = s.tasks().find(t => t.docId === antigo.id && t.id.includes(':window:'));
@@ -148,11 +150,27 @@ test('real PDF.js integration runs all 7 scenarios end-to-end without mocked lin
   await s.configure(25);
   assert.equal(s.tasks().find(t => t.docId === antigo.id && t.id.includes(':window:')).resolution, null);
   assert.equal(await verifyEvents(s.export().events), true);
+
+  // Isolated Scenario 9 (quatro eixos avaliados e compatíveis via PDF.js) -> conferida
+  const s9 = new DocumentarySession(manifest);
+  for (const fname of ['solicitacao-completa.pdf', 'laudo-completo.pdf', 'avaliacao-completa.pdf', 'termo-completo.pdf']) {
+    const f = manifest.files.find(x => x.name === fname);
+    const bytes = new Uint8Array(await readFile(new URL('./' + f.path, import.meta.url)));
+    const { lines } = await parseRealPdf(bytes);
+    const d = (await s9.ingest(f, lines, 5)).document;
+    await s9.review(d.id, {
+      identityChecked: true,
+      issueDate: brazilDate(d.fields.issueDate.value),
+      humanVisualObservation: d.kind === 'termo' ? 'observed' : 'unknown',
+    });
+  }
+  assert.equal(s9.readinessState().code, 'conferida');
+  assert.equal(s9.consistencyAxes().find(a => a.id === 'procedure').codeSystemIdentified, true);
 });
 
 test('PDF.js rejects PDFs over 5 pages via loadingTask.destroy without throwing doc.destroy TypeError', async () => {
   const sixPages = buildMinimalPdf({
-    pages: Array.from({ length: 6 }, (_, i) => ({ text: `Tipo: laudo pagina ${i + 1}` }))
+    pages: Array.from({ length: 6 }, (_, i) => ({ text: `Tipo: laudo pagina ${i + 1}` })),
   });
   const task = pdfjs.getDocument({ data: sixPages, isEvalSupported: false, useSystemFonts: true, disableFontFace: true });
   const doc = await task.promise;
@@ -174,9 +192,9 @@ test('PDF without selectable text yields empty lines and readable=false, multi-p
   const multiRotated = buildMinimalPdf({
     pages: [
       { text: 'Tipo: laudo' },
-      { text: 'Paciente: Pessoa Sintetica Alfa' }
+      { text: 'Paciente: Pessoa Sintetica Alfa' },
     ],
-    rotate: 90
+    rotate: 90,
   });
   const rotated = await parseRealPdf(multiRotated);
   assert.equal(rotated.lines.length, 2);
@@ -188,7 +206,7 @@ test('PDF without selectable text yields empty lines and readable=false, multi-p
   }
 });
 
-test('PDF.js extracts DE-04 subfamily, procedure, laterality and signature cue from OD/OE fixtures and flags conflict', async () => {
+test('PDF.js extracts DE-04 subfamily, procedure, laterality and synthetic marker cue from OD/OE fixtures and flags conflict', async () => {
   const s = new DocumentarySession(manifest);
   const ingestReal = async name => {
     const f = manifest.files.find(x => x.name === name);
@@ -202,7 +220,8 @@ test('PDF.js extracts DE-04 subfamily, procedure, laterality and signature cue f
   assert.equal(sol.fields.procedure.value, 'Facoemulsificacao com implante de LIO');
   assert.equal(sol.fields.laterality.normalized, 'direito');
   assert.equal(term.fields.laterality.normalized, 'esquerdo');
-  assert.equal(term.fields.signatureCue.source.page, 1);
+  assert.equal(term.fields.syntheticMarkerCue.source.page, 1);
+  assert.equal(term.fields.syntheticMarkerCue.authenticatesSignature, false);
   for (const key of ['subfamily', 'procedure', 'laterality']) {
     const [x, y, w, h] = sol.fields[key].source.box;
     assert(x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= 1 && y + h <= 1);
