@@ -114,10 +114,16 @@ jobs:
           JYXIA_TEST_APP_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
         run: |
           set -o pipefail
-          /tmp/jyxia-ci-venv/bin/python -u -m pytest tests/backend -v -rs 2>&1 | tee /tmp/pytest_ci.log || {
-            docker logs jyxia-keycloak-ci | tail -n 80 || true
+          if ! /tmp/jyxia-ci-venv/bin/python -u -m pytest tests/backend -v -rs 2>&1 | tee /tmp/pytest_ci.log; then
+            python3 -c "
+          from pathlib import Path
+          lines = [l for l in Path('/tmp/pytest_ci.log').read_text(errors='replace').splitlines() if l.startswith(('FAILED ', 'ERROR ', 'E   ', 'psycopg.'))]
+          for line in lines[:12]:
+              print(f'::error::{line}')
+          " || true
+            docker logs jyxia-keycloak-ci | tail -n 60 || true
             exit 1
-          }
+          fi
           if grep -E "SKIPPED|[0-9]+ skipped" /tmp/pytest_ci.log; then
             echo "ERROR: Unexpected skipped test in PostgreSQL/Keycloak CI verification."
             exit 1

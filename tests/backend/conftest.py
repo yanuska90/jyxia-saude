@@ -24,17 +24,25 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.db.session import create_db_engine, create_session_factory  # noqa: E402
 
-_PG_TRUNCATE_SQL = (
-    "SET LOCAL lock_timeout = '8s'; "
-    "ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_no_truncate; "
-    "ALTER TABLE security_auth_events DISABLE TRIGGER trg_security_auth_events_no_truncate; "
-    "TRUNCATE TABLE security_auth_events, auth_sessions, oidc_auth_states, "
-    "external_identities, audit_events, human_reviews, evidence_references, "
-    "extracted_fields, processing_runs, document_versions, documents, "
-    "document_cases, organization_memberships, users, organizations CASCADE; "
-    "ALTER TABLE security_auth_events ENABLE TRIGGER trg_security_auth_events_no_truncate; "
-    "ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_no_truncate;"
+_PG_TRUNCATE_STATEMENTS: tuple[str, ...] = (
+    "SET LOCAL lock_timeout = '8s'",
+    "ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_no_truncate",
+    "ALTER TABLE security_auth_events DISABLE TRIGGER trg_security_auth_events_no_truncate",
+    (
+        "TRUNCATE TABLE security_auth_events, auth_sessions, oidc_auth_states, "
+        "external_identities, audit_events, human_reviews, evidence_references, "
+        "extracted_fields, processing_runs, document_versions, documents, "
+        "document_cases, organization_memberships, users, organizations CASCADE"
+    ),
+    "ALTER TABLE security_auth_events ENABLE TRIGGER trg_security_auth_events_no_truncate",
+    "ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_no_truncate",
 )
+
+
+def _truncate_pg_tables(engine: Engine) -> None:
+    with engine.begin() as conn:
+        for stmt in _PG_TRUNCATE_STATEMENTS:
+            conn.execute(text(stmt))
 
 
 def _attach_pg_test_timeouts(engine: Engine) -> None:
@@ -46,6 +54,7 @@ def _attach_pg_test_timeouts(engine: Engine) -> None:
         with dbapi_connection.cursor() as cur:
             cur.execute("SET SESSION lock_timeout = '8s'")
             cur.execute("SET SESSION statement_timeout = '30s'")
+        dbapi_connection.commit()
 
 
 def build_alembic_config(database_url: str) -> Config:
@@ -87,15 +96,14 @@ def migrated_engine(database_url: str) -> Generator[Engine, None, None]:
     else:
         already_head = False
         try:
-            with engine.connect() as conn:
+            with engine.begin() as conn:
                 ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
                 already_head = ver == "20261120_0003"
         except SQLAlchemyError:
             already_head = False
 
         if already_head:
-            with engine.begin() as conn:
-                conn.execute(text(_PG_TRUNCATE_SQL))
+            _truncate_pg_tables(engine)
         else:
             command.downgrade(cfg, "base")
             command.upgrade(cfg, "head")
@@ -104,8 +112,7 @@ def migrated_engine(database_url: str) -> Generator[Engine, None, None]:
         yield engine
     finally:
         if not database_url.startswith("sqlite"):
-            with engine.begin() as conn:
-                conn.execute(text(_PG_TRUNCATE_SQL))
+            _truncate_pg_tables(engine)
         engine.dispose()
 
 
