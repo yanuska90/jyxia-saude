@@ -172,6 +172,19 @@ def main() -> int:
         )
         _assert_ok(put_exec, step="enable_pwd_exec")
 
+        pwd_amr_cfg = client.post(
+            f"{admin_realm}/authentication/executions/{first_exec['id']}/config",
+            json={
+                "alias": "ci-pwd-only-amr-config",
+                "config": {
+                    "default.reference.value": "pwd",
+                    "default.reference.maxAge": "36000",
+                },
+            },
+            headers=headers,
+        )
+        _assert_ok(pwd_amr_cfg, step="set_pwd_only_amr_config")
+
         all_flows = client.get(f"{admin_realm}/authentication/flows", headers=headers)
         _assert_ok(all_flows, step="list_flows")
         pwd_flow_id = next(f["id"] for f in all_flows.json() if f["alias"] == pwd_flow_alias)
