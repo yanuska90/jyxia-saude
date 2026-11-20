@@ -11,4 +11,4 @@ A titular solicitou segurança em camadas e revisão com perspectiva de pentest/
 - Fazer testes negativos relevantes a cada alteração de segurança: acesso indevido, adulteração, identidade divergente, concorrência e falhas. Rodar verificações existentes quando afetadas.
 - Revisar dependências e configurações, registrar riscos residuais e distinguir teste executado de controle apenas planejado. Não chamar esta revisão de pentest independente nem prometer inviolabilidade.
 - Restringir testes ofensivos aos componentes próprios e ambientes explicitamente autorizados. Nunca testar ataques nos portais de laboratórios ou em serviços de vídeo de terceiros.
-- Manter SEGURANCA.md, DEVSECOPS.md e documentação funcional coerentes com a versão realmente publicada.
+- Manter `docs/SEGURANCA.md`, `docs/ARQUITETURA_INSTITUCIONAL.md` e toda a documentação funcional coerentes com o código realmente executado e testado.

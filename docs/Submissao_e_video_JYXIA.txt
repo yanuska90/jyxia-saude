@@ -35,8 +35,8 @@ Ações sugeridas na tela real HTTPS (sem cortes enganosos):
 3) Mostrar Cenário 9 ("9 · Conjunto completo (4 eixos avaliados)"): revisar os 4 documentos com sistema de código e observação visual humana separada do marcador literal MARCA FICTICIA, chegando ao estado administrativo "Documentação conferida" e exportando JSON/CSV.
 Fala de apoio: “Nesta demo pública, usamos 18 exemplos sintéticos validados por SHA-256 no navegador. Quando falta dado obrigatório, o sistema se abstém em vez de dar falso positivo; quando há divergência crítica de identidade, procedimento ou lateralidade, bloqueia o avanço; e detecção de marcador textual nunca se passa por autenticação de assinatura.”
 
-[1:50–2:20 — João, com foco em validação e testes]
-“A base v3.2.0 reúne 37 testes automatizados de núcleo, PDF.js, laboratório local e benchmark sintético, 29 testes legados preservados, conferência E2E em navegador entre 320 e 1280 pixels com alvos acessíveis e pacote Pages restrito a 31 arquivos públicos.”
+[1:50–2:20 — João, com foco em validação, arquitetura e testes]
+“A demonstração pública v3.2.0 é publicada estritamente por whitelist de 31 arquivos em frontend/public/, separada do laboratório local e da fundação institucional do backend. Reunimos testes automatizados de núcleo e PDF.js, E2E em navegador entre 320 e 1280 pixels, testes legados isolados e a suíte institucional de backend cobrindo migrações Alembic, modelos relacionais e isolamento multi-tenant.”
 
 [2:20–2:45 — Ambos em câmera]
 “Nosso próximo passo imediato é ir a campo com roteiro neutro entrevistar equipes de pré-operatório e autorização em hospitais e clínicas para medir onde há mais retrabalho e decidir o caminho com base em evidências antes de construir infraestrutura pesada.”

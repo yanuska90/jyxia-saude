@@ -1,8 +1,8 @@
 # Dados fictícios da demo documental (`3.2.0`)
 
-Baixe [`fixtures-jyxia.zip`](fixtures-jyxia.zip) ou use “Adicionar cenário” na demonstração pública (Modalidade A). Todos os nomes, identificadores (`SYN-P01`), instituições, códigos, procedimentos e marcadores textuais (`MARCA FICTICIA`) são **100% sintéticos e criados exclusivamente para demonstração**. Não correspondem a pessoas reais e não consultam CPF real.
+Baixe [`frontend/public/assets/fixtures-jyxia.zip`](../frontend/public/assets/fixtures-jyxia.zip) ou use “Adicionar cenário” na demonstração pública (Modalidade A). Todos os nomes, identificadores (`SYN-P01`), instituições, códigos, procedimentos e marcadores textuais (`MARCA FICTICIA`) são **100% sintéticos e criados exclusivamente para demonstração**. Não correspondem a pessoas reais e não consultam CPF real.
 
-| Cenário | Arquivos envolvidos | Comportamento esperado na v3.2.0 |
+| Cenário | Arquivos envolvidos (em `frontend/public/fixtures/`) | Comportamento esperado na v3.2.0 |
 | --- | --- | --- |
 | 1 · Conjunto parcial histórico | `solicitacao.pdf`, `laudo.pdf`, `avaliacao.pdf`, `termo.pdf` | Quatro classes sem campos de procedimento e lateralidade; após revisão humana conclui em **`abstencao`** (não gera falso estado conferido integral) |
 | 2 · Arquivo duplicado | `laudo.pdf`, `laudo.pdf` | O segundo arquivo idêntico por SHA-256 é recusado sem criar segundo registro |
@@ -14,7 +14,8 @@ Baixe [`fixtures-jyxia.zip`](fixtures-jyxia.zip) ou use “Adicionar cenário”
 | 8 · Lateralidade divergente (`OD × OE`) | `solicitacao-od.pdf`, `termo-oe.pdf` | Solicitação indica `Olho Direito (OD)` e termo indica `Olho Esquerdo (OE)`; conflito bloqueia conclusão (`bloqueado`) até retirada/substituição |
 | 9 · Conjunto completo (4 eixos avaliados) | `solicitacao-completa.pdf`, `laudo-completo.pdf`, `avaliacao-completa.pdf`, `termo-completo.pdf` | Quatro classes com procedimento, sistema (`SIGTAP-FICTICIO`), código (`04.05.05.011-9`), lateralidade (`OD`) e marcador literal no termo; após revisão e observação visual humana conclui em **`conferida`** nas regras do exemplo |
 
-## Separação entre catálogo público e benchmark sintético
+## Separação entre catálogo público, benchmark e armazenamento sintético do backend
 
-- **Catálogo público (`documental-manifest.json`):** `18` arquivos estritamente bloqueados por SHA-256 e tamanho (`<= 512 KB`) na Modalidade A.
-- **Benchmark sintético separado (`benchmark/benchmark-manifest.json`):** `8` PDFs sintéticos em `development` (`1`), `regression` (`3`) e `reserved_evaluation` (`4`) usados localmente com a Modalidade B (`lab-extractor.mjs`) para testar layouts tabulares, múltiplas fontes, rotações (`90°/180°/270°`), múltiplas páginas (até `5`), aliases explícitos, duplicidades, dados ausentes/conflitantes, espaços e acentos. **Não é publicado no GitHub Pages e não constitui holdout independente nem evidência com documentos reais.**
+- **Catálogo público (`frontend/public/documental-manifest.json`):** `18` arquivos estritamente bloqueados por SHA-256 e tamanho (`<= 512 KB`) na Modalidade A.
+- **Benchmark sintético separado (`tests/benchmark/benchmark-manifest.json`):** `8` PDFs sintéticos em `development` (`1`), `regression` (`3`) e `reserved_evaluation` (`4`) usados localmente com a Modalidade B (`frontend/lab/lab-extractor.mjs`). **Não é publicado no GitHub Pages e não constitui holdout independente nem evidência com documentos reais.**
+- **Storage local controlado (`backend/` `0.1.0`):** aceita exclusivamente binários sintéticos (`%PDF-` ou PNG) gravados sob `JYXIA_STORAGE_ROOT=../JYXIA_LOCAL_WORK/synthetic_storage`, sempre fora do repositório Git.

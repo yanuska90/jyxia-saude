@@ -1,26 +1,34 @@
-# Segurança e privacidade da JYXIA 3.2.0
+# Segurança e privacidade da JYXIA (v3.2.0 + Fundação Backend 0.1.0)
 
-## 1. Fronteira entre Modalidade A (Pública) e Modalidade B (Laboratório Local)
+## 1. Fronteira entre Modalidade A (Pública), Modalidade B (Local) e Modalidade C (Backend)
 
-- **Modalidade A — Demo pública (`index.html`, `demo.html`):** estritamente sintética, sem login, sem servidor documental e sem envio de arquivos pela rede. O catálogo de hashes (`documental-manifest.json`, `18` arquivos) recusa qualquer arquivo fora da whitelist SHA-256 antes da leitura textual. Tudo roda apenas na memória da aba e é perdido ao recarregar.
-- **Modalidade B — Laboratório experimental local (`lab-local.html`, `lab-local.mjs`, `serve_lab.py`):** estritamente isolado em `localhost` (`serve_lab.py` rejeita bind não-loopback e `assertLocalhostEnvironment()` bloqueia origens externas). **Não compõe o pacote publicado no GitHub Pages e retorna HTTP `404` em `serve_documental.py`**. Aceita apenas PDFs sintéticos (`%PDF-`, até `512 KB` e `10` páginas) sem upload remoto, sem gravação em disco ou armazenamento local (`localStorage`/`IndexedDB`) e sem registrar conteúdo documental em logs. **Proibido utilizar documentos reais de pacientes mesmo em localhost.**
+- **Modalidade A — Demo pública ([`frontend/public/`](../frontend/public/)):** estritamente sintética, sem login e sem envio de arquivos pela rede. O catálogo [`documental-manifest.json`](../frontend/public/documental-manifest.json) (`18` arquivos) recusa qualquer arquivo fora da whitelist SHA-256 antes da leitura textual. Tudo roda apenas na memória da aba.
+- **Modalidade B — Laboratório experimental local ([`frontend/lab/`](../frontend/lab/) + [`tools/serve_lab.py`](../tools/serve_lab.py)):** estritamente isolado em `localhost` (`serve_lab.py` rejeita bind não-loopback e `assertLocalhostEnvironment()` bloqueia origens externas). **Não compõe o pacote do GitHub Pages e retorna HTTP `404` em [`tools/serve_documental.py`](../tools/serve_documental.py)**.
+- **Modalidade C — Fundação institucional inicial ([`backend/`](../backend/) `0.1.0`):** prepara persistência multi-tenant em PostgreSQL e storage isolado em disco sintético fora do repositório (`JYXIA_STORAGE_ROOT`), expondo **exclusivamente** `/api/v1/health/live` e `/api/v1/health/ready` enquanto OIDC + MFA + RBAC reais não forem ativados.
 
-**Controles implementados na entrega atual:**
-- Mozilla PDF.js `6.5.438` em `vendor/` com `isEvalSupported: false`; CSP estrita (`default-src 'self'`, `object-src 'none'`, `form-action 'none'`); cabeçalhos HTTP `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` e `frame-ancestors 'none'` nos servidores locais Python;
-- Inserção segura via `textContent` (sem HTML dinâmico de texto extraído);
-- Neutralização `csvSafeCell()` em exportações CSV contra gatilhos comuns de fórmulas (`=`, `+`, `-`, `@` com espaços/NBSP ou tabulação, sanitização de quebras `\r\n` e remoção de byte nulo `U+0000`) — **observação honesta: ajuda contra interpretações comuns de planilhas, mas não promete proteção universal contra todo software cliente**;
-- Cadeia local SHA-256 (`events[]`) verifica integridade da sequência em memória com ator fictício não autenticado (`actorAuthenticated: false`); **não constitui trilha imutável, assinatura digital ou prova criptográfica de autoria**;
-- Pacote GitHub Pages (`.github/workflows/pages.yml`) estritamente restrito a `31` arquivos da Modalidade A, verificado por teste automatizado com zero vazamentos do laboratório ou benchmark.
+**Controles implementados na demo pública e ferramentas locais:**
+- Mozilla PDF.js `6.5.438` em `frontend/public/vendor/` com `isEvalSupported: false`; CSP estrita (`default-src 'self'`, `object-src 'none'`, `form-action 'none'`); cabeçalhos `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` e `frame-ancestors 'none'` nos servidores Python;
+- Inserção segura via `textContent` e neutralização `csvSafeCell()` em downloads CSV;
+- Cadeia local SHA-256 em memória (`actorAuthenticated: false`, apenas demonstrativa);
+- Empacotamento GitHub Pages restrito a `31` arquivos de `frontend/public/`, validado em [`tools/verify_pages_package.py`](../tools/verify_pages_package.py);
+- Verificação básica de higiene em [`tools/check_publication.py`](../tools/check_publication.py) recusando `.env*` (exceto `.env.example`), bancos locais `.db`/`.sqlite*`, pastas `JYXIA_LOCAL_WORK` ou chaves/DSNs externos.
 
-Nenhuma dessas proteções substitui auditoria independente de segurança ou pentest antes da Modalidade C em produção.
+**Controles implementados no backend institucional `0.1.0`:**
+- **Fail-closed para autenticação:** `StubOidcAuthenticator` recusa qualquer token enquanto OIDC real não existir; nenhuma rota clínica/administrativa de dados fica ativa em HTTP sem autenticação real;
+- **Isolamento multi-tenant em duas camadas:** `TenantContext` obrigatório nos repositórios e serviços, além de chaves estrangeiras compostas `(organization_id, <fk_id>)` no esquema PostgreSQL/SQLite impedindo vinculação cruzada entre organizações;
+- **Auditoria append-only:** `AuditEvent` com encadeamento SHA-256 por organização e listeners SQLAlchemy impedindo atualização ou exclusão;
+- **Storage sintético confinado:** `LocalControlledSyntheticStorage` exige magic bytes válidos (`%PDF-` ou PNG), respeita teto em bytes, rejeita path traversal (`..`), restringe chaves à subpasta da organização e proíbe gravar dentro da árvore do repositório Git;
+- **Logs sanitizados e readiness sem vazamento:** `SanitizingFilter` mascara tokens, senhas em DSN, padrões de CPF e chaves sensíveis; `/api/v1/health/ready` retorna HTTP `503` sem expor string de conexão ou traceback.
+- **Bind restrito no Compose institucional:** [`compose.institutional.yaml`](../compose.institutional.yaml) publica Postgres e backend apenas em `127.0.0.1` e exclui `MONGO_PASSWORD`/`JYXIA_API_TOKEN` herdados da versão antiga.
 
-## 2. Requisitos antes de tratar dados reais em futuras fases (Modalidade C — não implementada)
+Nenhuma dessas proteções substitui auditoria independente de segurança ou pentest antes de uso com dados reais.
 
-- **Governança LGPD e contratos (Lei nº 13.709/2018):** definir formalmente Controlador (instituição de saúde), Operadora (art. 39), bases legais aplicáveis (arts. 7º e 11), minimização, prazos curtos de retenção operacional (guarda legal de 20 anos permanece sob responsabilidade do PEP/instituição contratante sob Lei nº 13.787/2018), direitos dos titulares, Acordo de Processamento de Dados (DPA), Relatório de Impacto (RIPD) e cláusulas para eventuais Suboperadores de nuvem/OCR (transferência internacional arts. 33–36 e distinção entre **ausência de treinamento de modelos** e **armazenamento temporário operacional**). Controles técnicos isolados não comprovam conformidade integral com a LGPD.
-- **Comunicação de incidentes (Res. CD/ANPD nº 15/2024):** plano contratual Operadora -> Controlador para suportar análise de **risco ou dano relevante** e eventual comunicação em até 3 dias úteis do conhecimento pelo Controlador.
-- **Regulação sanitária, IA e assinaturas:** obter parecer formal perante a **RDC ANVISA nº 657/2022** (art. 1º, § 2º, III), alinhar governança à **Resolução CFM nº 2.454/2026** e respeitar **Lei nº 14.063/2020** (arts. 13 e 14) sobre assinaturas eletrônicas qualificada ICP-Brasil e avançada (lembrando que esta versão faz apenas detecção textual literal sintética, zero validação de assinatura).
-- **Segurança aplicacional e upload (OWASP File Upload Cheat Sheet):** autenticação individual com OIDC/MFA, autorização RBAC/ABAC no servidor, armazenamento privado cifrado fora da webroot, sanitização/antivírus/CDR e proteção anti-ZIP bomb quando existir backend institucional.
+## 2. Requisitos antes de tratar dados reais em produção
+
+- **Governança LGPD e contratos (Lei nº 13.709/2018):** formalização de Controlador/Operadora, DPA, RIPD, bases legais (arts. 7º e 11), retenção operacional distinta da guarda legal de 20 anos no PEP (Lei nº 13.787/2018) e plano de comunicação de incidentes (Res. CD/ANPD nº 15/2024);
+- **Autenticação e storage institucionais:** ativação real de OIDC + MFA + RBAC/ABAC no servidor, KMS/object storage cifrado privado e antivírus/CDR em uploads antes de habilitar endpoints HTTP de upload/revisão;
+- **Regulação sanitária e assinaturas:** parecer perante **RDC ANVISA nº 657/2022**, **Resolução CFM nº 2.454/2026** e **Lei nº 14.063/2020** (ICP-Brasil / assinatura avançada).
 
 ## 3. Versão histórica preservada
 
-O cofre criptografado de navegador da v2.3 permanece isolado em `demo-v2.html` apenas para regressão histórica (`29` testes legados preservados), sem conexão com a versão `3.2.0`.
+O cofre criptografado de navegador da v2.3 permanece isolado em [`legacy/v2/demo-v2.html`](../legacy/v2/demo-v2.html) apenas para regressão histórica (`29` testes legados em `tests/legacy/`), sem conexão com a versão `3.2.0` nem com `backend/`.
