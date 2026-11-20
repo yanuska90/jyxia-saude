@@ -26,7 +26,7 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Montar pacote publico com lista explicita de arquivos permitidos
+      - name: Montar pacote publico com lista explicita de frontend/public
         run: |
           python3 - <<'PY'
           import json
@@ -34,6 +34,7 @@ jobs:
           from pathlib import Path
 
           root = Path(".").resolve()
+          public_src = (root / "frontend" / "public").resolve()
           site = root / "_site"
           if site.exists():
               shutil.rmtree(site)
@@ -47,9 +48,9 @@ jobs:
               "documental-core.mjs",
               "documental-ui.mjs",
               "documental-manifest.json",
-              "favicon.svg",
-              "fixtures-jyxia.zip",
-              "Projeto_JYXIA_Inteligencia_Documental_v3.docx",
+              "assets/favicon.svg",
+              "assets/fixtures-jyxia.zip",
+              "assets/Projeto_JYXIA_Inteligencia_Documental_v3.docx",
               "vendor/pdf.min.mjs",
               "vendor/pdf.worker.min.mjs",
               "vendor/PDFJS-LICENSE.txt",
@@ -73,15 +74,15 @@ jobs:
               "fixtures/termo.pdf",
           ]
 
-          manifest = json.loads((root / "documental-manifest.json").read_text(encoding="utf-8"))
+          manifest = json.loads((public_src / "documental-manifest.json").read_text(encoding="utf-8"))
           manifest_paths = sorted(f["path"] for f in manifest["files"])
           listed_fixtures = sorted(p for p in PUBLIC_FILES if p.startswith("fixtures/"))
           assert manifest_paths == listed_fixtures, f"Divergencia com manifesto: {manifest_paths} vs {listed_fixtures}"
 
           staged = []
           for rel in PUBLIC_FILES:
-              src = (root / rel).resolve()
-              assert src.is_file() and root in src.parents, f"Arquivo ausente ou invalido: {rel}"
+              src = (public_src / rel).resolve()
+              assert src.is_file() and public_src in src.parents, f"Arquivo ausente ou invalido em frontend/public: {rel}"
               dst = site / rel
               dst.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(src, dst)
