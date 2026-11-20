@@ -71,6 +71,7 @@ class ProcessingStatus(StrEnum):
 
 class ExtractedFieldStatus(StrEnum):
     EXTRACTED = "extracted"
+    MISSING = "missing"
     ABSTAINED = "abstained"
     AMBIGUOUS = "ambiguous"
     UNREADABLE = "unreadable"

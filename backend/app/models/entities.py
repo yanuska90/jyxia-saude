@@ -1,13 +1,14 @@
 """Relational models for JYXIA institutional multi-tenant foundation.
 
 Structural multi-tenant isolation is enforced via explicit organization_id columns
-and composite (organization_id, <fk_id>) foreign keys so cross-tenant linkage is
-blocked at both repository and database levels.
+and multi-column composite foreign keys so cross-tenant and cross-document/version
+linkage is blocked at both repository and database levels.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,8 +41,10 @@ from app.core.constants import (
 )
 from app.db.base import JSON_VARIANT, Base, new_uuid, utc_now
 
+AUDIT_SCHEMA_VERSION = "jyxia.audit.v1"
 
-def _enum_values_sql(enum_cls: type) -> str:
+
+def _enum_values_sql(enum_cls: type[StrEnum]) -> str:
     return ", ".join(f"'{member.value}'" for member in enum_cls)
 
 
@@ -68,10 +72,13 @@ class Organization(Base):
         DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
     )
 
+    # Preserve ON DELETE RESTRICT semantics in ORM instead of cascading deletion.
     memberships: Mapped[list[OrganizationMembership]] = relationship(
-        back_populates="organization", cascade="all, delete-orphan"
+        back_populates="organization", passive_deletes="all"
     )
-    cases: Mapped[list[DocumentCase]] = relationship(back_populates="organization")
+    cases: Mapped[list[DocumentCase]] = relationship(
+        back_populates="organization", passive_deletes="all"
+    )
 
 
 class User(Base):
@@ -79,6 +86,10 @@ class User(Base):
     __table_args__ = (
         CheckConstraint("email = lower(email)", name="email_lowercase"),
         CheckConstraint("length(trim(display_name)) >= 1", name="display_name_nonempty"),
+        CheckConstraint(
+            "external_subject IS NULL OR length(trim(external_subject)) >= 1",
+            name="external_subject_nonempty",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -95,7 +106,7 @@ class User(Base):
     )
 
     memberships: Mapped[list[OrganizationMembership]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
+        back_populates="user", passive_deletes="all"
     )
 
 
@@ -142,6 +153,12 @@ class DocumentCase(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "case_code", name="uq_document_cases_org_code"),
         UniqueConstraint("organization_id", "id", name="uq_document_cases_org_id"),
+        ForeignKeyConstraint(
+            ["organization_id", "created_by_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_document_cases_org_creator",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             f"readiness_state IN ({_enum_values_sql(CaseReadinessState)})",
             name="readiness_state_valid",
@@ -149,7 +166,19 @@ class DocumentCase(Base):
         CheckConstraint("administrative_only = TRUE", name="administrative_only_true"),
         CheckConstraint("clinical_approval = FALSE", name="clinical_approval_false"),
         CheckConstraint("length(trim(case_code)) >= 2", name="case_code_min_len"),
+        CheckConstraint(
+            "external_reference IS NULL OR length(trim(external_reference)) >= 2",
+            name="external_ref_min_len",
+        ),
         Index("ix_document_cases_org_state", "organization_id", "readiness_state"),
+        Index(
+            "uq_document_cases_org_ext_ref",
+            "organization_id",
+            "external_reference",
+            unique=True,
+            sqlite_where=text("external_reference IS NOT NULL"),
+            postgresql_where=text("external_reference IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -157,6 +186,7 @@ class DocumentCase(Base):
         String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
     )
     case_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    external_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
     procedure_reference: Mapped[str | None] = mapped_column(String(200), nullable=True)
     declared_laterality: Mapped[str | None] = mapped_column(String(32), nullable=True)
     readiness_state: Mapped[str] = mapped_column(
@@ -165,7 +195,7 @@ class DocumentCase(Base):
     administrative_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     clinical_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
@@ -193,6 +223,10 @@ class Document(Base):
             name="document_kind_valid",
         ),
         CheckConstraint("length(trim(source_label)) >= 1", name="source_label_nonempty"),
+        CheckConstraint(
+            "discarded_at IS NULL OR (discard_reason IS NOT NULL AND length(trim(discard_reason)) >= 3)",
+            name="discard_requires_reason",
+        ),
         Index("ix_documents_org_case", "organization_id", "case_id"),
     )
 
@@ -240,6 +274,9 @@ class DocumentVersion(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "id", name="uq_document_versions_org_id"),
         UniqueConstraint(
+            "organization_id", "document_id", "id", name="uq_doc_versions_org_doc_id"
+        ),
+        UniqueConstraint(
             "organization_id", "document_id", "version_number", name="uq_doc_versions_num"
         ),
         ForeignKeyConstraint(
@@ -249,19 +286,35 @@ class DocumentVersion(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["organization_id", "superseded_by_version_id"],
-            ["document_versions.organization_id", "document_versions.id"],
-            name="fk_doc_versions_org_supersede",
+            ["organization_id", "document_id", "superseded_by_version_id"],
+            [
+                "document_versions.organization_id",
+                "document_versions.document_id",
+                "document_versions.id",
+            ],
+            name="fk_doc_versions_org_doc_supersede",
             ondelete="RESTRICT",
         ),
         CheckConstraint("version_number >= 1", name="version_number_positive"),
-        CheckConstraint("length(sha256_hex) = 64", name="sha256_hex_len_64"),
+        CheckConstraint(
+            "length(trim(sha256_hex)) = 64 AND sha256_hex = lower(sha256_hex)",
+            name="sha256_hex_len_64",
+        ),
         CheckConstraint("mime_type IN ('application/pdf', 'image/png')", name="mime_type_valid"),
         CheckConstraint("byte_size > 0", name="byte_size_positive"),
         CheckConstraint("page_count IS NULL OR page_count >= 1", name="page_count_positive"),
         CheckConstraint(
             f"storage_driver IN ({_enum_values_sql(StorageDriver)})",
             name="storage_driver_valid",
+        ),
+        CheckConstraint("length(trim(storage_key)) >= 8", name="storage_key_min_len"),
+        CheckConstraint(
+            "original_filename IS NULL OR "
+            "(length(trim(original_filename)) >= 1 "
+            "AND replace(original_filename, '/', '') = original_filename "
+            "AND replace(original_filename, '\\', '') = original_filename "
+            "AND replace(original_filename, '..', '') = original_filename)",
+            name="original_filename_safe",
         ),
         CheckConstraint(
             "superseded_by_version_id IS NULL OR superseded_by_version_id <> id",
@@ -280,6 +333,7 @@ class DocumentVersion(Base):
     mime_type: Mapped[str] = mapped_column(String(64), nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     storage_driver: Mapped[str] = mapped_column(
         String(64), nullable=False, default=StorageDriver.LOCAL_CONTROLLED_SYNTHETIC.value
     )
@@ -304,6 +358,12 @@ class ProcessingRun(Base):
     __tablename__ = "processing_runs"
     __table_args__ = (
         UniqueConstraint("organization_id", "id", name="uq_processing_runs_org_id"),
+        UniqueConstraint(
+            "organization_id", "document_version_id", "id", name="uq_processing_runs_org_ver_id"
+        ),
+        UniqueConstraint(
+            "organization_id", "idempotency_key", name="uq_processing_runs_org_idemp"
+        ),
         ForeignKeyConstraint(
             ["organization_id", "document_version_id"],
             ["document_versions.organization_id", "document_versions.id"],
@@ -313,6 +373,10 @@ class ProcessingRun(Base):
         CheckConstraint(
             f"status IN ({_enum_values_sql(ProcessingStatus)})",
             name="status_valid",
+        ),
+        CheckConstraint(
+            "finished_at IS NULL OR finished_at >= started_at",
+            name="finished_after_started",
         ),
         Index("ix_processing_runs_org_docver", "organization_id", "document_version_id"),
     )
@@ -324,6 +388,7 @@ class ProcessingRun(Base):
     document_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
     policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     extractor_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=ProcessingStatus.PENDING.value
     )
@@ -343,10 +408,20 @@ class ExtractedField(Base):
     __tablename__ = "extracted_fields"
     __table_args__ = (
         UniqueConstraint("organization_id", "id", name="uq_extracted_fields_org_id"),
+        UniqueConstraint(
+            "organization_id",
+            "document_version_id",
+            "id",
+            name="uq_extracted_fields_org_ver_id",
+        ),
         ForeignKeyConstraint(
-            ["organization_id", "processing_run_id"],
-            ["processing_runs.organization_id", "processing_runs.id"],
-            name="fk_extracted_fields_org_run",
+            ["organization_id", "document_version_id", "processing_run_id"],
+            [
+                "processing_runs.organization_id",
+                "processing_runs.document_version_id",
+                "processing_runs.id",
+            ],
+            name="fk_extracted_fields_org_ver_run",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -360,6 +435,10 @@ class ExtractedField(Base):
             name="status_valid",
         ),
         CheckConstraint("length(trim(field_key)) >= 1", name="field_key_nonempty"),
+        CheckConstraint(
+            "(status <> 'abstained') OR (abstained = TRUE)",
+            name="abstained_status_coherent",
+        ),
         Index("ix_extracted_fields_org_run", "organization_id", "processing_run_id"),
     )
 
@@ -381,13 +460,22 @@ class ExtractedField(Base):
 
 
 class EvidenceReference(Base):
+    """Normalized [x, y, w, h] coordinates in top-left page-relative space [0.0, 1.0]."""
+
     __tablename__ = "evidence_references"
     __table_args__ = (
         UniqueConstraint("organization_id", "id", name="uq_evidence_refs_org_id"),
+        UniqueConstraint(
+            "organization_id", "document_version_id", "id", name="uq_evidence_refs_org_ver_id"
+        ),
         ForeignKeyConstraint(
-            ["organization_id", "extracted_field_id"],
-            ["extracted_fields.organization_id", "extracted_fields.id"],
-            name="fk_evidence_refs_org_field",
+            ["organization_id", "document_version_id", "extracted_field_id"],
+            [
+                "extracted_fields.organization_id",
+                "extracted_fields.document_version_id",
+                "extracted_fields.id",
+            ],
+            name="fk_evidence_refs_org_ver_field",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -401,6 +489,8 @@ class EvidenceReference(Base):
         CheckConstraint("bbox_y >= 0.0 AND bbox_y <= 1.0", name="bbox_y_bounds"),
         CheckConstraint("bbox_w > 0.0 AND bbox_w <= 1.0", name="bbox_w_bounds"),
         CheckConstraint("bbox_h > 0.0 AND bbox_h <= 1.0", name="bbox_h_bounds"),
+        CheckConstraint("bbox_x + bbox_w <= 1.00001", name="bbox_x_w_within_page"),
+        CheckConstraint("bbox_y + bbox_h <= 1.00001", name="bbox_y_h_within_page"),
         Index("ix_evidence_refs_org_field", "organization_id", "extracted_field_id"),
     )
 
@@ -432,9 +522,19 @@ class HumanReview(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["organization_id", "evidence_reference_id"],
-            ["evidence_references.organization_id", "evidence_references.id"],
-            name="fk_human_reviews_org_evidence",
+            ["organization_id", "document_version_id", "evidence_reference_id"],
+            [
+                "evidence_references.organization_id",
+                "evidence_references.document_version_id",
+                "evidence_references.id",
+            ],
+            name="fk_human_reviews_org_ver_evidence",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "reviewer_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_human_reviews_org_reviewer",
             ondelete="RESTRICT",
         ),
         CheckConstraint(
@@ -466,19 +566,46 @@ class HumanReview(Base):
 
 
 class AuditEvent(Base):
+    """Organization-scoped append-only hash-chained ledger.
+
+    Database triggers (migration 0002) reject direct SQL UPDATE/DELETE operations by normal
+    database clients; note that privileged DB administrators remain outside application threat guarantees.
+    """
+
     __tablename__ = "audit_events"
     __table_args__ = (
         UniqueConstraint("organization_id", "sequence_number", name="uq_audit_events_org_seq"),
         UniqueConstraint("organization_id", "event_hash", name="uq_audit_events_org_hash"),
+        ForeignKeyConstraint(
+            ["organization_id", "actor_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_audit_events_org_actor",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint("sequence_number >= 1", name="sequence_number_positive"),
-        CheckConstraint("length(prev_event_hash) = 64", name="prev_hash_len_64"),
-        CheckConstraint("length(event_hash) = 64", name="event_hash_len_64"),
+        CheckConstraint(
+            "length(trim(prev_event_hash)) = 64 AND prev_event_hash = lower(prev_event_hash)",
+            name="prev_hash_len_64",
+        ),
+        CheckConstraint(
+            "length(trim(event_hash)) = 64 AND event_hash = lower(event_hash)",
+            name="event_hash_len_64",
+        ),
+        CheckConstraint("length(trim(schema_version)) >= 3", name="schema_version_nonempty"),
+        CheckConstraint("length(trim(event_type)) >= 2", name="event_type_min_len"),
+        CheckConstraint("length(trim(target_entity_type)) >= 2", name="target_entity_min_len"),
         Index("ix_audit_events_org_created", "organization_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     organization_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    schema_version: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=AUDIT_SCHEMA_VERSION,
+        server_default=text(f"'{AUDIT_SCHEMA_VERSION}'"),
     )
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
     actor_user_id: Mapped[str | None] = mapped_column(

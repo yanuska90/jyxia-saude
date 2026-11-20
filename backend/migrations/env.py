@@ -60,10 +60,11 @@ def run_migrations_online() -> None:
     )
 
     @event.listens_for(connectable, "connect")
-    def _enable_sqlite_fks(dbapi_connection, _connection_record) -> None:
+    def _configure_sqlite_migration(dbapi_connection, _connection_record) -> None:
         if connectable.dialect.name == "sqlite":
+            # SQLite batch_alter_table requires foreign_keys=OFF while recreating self/parent tables.
             cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA foreign_keys=OFF")
             cursor.close()
 
     with connectable.connect() as connection:
@@ -74,6 +75,11 @@ def run_migrations_online() -> None:
         )
         with context.begin_transaction():
             context.run_migrations()
+        if connectable.dialect.name == "sqlite":
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            fk_errors = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+            if fk_errors:
+                raise RuntimeError(f"SQLite foreign key integrity failure after migration: {fk_errors}")
 
     connectable.dispose()
 

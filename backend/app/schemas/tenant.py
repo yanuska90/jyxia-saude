@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.constants import (
     CaseReadinessState,
@@ -15,6 +16,25 @@ from app.core.constants import (
     ProcessingStatus,
     StorageDriver,
 )
+
+
+def validate_safe_original_filename(filename: str | None) -> str | None:
+    """Validate optional descriptive basename without path traversal or control chars."""
+    if filename is None:
+        return None
+    cleaned = filename.strip()
+    if not cleaned:
+        return None
+    if (
+        len(cleaned) > 255
+        or "/" in cleaned
+        or "\\" in cleaned
+        or ".." in cleaned
+        or "\x00" in cleaned
+        or any(ord(ch) < 32 for ch in cleaned)
+    ):
+        raise ValueError("Invalid original_filename metadata.")
+    return cleaned
 
 
 class TenantContext(BaseModel):
@@ -62,6 +82,7 @@ class DocumentCaseCreateInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     case_code: str = Field(min_length=2, max_length=100)
+    external_reference: str | None = Field(default=None, min_length=2, max_length=128)
     procedure_reference: str | None = Field(default=None, max_length=200)
     declared_laterality: str | None = Field(default=None, max_length=32)
     readiness_state: CaseReadinessState = CaseReadinessState.PENDENTE
@@ -87,8 +108,14 @@ class DocumentVersionCreateInput(BaseModel):
     mime_type: Literal["application/pdf", "image/png"]
     byte_size: int = Field(gt=0)
     page_count: int | None = Field(default=None, ge=1)
+    original_filename: str | None = None
     storage_driver: StorageDriver = StorageDriver.LOCAL_CONTROLLED_SYNTHETIC
     storage_key: str = Field(min_length=8, max_length=255)
+
+    @field_validator("original_filename")
+    @classmethod
+    def _validate_filename(cls, value: str | None) -> str | None:
+        return validate_safe_original_filename(value)
 
 
 class ProcessingRunCreateInput(BaseModel):
@@ -97,10 +124,20 @@ class ProcessingRunCreateInput(BaseModel):
     document_version_id: str = Field(min_length=1, max_length=36)
     policy_version: str = Field(min_length=1, max_length=64)
     extractor_version: str = Field(min_length=1, max_length=64)
+    idempotency_key: str | None = Field(default=None, min_length=4, max_length=128)
     status: ProcessingStatus = ProcessingStatus.COMPLETED
     readable: bool = True
     readiness_state: CaseReadinessState | None = None
     axes_summary: dict[str, Any] | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _validate_timestamps(self) -> ProcessingRunCreateInput:
+        if self.started_at is not None and self.finished_at is not None:
+            if self.finished_at < self.started_at:
+                raise ValueError("finished_at cannot precede started_at.")
+        return self
 
 
 class ExtractedFieldCreateInput(BaseModel):
@@ -115,6 +152,12 @@ class ExtractedFieldCreateInput(BaseModel):
     abstained: bool = False
     metadata_json: dict[str, Any] | None = None
 
+    @model_validator(mode="after")
+    def _validate_abstention_coherence(self) -> ExtractedFieldCreateInput:
+        if self.status == ExtractedFieldStatus.ABSTAINED and not self.abstained:
+            raise ValueError("abstained must be True when status is 'abstained'.")
+        return self
+
 
 class EvidenceReferenceCreateInput(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -128,6 +171,12 @@ class EvidenceReferenceCreateInput(BaseModel):
     bbox_h: float = Field(gt=0.0, le=1.0)
     quote_excerpt: str | None = Field(default=None, max_length=500)
     extraction_method: str = Field(default="pdf_text_geometry", min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_page_bounds(self) -> EvidenceReferenceCreateInput:
+        if self.bbox_x + self.bbox_w > 1.00001 or self.bbox_y + self.bbox_h > 1.00001:
+            raise ValueError("Normalized bounding box exceeds page limits [0.0, 1.0].")
+        return self
 
 
 class HumanReviewCreateInput(BaseModel):
