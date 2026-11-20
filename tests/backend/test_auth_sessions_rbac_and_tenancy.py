@@ -27,7 +27,12 @@ from app.repositories.institutional import (
     OrganizationRepository,
 )
 from app.schemas.tenant import TenantContext
-from tests.backend.test_oidc_and_mfa import MockOidcProviderState, _base_claims, _oidc_settings, _sign_id_token
+from tests.backend.oidc_test_support import (
+    MockOidcProviderState,
+    _base_claims,
+    _oidc_settings,
+    _sign_id_token,
+)
 
 
 def _login_user_via_bff(
