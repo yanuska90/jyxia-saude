@@ -27,6 +27,7 @@ services:
     environment:
       JYXIA_APP_NAME: ${JYXIA_APP_NAME:-JYXIA Institutional Foundation}
       JYXIA_ENV: ${JYXIA_ENV:-development}
+      JYXIA_DEBUG: "false"
       JYXIA_LOG_LEVEL: ${JYXIA_LOG_LEVEL:-INFO}
       JYXIA_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-jyxia}:${POSTGRES_PASSWORD:-SYNTHETIC_LOCAL_ONLY_CHANGE_ME}@postgres:5432/${POSTGRES_DB:-jyxia_institutional}
       JYXIA_STORAGE_ROOT: /var/lib/jyxia/synthetic_storage
@@ -37,10 +38,13 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - jyxia_synthetic_storage:/var/lib/jyxia/synthetic_storage
+    read_only: true
     cap_drop:
       - ALL
     security_opt:
       - "no-new-privileges:true"
+    pids_limit: 64
+    mem_limit: 512m
     tmpfs:
       - "/tmp:size=32m,noexec,nosuid"
     healthcheck:

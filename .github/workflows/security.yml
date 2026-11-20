@@ -22,8 +22,10 @@ jobs:
         run: node --test tests/frontend/test_documental.mjs tests/frontend/test_documental_pdfjs.mjs tests/frontend/test_lab_and_benchmark.mjs tests/legacy/test_security.cjs tests/legacy/test_synthetic_import.cjs
       - name: Integracao historica com identidades sinteticas
         run: python3 -m unittest discover -s tests/legacy -v
-      - name: Higiene basica da publicacao
-        run: python3 tools/check_publication.py
+      - name: Higiene basica da publicacao e coerencia de dependencias
+        run: |
+          python3 tools/check_publication.py
+          python3 tools/sync_backend_deps.py --check
 
   backend-checks:
     runs-on: ubuntu-latest
@@ -49,16 +51,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Instalar dependencias fixadas do backend institucional
-        run: python3 -m pip install --no-cache-dir -r backend/requirements.txt
-      - name: Verificar ciclo completo Alembic em PostgreSQL 16
+      - name: Verificar fonte unica de dependencias e auditar vulnerabilidades
+        run: |
+          python3 tools/sync_backend_deps.py --check
+          python3 -m venv /tmp/jyxia-ci-venv
+          /tmp/jyxia-ci-venv/bin/pip install --no-cache-dir -r backend/requirements-dev.txt
+          /tmp/jyxia-ci-venv/bin/pip-audit
+      - name: Verificar ciclo completo e incremental Alembic em PostgreSQL 16
         env:
           JYXIA_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
         run: |
-          alembic -c backend/alembic.ini upgrade head
-          alembic -c backend/alembic.ini downgrade base
-          alembic -c backend/alembic.ini upgrade head
-      - name: Executar suite Pytest institucional contra PostgreSQL 16
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0001
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade base
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+      - name: Executar suite Pytest completa contra PostgreSQL 16 real
         env:
           JYXIA_TEST_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
-        run: pytest tests/backend -v
+        run: /tmp/jyxia-ci-venv/bin/pytest tests/backend -v
