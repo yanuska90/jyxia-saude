@@ -94,7 +94,7 @@ def test_environment_configuration_fail_closed_and_dsn_masking() -> None:
     prod = load_settings(_valid_prod_env())
     assert prod.env == "production"
 
-    # Production mode must reject all insecure combinations
+    # Production mode must reject all insecure combinations, missing secrets, and hyphen/underscore variants
     insecure_cases = [
         {"JYXIA_DATABASE_URL": "sqlite:///local.db"},
         {"JYXIA_ALLOW_LOCAL_SYNTHETIC_STORAGE": "true"},
@@ -103,21 +103,99 @@ def test_environment_configuration_fail_closed_and_dsn_masking() -> None:
         {"JYXIA_OIDC_ENABLED": "false"},
         {"JYXIA_CORS_ALLOWED_ORIGINS": "*"},
         {"JYXIA_CORS_ALLOWED_ORIGINS": "http://insecure-app.local"},
+        {"JYXIA_CORS_ALLOWED_ORIGINS": "https://127.0.0.1:8443"},
         {"JYXIA_DATABASE_URL": "postgresql+psycopg://jyxia:SYNTHETIC_LOCAL_ONLY_CHANGE_ME@127.0.0.1:5432/db"},
         {"JYXIA_DATABASE_URL": "postgresql+psycopg://jyxia:short@127.0.0.1:5432/db"},
+        {"JYXIA_DATABASE_URL": "postgresql+psycopg://postgres:Str0ng_Prod_T3st_Secr3t!@127.0.0.1:5432/db"},
+        {"JYXIA_DATABASE_URL": "postgresql+psycopg://jyxia_migrator:Str0ng_Prod_T3st_Secr3t!@127.0.0.1:5432/db"},
         {"JYXIA_OIDC_ALLOW_HTTP_DEV": "true"},
         {"JYXIA_SESSION_COOKIE_SECURE": "false"},
+        {"JYXIA_SESSION_SECRET": ""},
+        {"JYXIA_CSRF_SECRET": ""},
+        {"JYXIA_SESSION_SECRET": "", "JYXIA_CSRF_SECRET": ""},
         {"JYXIA_SESSION_SECRET": "short-secret"},
+        {"JYXIA_SESSION_SECRET": "jyxia-dev-only-ephemeral-session-secret-not-for-production"},
+        {"JYXIA_CSRF_SECRET": "jyxia-dev-only-ephemeral-csrf-secret-not-for-production"},
+        {"JYXIA_SESSION_SECRET": "custom-dev-only-hyphenated-secret-value-32-chars-min"},
+        {"JYXIA_SESSION_SECRET": "custom_dev_only_underscore_secret_value_32_chars_min"},
+        {"JYXIA_SESSION_SECRET": "custom-not-for-production-secret-value-32-chars-min"},
+        {"JYXIA_CSRF_SECRET": "custom-change-me-hyphenated-csrf-secret-32-chars-min"},
         {"JYXIA_CSRF_SECRET": "SYNTHETIC_LOCAL_ONLY_CHANGE_ME_CSRF_001"},
+        {
+            "JYXIA_SESSION_SECRET": "Identical_Strong_Secret_Value_For_Both_Session_And_Csrf_99!",
+            "JYXIA_CSRF_SECRET": "Identical_Strong_Secret_Value_For_Both_Session_And_Csrf_99!",
+        },
         {"JYXIA_OIDC_MFA_REQUIRED": "false"},
+        {"JYXIA_OIDC_REQUIRE_BOTH_ACR_AND_AMR": "false"},
+        {"JYXIA_OIDC_ALLOWED_AMR": "pwd,otp"},
+        {"JYXIA_OIDC_ALLOWED_AMR": "email,totp"},
+        {"JYXIA_OIDC_ISSUER": "https://localhost/realms/prod"},
+        {"JYXIA_OIDC_ISSUER": "https://10.0.0.1/realms/prod"},
+        {"JYXIA_OIDC_REDIRECT_URI": "https://127.0.0.1/api/v1/auth/callback"},
+        {"JYXIA_APP_BASE_URL": "https://localhost:8443"},
     ]
     for patch in insecure_cases:
         with pytest.raises(ConfigurationError, match="Invalid JYXIA backend configuration"):
             load_settings(_valid_prod_env(**patch))
 
+    # Omitting JYXIA_SESSION_SECRET or JYXIA_CSRF_SECRET keys completely from environ must fail closed
+    env_without_sess = _valid_prod_env()
+    del env_without_sess["JYXIA_SESSION_SECRET"]
+    with pytest.raises(ConfigurationError, match="Invalid JYXIA backend configuration"):
+        load_settings(env_without_sess)
+
+    env_without_csrf = _valid_prod_env()
+    del env_without_csrf["JYXIA_CSRF_SECRET"]
+    with pytest.raises(ConfigurationError, match="Invalid JYXIA backend configuration"):
+        load_settings(env_without_csrf)
+
+    env_without_both = _valid_prod_env()
+    del env_without_both["JYXIA_SESSION_SECRET"]
+    del env_without_both["JYXIA_CSRF_SECRET"]
+    with pytest.raises(ConfigurationError, match="Invalid JYXIA backend configuration"):
+        load_settings(env_without_both)
+
+
+def test_staging_environment_enforces_strict_fail_closed_policy() -> None:
+    valid_staging = load_settings(_valid_prod_env(JYXIA_ENV="staging"))
+    assert valid_staging.env == "staging"
+    assert valid_staging.session_cookie_secure is True
+    assert valid_staging.oidc_require_both_acr_and_amr is True
+
+    staging_Missing_secrets = _valid_prod_env(JYXIA_ENV="staging")
+    del staging_Missing_secrets["JYXIA_SESSION_SECRET"]
+    with pytest.raises(ConfigurationError):
+        load_settings(staging_Missing_secrets)
+
+    for bad_staging_patch in [
+        {"JYXIA_ENV": "staging", "JYXIA_DEBUG": "true"},
+        {"JYXIA_ENV": "staging", "JYXIA_LOG_LEVEL": "DEBUG"},
+        {"JYXIA_ENV": "staging", "JYXIA_DATABASE_URL": "sqlite:///staging.db"},
+        {"JYXIA_ENV": "staging", "JYXIA_ALLOW_LOCAL_SYNTHETIC_STORAGE": "true"},
+        {"JYXIA_ENV": "staging", "JYXIA_OIDC_ENABLED": "false"},
+        {"JYXIA_ENV": "staging", "JYXIA_OIDC_MFA_REQUIRED": "false"},
+        {"JYXIA_ENV": "staging", "JYXIA_OIDC_REQUIRE_BOTH_ACR_AND_AMR": "false"},
+        {"JYXIA_ENV": "staging", "JYXIA_SESSION_COOKIE_SECURE": "false"},
+        {"JYXIA_ENV": "staging", "JYXIA_SESSION_SECRET": "jyxia-dev-only-ephemeral-session-secret-not-for-production"},
+        {"JYXIA_ENV": "staging", "JYXIA_CSRF_SECRET": "staging-dev-only-weak-csrf-secret-value-0001"},
+        {"JYXIA_ENV": "staging", "JYXIA_CORS_ALLOWED_ORIGINS": "*"},
+        {"JYXIA_ENV": "staging", "JYXIA_APP_BASE_URL": "http://staging.exemplo.invalid"},
+        {"JYXIA_ENV": "staging", "JYXIA_OIDC_ISSUER": "https://127.0.0.1/realms/staging"},
+    ]:
+        with pytest.raises(ConfigurationError):
+            load_settings(_valid_prod_env(**bad_staging_patch))
+
 
 def test_rbac_and_oidc_fail_closed_for_unconfigured_and_cross_org() -> None:
     from datetime import datetime, timezone
+    from app.core.rbac import ROLE_DESCRIPTIONS
+
+    assert OrganizationRole.DOCUMENT_REVIEWER is OrganizationRole.CLINICAL_REVIEWER
+    assert OrganizationRole.ADMINISTRATIVE_REVIEWER is OrganizationRole.CLINICAL_REVIEWER
+    assert OrganizationRole("document_reviewer") is OrganizationRole.CLINICAL_REVIEWER
+    assert OrganizationRole("administrative_reviewer") is OrganizationRole.CLINICAL_REVIEWER
+    assert "Administrative Document Reviewer" in ROLE_DESCRIPTIONS[OrganizationRole.CLINICAL_REVIEWER]
+    assert "zero clinical" in ROLE_DESCRIPTIONS[OrganizationRole.CLINICAL_REVIEWER]
 
     unconfigured_settings = load_settings({})
     adapter = StandardOidcProviderAdapter(unconfigured_settings)
@@ -333,6 +411,7 @@ def test_dependencies_single_source_of_truth_and_no_secrets() -> None:
     runtime_text = (repo_root / "backend" / "requirements.txt").read_text(encoding="utf-8")
     assert "pytest" not in runtime_text
     assert "pip-audit" not in runtime_text
+    assert "ruff" not in runtime_text
 
     secret_patterns = [
         re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),

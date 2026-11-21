@@ -450,7 +450,37 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
         assert logout_res.json()["logged_out"] is True
         assert bff_client.get("/api/v1/me").status_code == 401
 
-    # 2. Authenticated unbound Keycloak user with MFA -> JYXIA rejects 403 & NEVER auto-provisions
+    # 2. Invalid TOTP code against live Keycloak 26.8.2 MUST be rejected by Keycloak OTP form!
+    kc_http_bad_otp, kc_jar_bad_otp = _new_loopback_keycloak_client()
+    with TestClient(app, base_url="http://127.0.0.1:8000") as bad_otp_bff, kc_http_bad_otp:
+        login_res = bad_otp_bff.get("/api/v1/auth/login", follow_redirects=False)
+        assert login_res.status_code == 302
+        page1 = kc_http_bad_otp.get(login_res.headers["location"], follow_redirects=False)
+        assert page1.status_code == 200
+        action1, hidden1, _ = _extract_keycloak_form(
+            page1.text, str(page1.url), preferred_form_ids=("kc-form-login",)
+        )
+        step2 = kc_http_bad_otp.post(
+            action1,
+            data={**hidden1, "username": mfa_username, "password": mfa_password, "credentialId": ""},
+            follow_redirects=False,
+        )
+        assert step2.status_code == 200
+        action2, hidden2, _ = _extract_keycloak_form(
+            step2.text, str(step2.url), preferred_form_ids=("kc-otp-login-form",)
+        )
+        valid_totp_int = int(_generate_totp(mfa_totp_secret))
+        wrong_totp_code = f"{(valid_totp_int + 543210) % 1_000_000:06d}"
+        bad_otp_step = kc_http_bad_otp.post(
+            action2,
+            data={**hidden2, "otp": wrong_totp_code},
+            follow_redirects=False,
+        )
+        # Keycloak refuses redirect/code issuance and re-renders OTP challenge (HTTP 200)
+        assert bad_otp_step.status_code == 200
+        assert "code=" not in str(bad_otp_step.headers.get("location", ""))
+
+    # 3. Authenticated unbound Keycloak user with MFA -> JYXIA rejects 403 & NEVER auto-provisions
     kc_http_2, kc_jar_2 = _new_loopback_keycloak_client()
     with TestClient(app, base_url="http://127.0.0.1:8000") as unbound_bff, kc_http_2:
         login_res = unbound_bff.get("/api/v1/auth/login", follow_redirects=False)

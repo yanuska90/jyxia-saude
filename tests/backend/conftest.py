@@ -98,7 +98,7 @@ def migrated_engine(database_url: str) -> Generator[Engine, None, None]:
         try:
             with engine.begin() as conn:
                 ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-                already_head = ver == "20261120_0003"
+                already_head = ver == "20261121_0004"
         except SQLAlchemyError:
             already_head = False
 

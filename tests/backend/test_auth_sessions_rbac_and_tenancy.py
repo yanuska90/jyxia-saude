@@ -13,13 +13,14 @@ from app.core.constants import (
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
     CaseReadinessState,
+    ExternalIdentityStatus,
     MembershipStatus,
     OrganizationRole,
 )
 from app.core.oidc import StandardOidcProviderAdapter
 from app.db.session import create_session_factory
 from app.main import create_app
-from app.models.entities import AuthSession, SecurityAuditEvent, User
+from app.models.entities import AuthSession, ExternalIdentity, SecurityAuditEvent, User
 from app.repositories.identity import IdentityAndSessionRepository, SecurityAuditRepository
 from app.repositories.institutional import (
     AuditEventRepository,
@@ -205,12 +206,85 @@ def test_session_timeouts_csrf_origin_logout_and_user_suspension(migrated_engine
         assert sess_info.json()["authenticated"] is True
         sess_id = sess_info.json()["session_id"]
 
-        # CSRF & Origin defense matrix on POST /auth/logout and /auth/select-organization
+        #CSRF & Origin defense matrix on POST /auth/logout and /auth/select-organization
         assert client.post("/api/v1/auth/logout").status_code == 403  # no Origin / no CSRF
         assert (
             client.post(
                 "/api/v1/auth/logout",
                 headers={"Origin": "https://evil.invalid", CSRF_HEADER_NAME: csrf_tok},
+            ).status_code
+            == 403
+        )
+        # Present-but-invalid Origin ('null', malformed, wrong scheme, port, subdomain, userinfo)
+        # MUST ALWAYS fail 403 even when accompanied by a valid trusted Referer!
+        for rejected_origin in (
+            "null",
+            "NULL",
+            "invalid-origin-value",
+            "https://evil.invalid",
+            "http://sub.127.0.0.1:8000",
+            "http://127.0.0.1.evil.invalid:8000",
+            "http://127.0.0.1:8001",
+            "http://127.0.0.1:9999",
+            "https://127.0.0.1:8000",
+            "http://user:pass@127.0.0.1:8000",
+            "http://127.0.0.1:8000/extra-path",
+            "http://127.0.0.1:8000?query=1",
+        ):
+            assert (
+                client.post(
+                    "/api/v1/auth/logout",
+                    headers={
+                        "Origin": rejected_origin,
+                        "Referer": "http://127.0.0.1:8000/workspace",
+                        CSRF_HEADER_NAME: csrf_tok,
+                    },
+                ).status_code
+                == 403
+            ), f"Origin={rejected_origin!r} must be rejected without Referer fallback"
+            assert (
+                client.post(
+                    "/api/v1/auth/select-organization",
+                    json={"organization_id": org.id},
+                    headers={
+                        "Origin": rejected_origin,
+                        "Referer": "http://127.0.0.1:8000/workspace",
+                        CSRF_HEADER_NAME: csrf_tok,
+                    },
+                ).status_code
+                == 403
+            )
+
+        # Absent Origin with invalid Referer MUST fail 403
+        for bad_referer in (
+            "https://evil.invalid/workspace",
+            "http://127.0.0.1:8001/workspace",
+            "http://sub.127.0.0.1:8000/workspace",
+            "http://user@127.0.0.1:8000/workspace",
+            "null",
+        ):
+            assert (
+                client.post(
+                    "/api/v1/auth/logout",
+                    headers={"Referer": bad_referer, CSRF_HEADER_NAME: csrf_tok},
+                ).status_code
+                == 403
+            )
+
+        # Absent Origin with valid Referer is accepted when CSRF token is valid
+        ref_select = client.post(
+            "/api/v1/auth/select-organization",
+            json={"organization_id": org.id},
+            headers={"Referer": "http://127.0.0.1:8000/workspace?view=cases", CSRF_HEADER_NAME: csrf_tok},
+        )
+        assert ref_select.status_code == 200
+        csrf_tok = ref_select.cookies.get(CSRF_COOKIE_NAME) or csrf_tok
+
+        # Missing CSRF header or mismatched CSRF header MUST fail 403
+        assert (
+            client.post(
+                "/api/v1/auth/logout",
+                headers={"Origin": "http://127.0.0.1:8000"},
             ).status_code
             == 403
         )
@@ -287,7 +361,32 @@ def test_session_timeouts_csrf_origin_logout_and_user_suspension(migrated_engine
             db_abs.close()
         assert client.get("/api/v1/me").status_code == 401
 
-        # Third login -> simulate user deactivation mid-session -> immediately rejected 401!
+        # Third login -> simulate ExternalIdentity SUSPENDED status mid-session -> immediately rejected 401!
+        _login_user_via_bff(client, idp, sub="sub-sess", email="sess@jyxia.local", code="c-s3-id-susp")
+        db_id_susp = factory()
+        try:
+            db_id_susp.execute(
+                update(ExternalIdentity)
+                .where(ExternalIdentity.user_id == user.id)
+                .values(status=ExternalIdentityStatus.SUSPENDED.value)
+            )
+            db_id_susp.commit()
+        finally:
+            db_id_susp.close()
+        assert client.get("/api/v1/me").status_code == 401
+
+        # Re-activate ExternalIdentity, then simulate user deactivation mid-session -> immediately rejected 401!
+        db_id_react = factory()
+        try:
+            db_id_react.execute(
+                update(ExternalIdentity)
+                .where(ExternalIdentity.user_id == user.id)
+                .values(status=ExternalIdentityStatus.ACTIVE.value)
+            )
+            db_id_react.commit()
+        finally:
+            db_id_react.close()
+
         _login_user_via_bff(client, idp, sub="sub-sess", email="sess@jyxia.local", code="c-s3")
         db_suspend = factory()
         try:
@@ -396,11 +495,12 @@ def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engi
                 == 403
             )
 
-    # 2. Multi-organization user selection & mid-session membership revocation
+    # 2. Multi-organization user selection, session/CSRF rotation & mid-session membership revocation
     with TestClient(app, base_url="http://127.0.0.1:8000") as multi_client:
-        _, csrf_multi = _login_user_via_bff(
+        sess_multi_initial, csrf_multi = _login_user_via_bff(
             multi_client, idp, sub="sub-multi", email="multi@jyxia.local", code="c-multi"
         )
+        initial_sess_id = multi_client.get("/api/v1/auth/session").json()["session_id"]
         orgs_resp = multi_client.get("/api/v1/me/organizations")
         assert orgs_resp.status_code == 200
         assert len(orgs_resp.json()["organizations"]) == 2
@@ -409,7 +509,7 @@ def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engi
         # Must select active org before querying org endpoint
         assert multi_client.get(f"/api/v1/organizations/{org_a.id}/cases").status_code == 403
 
-        # Cannot switch to arbitrary unknown org
+        # Cannot switch to arbitrary unknown org (and failed switch does not rotate valid session)
         assert (
             multi_client.post(
                 "/api/v1/auth/select-organization",
@@ -419,7 +519,7 @@ def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engi
             == 403
         )
 
-        # Select org_b (ORG_ADMIN) -> org_b succeeds and returns CASE-B-001 ONLY, org_a fails 403
+        # Select org_b (ORG_ADMIN) -> rotates session + CSRF tokens and revokes previous session!
         sel_b = multi_client.post(
             "/api/v1/auth/select-organization",
             json={"organization_id": org_b.id},
@@ -427,18 +527,46 @@ def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engi
         )
         assert sel_b.status_code == 200
         assert sel_b.json()["role"] == "org_admin"
-        assert multi_client.get(f"/api/v1/organizations/{org_b.id}/cases").json()["cases"][0]["case_code"] == "CASE-B-001"
-        assert multi_client.get(f"/api/v1/organizations/{org_a.id}/cases").status_code == 403
+        sess_after_b = sel_b.cookies.get(SESSION_COOKIE_NAME)
+        csrf_after_b = sel_b.cookies.get(CSRF_COOKIE_NAME)
+        assert sess_after_b and csrf_after_b
+        assert sess_after_b != sess_multi_initial
+        assert csrf_after_b != csrf_multi
 
-        # Select org_a (READ_ONLY) -> /members returns 403; then suspend membership -> /cases immediately 403!
+        rotated_sess_info = multi_client.get("/api/v1/auth/session").json()
+        assert rotated_sess_info["session_id"] != initial_sess_id
+        assert rotated_sess_info["active_organization_id"] == org_b.id
+
+        # Previous session token MUST be rejected immediately with 401 after organization switch!
+        with TestClient(app, base_url="http://127.0.0.1:8000") as stale_token_client:
+            stale_token_client.cookies.set(
+                SESSION_COOKIE_NAME, sess_multi_initial, domain="127.0.0.1", path="/"
+            )
+            assert stale_token_client.get("/api/v1/me").status_code == 401
+            assert stale_token_client.get(f"/api/v1/organizations/{org_b.id}/cases").status_code == 401
+
+        # Previous CSRF token MUST be rejected with 403 even when paired with new session cookie!
         assert (
             multi_client.post(
                 "/api/v1/auth/select-organization",
                 json={"organization_id": org_a.id},
                 headers={"Origin": "http://127.0.0.1:8000", CSRF_HEADER_NAME: csrf_multi},
             ).status_code
-            == 200
+            == 403
         )
+
+        assert multi_client.get(f"/api/v1/organizations/{org_b.id}/cases").json()["cases"][0]["case_code"] == "CASE-B-001"
+        assert multi_client.get(f"/api/v1/organizations/{org_a.id}/cases").status_code == 403
+
+        # Select org_a (READ_ONLY) using new rotated CSRF token -> succeeds and rotates again; then suspend membership -> 403!
+        sel_a = multi_client.post(
+            "/api/v1/auth/select-organization",
+            json={"organization_id": org_a.id},
+            headers={"Origin": "http://127.0.0.1:8000", CSRF_HEADER_NAME: csrf_after_b},
+        )
+        assert sel_a.status_code == 200
+        assert sel_a.cookies.get(SESSION_COOKIE_NAME) != sess_after_b
+        assert sel_a.cookies.get(CSRF_COOKIE_NAME) != csrf_after_b
         assert multi_client.get(f"/api/v1/organizations/{org_a.id}/members").status_code == 403
 
         db_revoke = factory()

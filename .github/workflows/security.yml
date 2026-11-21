@@ -51,11 +51,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Verificar fonte unica de dependencias e auditar vulnerabilidades
+      - name: Verificar fonte unica de dependencias, lint Ruff e auditar vulnerabilidades
         run: |
           python3 tools/sync_backend_deps.py --check
           python3 -m venv /tmp/jyxia-ci-venv
           /tmp/jyxia-ci-venv/bin/pip install --no-cache-dir -r backend/requirements-dev.txt
+          /tmp/jyxia-ci-venv/bin/ruff check backend tests/backend tools
           /tmp/jyxia-ci-venv/bin/pip-audit
       - name: Inicializar role restrita jyxia_app no PostgreSQL 16 e verificar migracoes Alembic
         env:
@@ -82,6 +83,7 @@ jobs:
                   \"\"\")
           "
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0003
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0002
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0001
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade base

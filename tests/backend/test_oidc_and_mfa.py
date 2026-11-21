@@ -129,22 +129,23 @@ def test_oidc_token_and_mfa_validation_rejects_all_tampered_and_weak_tokens() ->
             tok_use_access, expected_nonce_hash=expected_nonce_hash, nonce_secret=settings.session_secret
         )
 
-    # 3. Password-only MFA bypass (["pwd"], no MFA acr/amr, stale auth_time, missing auth_time)
-    pwd_only_claims = _base_claims(nonce=raw_nonce, acr="urn:jyxia:loa:mfa", amr=["pwd"])
-    with pytest.raises(OidcAuthenticationError, match="Password-only"):
-        adapter.verify_id_token(
-            _sign_id_token(idp.rsa_priv, alg="RS256", kid=idp.rsa_jwk["kid"], claims=pwd_only_claims),
-            expected_nonce_hash=expected_nonce_hash,
-            nonce_secret=settings.session_secret,
-        )
-
-    no_mfa_claims = _base_claims(nonce=raw_nonce, acr="1", amr=[])
-    with pytest.raises(OidcAuthenticationError, match="MFA"):
-        adapter.verify_id_token(
-            _sign_id_token(idp.rsa_priv, alg="RS256", kid=idp.rsa_jwk["kid"], claims=no_mfa_claims),
-            expected_nonce_hash=expected_nonce_hash,
-            nonce_secret=settings.session_secret,
-        )
+    # 3. Password-only and weak/missing second-factor MFA bypass attempts MUST fail closed
+    for rejected_mfa_claims, expected_match in [
+        (_base_claims(nonce=raw_nonce, acr="urn:jyxia:loa:mfa", amr=["pwd"]), "Password-only"),
+        (_base_claims(nonce=raw_nonce, acr="urn:jyxia:loa:mfa", amr=[]), "non-empty amr"),
+        (_base_claims(nonce=raw_nonce, acr="2", amr=[]), "non-empty amr"),
+        (_base_claims(nonce=raw_nonce, acr="urn:jyxia:loa:mfa", amr=["pwd", "email"]), "second-factor"),
+        (_base_claims(nonce=raw_nonce, acr="urn:jyxia:loa:mfa", amr=["email", "sms"]), "second-factor"),
+        (_base_claims(nonce=raw_nonce, acr=None, amr=["pwd", "otp"]), "acr"),
+        (_base_claims(nonce=raw_nonce, acr="1", amr=["pwd", "otp"]), "acr"),
+        (_base_claims(nonce=raw_nonce, acr="1", amr=[]), "amr"),
+    ]:
+        with pytest.raises(OidcAuthenticationError, match=expected_match):
+            adapter.verify_id_token(
+                _sign_id_token(idp.rsa_priv, alg="RS256", kid=idp.rsa_jwk["kid"], claims=rejected_mfa_claims),
+                expected_nonce_hash=expected_nonce_hash,
+                nonce_secret=settings.session_secret,
+            )
 
     old_auth_claims = _base_claims(
         nonce=raw_nonce,
@@ -209,9 +210,22 @@ def test_oidc_token_and_mfa_validation_rejects_all_tampered_and_weak_tokens() ->
             hs_tok, expected_nonce_hash=expected_nonce_hash, nonce_secret=settings.session_secret
         )
 
-    # 5. JWKS key rotation + unknown kid cooldown prevents upstream JWKS DoS
+    # 5. Positive JWKS key rotation + unknown kid cooldown prevents upstream JWKS DoS
     rot_priv, rot_jwk = _gen_rsa_jwk("rsa-key-2")
     idp.jwks_keys = [idp.rsa_jwk, rot_jwk]
+    calls_before_rot = idp.jwks_calls
+    rotated_tok = _sign_id_token(
+        rot_priv,
+        alg="RS256",
+        kid="rsa-key-2",
+        claims=_base_claims(nonce=raw_nonce, sub="idp-sub-rotated"),
+    )
+    verified_rot = adapter.verify_id_token(
+        rotated_tok, expected_nonce_hash=expected_nonce_hash, nonce_secret=settings.session_secret
+    )
+    assert verified_rot.subject == "idp-sub-rotated"
+    assert idp.jwks_calls == calls_before_rot + 1
+
     # Cooldown triggered immediately on unknown kids without bombing certs endpoint every request
     calls_before = idp.jwks_calls
     for i in range(5):
@@ -222,8 +236,8 @@ def test_oidc_token_and_mfa_validation_rejects_all_tampered_and_weak_tokens() ->
             adapter.verify_id_token(
                 unknown_tok, expected_nonce_hash=expected_nonce_hash, nonce_secret=settings.session_secret
             )
-    # Cooldown window (15s) allows at most 1 forced JWKS refresh across the 5 invalid kid attempts
-    assert (idp.jwks_calls - calls_before) <= 1
+    # Because forced refresh just occurred for rsa-key-2, cooldown window (15s) blocks further forced refreshes
+    assert (idp.jwks_calls - calls_before) == 0
 
 
 def test_pkce_encryption_at_rest_state_replay_and_outage_fail_closed(migrated_engine) -> None:
@@ -290,6 +304,71 @@ def test_pkce_encryption_at_rest_state_replay_and_outage_fail_closed(migrated_en
         )
         assert replay_resp.status_code == 401
 
+        # Unknown/forged state WITH matching jyxia_oidc_tx cookie MUST fail 401!
+        forged_state = "forged-unknown-state-value-123456"
+        forged_tx = hmac_token_digest(
+            forged_state, secret=settings.csrf_secret, context="oidc_tx_cookie"
+        )
+        client.cookies.set("jyxia_oidc_tx", forged_tx, path="/api/v1/auth")
+        assert (
+            client.get(
+                f"/api/v1/auth/callback?code=code-1&state={forged_state}",
+                follow_redirects=False,
+            ).status_code
+            == 401
+        )
+
+        # Wrong PKCE challenge / code reuse on fresh login MUST fail 401!
+        login_bad_pkce = client.get("/api/v1/auth/login", follow_redirects=False)
+        params_bad_pkce = parse_qs(urlparse(login_bad_pkce.headers["location"]).query)
+        st_bad_pkce = params_bad_pkce["state"][0]
+        idp.issued_codes["code-wrong-pkce"] = {
+            "code_challenge": "mismatched_pkce_challenge_value_0000000000000",
+            "id_token": _sign_id_token(
+                idp.rsa_priv,
+                alg="RS256",
+                kid=idp.rsa_jwk["kid"],
+                claims=_base_claims(sub="sub-pkce-1", nonce=params_bad_pkce["nonce"][0]),
+            ),
+        }
+        assert (
+            client.get(
+                f"/api/v1/auth/callback?code=code-wrong-pkce&state={st_bad_pkce}",
+                follow_redirects=False,
+            ).status_code
+            == 401
+        )
+
+        # Outage during JWKS or Token exchange fails closed with 503
+        login_jwks_down = client.get("/api/v1/auth/login", follow_redirects=False)
+        params_jwks = parse_qs(urlparse(login_jwks_down.headers["location"]).query)
+        idp.issued_codes["code-jwks-down"] = {
+            "code_challenge": params_jwks["code_challenge"][0],
+            "id_token": _sign_id_token(
+                idp.rsa_priv,
+                alg="RS256",
+                kid="unseen-kid-forcing-jwks-fetch",
+                claims=_base_claims(sub="sub-pkce-1", nonce=params_jwks["nonce"][0]),
+            ),
+        }
+        idp.fail_jwks = True
+        fresh_jwks_adapter = StandardOidcProviderAdapter(settings, transport=idp.transport())
+        app_jwks_down = create_app(settings, engine=migrated_engine, oidc_adapter=fresh_jwks_adapter)
+        with TestClient(app_jwks_down, base_url="http://127.0.0.1:8000") as jwks_client:
+            jwks_client.cookies.set(
+                "jyxia_oidc_tx",
+                login_jwks_down.cookies.get("jyxia_oidc_tx") or "",
+                path="/api/v1/auth",
+            )
+            assert (
+                jwks_client.get(
+                    f"/api/v1/auth/callback?code=code-jwks-down&state={params_jwks['state'][0]}",
+                    follow_redirects=False,
+                ).status_code
+                == 503
+            )
+        idp.fail_jwks = False
+
         # Outage during login fails closed with 503 & logs OIDC_PROVIDER_UNAVAILABLE
         idp.fail_discovery = True
         fresh_adapter = StandardOidcProviderAdapter(settings, transport=idp.transport())
@@ -312,3 +391,139 @@ def test_pkce_encryption_at_rest_state_replay_and_outage_fail_closed(migrated_en
             )
         with factory() as verify_session:
             assert SecurityAuditRepository.verify_chain(verify_session)
+
+
+def test_oidc_anti_ssrf_blocks_private_ips_redirects_userinfo_and_dns_rebinding() -> None:
+    import httpx
+
+    idp = MockOidcProviderState(issuer="https://idp.public.jyxia.invalid/realms/main")
+
+    # 1. Public HTTPS issuer with public DNS resolution succeeds
+    public_settings = _oidc_settings(
+        oidc_issuer="https://idp.public.jyxia.invalid/realms/main",
+        oidc_redirect_uri="https://app.public.jyxia.invalid/api/v1/auth/callback",
+        oidc_post_logout_redirect_uri="https://app.public.jyxia.invalid/",
+        oidc_allow_http_dev=False,
+    )
+    adapter_ok = StandardOidcProviderAdapter(
+        public_settings,
+        transport=idp.transport(),
+        dns_resolver=lambda _host, _port: ("93.184.216.34",),
+    )
+    meta = adapter_ok.get_metadata()
+    assert meta.issuer == "https://idp.public.jyxia.invalid/realms/main"
+
+    # 2. Private, loopback, link-local, IPv6 loopback/link-local and userinfo URLs rejected when dev HTTP is off
+    forbidden_issuers = [
+        "https://localhost/realms/main",
+        "https://127.0.0.1/realms/main",
+        "https://[::1]/realms/main",
+        "https://10.0.0.1/realms/main",
+        "https://172.16.0.1/realms/main",
+        "https://192.168.1.1/realms/main",
+        "https://169.254.169.254/latest/meta-data",
+        "https://[fe80::1]/realms/main",
+        "https://admin:secret@idp.public.jyxia.invalid/realms/main",
+    ]
+    for bad_iss in forbidden_issuers:
+        st_bad = public_settings.model_copy(update={"oidc_issuer": bad_iss})
+        ad_bad = StandardOidcProviderAdapter(st_bad, transport=idp.transport())
+        with pytest.raises(OidcAuthenticationError):
+            ad_bad.get_metadata()
+
+    with pytest.raises(Exception, match="userinfo"):
+        _oidc_settings(
+            oidc_issuer="https://admin:secret@idp.public.jyxia.invalid/realms/main",
+            oidc_redirect_uri="https://app.public.jyxia.invalid/api/v1/auth/callback",
+            oidc_post_logout_redirect_uri="https://app.public.jyxia.invalid/",
+            oidc_allow_http_dev=False,
+        )
+
+    # 3. DNS returning mixed public + private/link-local IPs MUST be rejected
+    for bad_dns_ips in [
+        ("93.184.216.34", "10.0.0.12"),
+        ("93.184.216.34", "127.0.0.1"),
+        ("93.184.216.34", "169.254.169.254"),
+        ("93.184.216.34", "fe80::1"),
+    ]:
+        ad_mixed_dns = StandardOidcProviderAdapter(
+            public_settings,
+            transport=idp.transport(),
+            dns_resolver=lambda _h, _p, ips=bad_dns_ips: ips,
+        )
+        with pytest.raises(OidcAuthenticationError, match="private or non-global"):
+            ad_mixed_dns.get_metadata()
+
+    # 4. DNS rebinding between discovery (public IP) and JWKS/token exchange (private or rebound IP) rejected
+    active_dns_priv = [("93.184.216.34",)]
+
+    ad_rebind_priv = StandardOidcProviderAdapter(
+        public_settings,
+        transport=idp.transport(),
+        dns_resolver=lambda _host, _port: active_dns_priv[0],
+    )
+    ad_rebind_priv.get_metadata()
+    active_dns_priv[0] = ("169.254.169.254",)
+    with pytest.raises(OidcAuthenticationError, match="private or non-global"):
+        ad_rebind_priv.exchange_authorization_code(code="any", code_verifier="v" * 48)
+
+    active_dns_disjoint = [("93.184.216.34",)]
+
+    ad_rebind_disjoint = StandardOidcProviderAdapter(
+        public_settings,
+        transport=idp.transport(),
+        dns_resolver=lambda _host, _port: active_dns_disjoint[0],
+    )
+    ad_rebind_disjoint.get_metadata()
+    active_dns_disjoint[0] = ("1.1.1.1",)
+    with pytest.raises(OidcAuthenticationError, match="DNS rebinding"):
+        ad_rebind_disjoint.exchange_authorization_code(code="any", code_verifier="v" * 48)
+
+    # 5. Discovery returning private/cross-origin JWKS URI or token endpoint or HTTP 302 redirect rejected
+    for tampered_doc in [
+        {
+            "issuer": public_settings.oidc_issuer,
+            "authorization_endpoint": f"{public_settings.oidc_issuer}/auth",
+            "token_endpoint": f"{public_settings.oidc_issuer}/token",
+            "jwks_uri": "https://169.254.169.254/latest/jwks",
+        },
+        {
+            "issuer": public_settings.oidc_issuer,
+            "authorization_endpoint": f"{public_settings.oidc_issuer}/auth",
+            "token_endpoint": "https://10.0.0.9/token",
+            "jwks_uri": f"{public_settings.oidc_issuer}/certs",
+        },
+        {
+            "issuer": public_settings.oidc_issuer,
+            "authorization_endpoint": f"{public_settings.oidc_issuer}/auth",
+            "token_endpoint": "https://other-host.jyxia.invalid/token",
+            "jwks_uri": f"{public_settings.oidc_issuer}/certs",
+        },
+    ]:
+        ad_tampered = StandardOidcProviderAdapter(
+            public_settings,
+            transport=httpx.MockTransport(lambda _req, doc=tampered_doc: httpx.Response(200, json=doc)),
+            dns_resolver=lambda _h, _p: ("93.184.216.34",),
+        )
+        with pytest.raises(OidcAuthenticationError):
+            ad_tampered.get_metadata()
+
+    ad_redirect = StandardOidcProviderAdapter(
+        public_settings,
+        transport=httpx.MockTransport(
+            lambda _req: httpx.Response(302, headers={"Location": "https://169.254.169.254/meta"})
+        ),
+        dns_resolver=lambda _h, _p: ("93.184.216.34",),
+    )
+    with pytest.raises(OidcAuthenticationError, match="redirect"):
+        ad_redirect.get_metadata()
+
+    # 6. Local Keycloak on loopback HTTP is allowed ONLY in development/test with oidc_allow_http_dev=True
+    kc_dev_idp = MockOidcProviderState(issuer="http://127.0.0.1:8080/realms/jyxia-dev")
+    kc_dev_settings = _oidc_settings(
+        env="test",
+        oidc_allow_http_dev=True,
+        oidc_issuer="http://127.0.0.1:8080/realms/jyxia-dev",
+    )
+    ad_kc_dev = StandardOidcProviderAdapter(kc_dev_settings, transport=kc_dev_idp.transport())
+    assert ad_kc_dev.get_metadata().issuer == "http://127.0.0.1:8080/realms/jyxia-dev"
