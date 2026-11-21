@@ -283,7 +283,9 @@ class OrganizationRepository:
         user_id: str,
         role: str,
     ) -> OrganizationMembership:
-        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         org = session.get(Organization, ctx.organization_id)
         if org is None:
             raise TenantScopeError(f"Organization '{ctx.organization_id}' does not exist.")
@@ -303,7 +305,11 @@ class OrganizationRepository:
     def get_active_membership(
         session: Session, ctx: TenantContext, *, user_id: str
     ) -> OrganizationMembership | None:
-        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
+        apply_pg_rls_context(
+            session,
+            organization_id=ctx.organization_id,
+            user_id=ctx.actor_user_id or user_id,
+        )
         return session.scalar(
             select(OrganizationMembership).where(
                 OrganizationMembership.organization_id == ctx.organization_id,
@@ -314,7 +320,9 @@ class OrganizationRepository:
 
     @staticmethod
     def list_memberships(session: Session, ctx: TenantContext) -> list[OrganizationMembership]:
-        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         return list(
             session.scalars(
                 select(OrganizationMembership)
@@ -327,7 +335,9 @@ class OrganizationRepository:
     def list_memberships_with_users(
         session: Session, ctx: TenantContext
     ) -> list[tuple[OrganizationMembership, User]]:
-        apply_pg_rls_context(session, organization_id=ctx.organization_id, user_id=None)
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
         rows = session.execute(
             select(OrganizationMembership, User)
             .join(User, User.id == OrganizationMembership.user_id)

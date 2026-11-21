@@ -6,13 +6,16 @@ discovery, JWKS fetching and server-to-server authorization code exchange.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+import ipaddress
 import logging
+import socket
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
@@ -163,6 +166,43 @@ class _JwksKeyCache:
             self._last_forced_refresh_at = now
 
 
+_DEV_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "keycloak"})
+
+
+def _is_forbidden_ip_address(raw_ip: str) -> bool:
+    cleaned = raw_ip.strip().strip("[]")
+    if "%" in cleaned:
+        cleaned = cleaned.split("%", 1)[0]
+    try:
+        ip_obj = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return True
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        ip_obj = ip_obj.ipv4_mapped
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+        or ip_obj.is_reserved
+        or not ip_obj.is_global
+    )
+
+
+def _is_loopback_ip_address(raw_ip: str) -> bool:
+    cleaned = raw_ip.strip().strip("[]")
+    if "%" in cleaned:
+        cleaned = cleaned.split("%", 1)[0]
+    try:
+        ip_obj = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return False
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        ip_obj = ip_obj.ipv4_mapped
+    return bool(ip_obj.is_loopback)
+
+
 class StandardOidcProviderAdapter:
     """Standards-compliant OIDC adapter using trusted discovery, JWKS, PKCE & strict MFA."""
 
@@ -171,12 +211,15 @@ class StandardOidcProviderAdapter:
         settings: Settings,
         *,
         transport: httpx.BaseTransport | None = None,
+        dns_resolver: Callable[[str, int], Sequence[str]] | None = None,
     ) -> None:
         self._settings = settings
         self._transport = transport
+        self._dns_resolver = dns_resolver
         self._metadata_lock = threading.RLock()
         self._metadata: OidcProviderMetadata | None = None
         self._metadata_fetched_at: float = 0.0
+        self._pinned_host_ips: dict[tuple[str, int], frozenset[str]] = {}
         self._jwks_cache = _JwksKeyCache(
             ttl_seconds=settings.oidc_jwks_cache_ttl_seconds,
             cooldown_seconds=settings.oidc_jwks_refresh_cooldown_seconds,
@@ -209,18 +252,127 @@ class StandardOidcProviderAdapter:
             transport=self._transport,
         )
 
-    def _validate_provider_url(self, raw_url: str, *, field_name: str) -> str:
-        parsed = urlparse(raw_url)
-        if parsed.scheme == "https" and parsed.netloc:
-            return raw_url
-        if (
-            parsed.scheme == "http"
-            and self._settings.oidc_allow_http_dev
+    def _is_dev_loopback_allowed(self, hostname: str) -> bool:
+        return bool(
+            self._settings.oidc_allow_http_dev
             and self._settings.env in {"development", "test"}
-            and parsed.hostname in {"127.0.0.1", "localhost", "::1", "keycloak"}
-        ):
-            return raw_url
-        raise OidcAuthenticationError(f"Refusing untrusted URL scheme for {field_name}.")
+            and hostname.lower().strip("[]") in _DEV_LOOPBACK_HOSTS
+        )
+
+    def _extract_canonical_origin(self, raw_url: str, *, field_name: str) -> tuple[str, str, int]:
+        if not raw_url or any(ch.isspace() or ord(ch) < 32 for ch in raw_url):
+            raise OidcAuthenticationError(f"Malformed URL for {field_name}.")
+        try:
+            parsed = urlsplit(raw_url)
+        except ValueError as exc:
+            raise OidcAuthenticationError(f"Malformed URL for {field_name}.") from exc
+
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"http", "https"} or not parsed.netloc:
+            raise OidcAuthenticationError(f"Refusing untrusted URL scheme for {field_name}.")
+        if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+            raise OidcAuthenticationError(f"URL userinfo is prohibited in {field_name}.")
+        if parsed.fragment:
+            raise OidcAuthenticationError(f"URL fragment is prohibited in {field_name}.")
+        hostname = (parsed.hostname or "").strip().lower().strip("[]")
+        if not hostname or ".." in hostname:
+            raise OidcAuthenticationError(f"Missing or invalid hostname in {field_name}.")
+        try:
+            port = parsed.port or (443 if scheme == "https" else 80)
+        except ValueError as exc:
+            raise OidcAuthenticationError(f"Invalid port in {field_name}.") from exc
+        if port <= 0 or port > 65535:
+            raise OidcAuthenticationError(f"Out-of-range port in {field_name}.")
+        return scheme, hostname, port
+
+    def _verify_and_resolve_host_ips(self, hostname: str, port: int, *, field_name: str) -> None:
+        dev_loopback_ok = self._is_dev_loopback_allowed(hostname)
+
+        # 1. Check literal IPv4 / IPv6 hostnames immediately
+        try:
+            ipaddress.ip_address(hostname)
+            is_ip_literal = True
+        except ValueError:
+            is_ip_literal = False
+
+        if is_ip_literal:
+            if dev_loopback_ok and _is_loopback_ip_address(hostname):
+                return
+            if _is_forbidden_ip_address(hostname):
+                raise OidcAuthenticationError(
+                    f"Refusing non-global or private IP literal for {field_name}."
+                )
+            return
+
+        if hostname in _DEV_LOOPBACK_HOSTS or hostname.endswith(".localhost"):
+            if not dev_loopback_ok:
+                raise OidcAuthenticationError(
+                    f"Refusing loopback/local hostname for {field_name}."
+                )
+            return
+
+        # 2. Resolve DNS records when custom resolver is provided or real network transport is active
+        if self._dns_resolver is None and self._transport is not None:
+            return
+
+        try:
+            if self._dns_resolver is not None:
+                resolved_ips = tuple(str(ip).strip() for ip in self._dns_resolver(hostname, port))
+            else:
+                addr_info = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+                resolved_ips = tuple(
+                    str(item[4][0]).strip() for item in addr_info if item and len(item) >= 5 and item[4]
+                )
+        except OSError as exc:
+            raise OidcProviderUnavailableError(
+                f"DNS resolution failed for {field_name}."
+            ) from exc
+
+        if not resolved_ips:
+            raise OidcAuthenticationError(f"DNS resolution returned no addresses for {field_name}.")
+
+        normalized_ips: set[str] = set()
+        for ip_str in resolved_ips:
+            if _is_forbidden_ip_address(ip_str):
+                raise OidcAuthenticationError(
+                    f"Refusing {field_name}: hostname resolved to private or non-global IP."
+                )
+            normalized_ips.add(ip_str)
+
+        host_key = (hostname, port)
+        with self._metadata_lock:
+            previous_ips = self._pinned_host_ips.get(host_key)
+            if previous_ips is not None and not (previous_ips & normalized_ips):
+                raise OidcAuthenticationError(
+                    f"Refusing {field_name}: suspicious DNS rebinding address change detected."
+                )
+            self._pinned_host_ips[host_key] = frozenset(normalized_ips)
+
+    def _validate_provider_url(
+        self,
+        raw_url: str,
+        *,
+        field_name: str,
+        require_issuer_origin: bool = False,
+    ) -> str:
+        scheme, hostname, port = self._extract_canonical_origin(raw_url, field_name=field_name)
+        if scheme == "http":
+            if not self._is_dev_loopback_allowed(hostname):
+                raise OidcAuthenticationError(f"Refusing untrusted HTTP scheme for {field_name}.")
+        elif scheme != "https":
+            raise OidcAuthenticationError(f"Refusing untrusted URL scheme for {field_name}.")
+
+        if require_issuer_origin and self._settings.oidc_issuer:
+            iss_origin = self._extract_canonical_origin(
+                self._settings.oidc_issuer, field_name="oidc_issuer"
+            )
+            if (scheme, hostname, port) != iss_origin:
+                raise OidcAuthenticationError(
+                    f"Refusing {field_name}: endpoint origin diverges from configured OIDC issuer."
+                )
+
+        self._verify_and_resolve_host_ips(hostname, port, field_name=field_name)
+        return raw_url
 
     def get_metadata(self) -> OidcProviderMetadata:
         self._require_configured()
@@ -232,21 +384,37 @@ class StandardOidcProviderAdapter:
             ):
                 return self._metadata
 
+            assert self._settings.oidc_issuer is not None
+            self._validate_provider_url(self._settings.oidc_issuer, field_name="oidc_issuer")
             discovery_url = self._validate_provider_url(
                 f"{self._settings.oidc_issuer}/.well-known/openid-configuration",
                 field_name="oidc_discovery",
+                require_issuer_origin=True,
             )
             try:
                 with self._new_client() as client:
                     resp = client.get(discovery_url)
-                    resp.raise_for_status()
-                    doc = resp.json()
-            except (httpx.HTTPError, ValueError) as exc:
+            except httpx.HTTPError as exc:
                 logger.warning(
                     "OIDC discovery fetch failed.",
                     extra=build_safe_log_extra(error_type=type(exc).__name__),
                 )
                 raise OidcProviderUnavailableError("OIDC identity provider is unavailable.") from exc
+
+            if 300 <= resp.status_code < 400:
+                raise OidcAuthenticationError("OIDC discovery redirects are prohibited.")
+            try:
+                resp.raise_for_status()
+                doc = resp.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning(
+                    "OIDC discovery response invalid.",
+                    extra=build_safe_log_extra(error_type=type(exc).__name__),
+                )
+                raise OidcProviderUnavailableError("OIDC identity provider is unavailable.") from exc
+
+            if not isinstance(doc, dict):
+                raise OidcAuthenticationError("Malformed OIDC discovery document.")
 
             discovered_issuer = str(doc.get("issuer") or "").rstrip("/")
             if discovered_issuer != self._settings.oidc_issuer:
@@ -255,18 +423,25 @@ class StandardOidcProviderAdapter:
             auth_ep = self._validate_provider_url(
                 str(doc.get("authorization_endpoint") or ""),
                 field_name="authorization_endpoint",
+                require_issuer_origin=True,
             )
             token_ep = self._validate_provider_url(
                 str(doc.get("token_endpoint") or ""),
                 field_name="token_endpoint",
+                require_issuer_origin=True,
             )
             jwks_uri = self._validate_provider_url(
                 str(doc.get("jwks_uri") or ""),
                 field_name="jwks_uri",
+                require_issuer_origin=True,
             )
             end_session_raw = doc.get("end_session_endpoint")
             end_session = (
-                self._validate_provider_url(str(end_session_raw), field_name="end_session_endpoint")
+                self._validate_provider_url(
+                    str(end_session_raw),
+                    field_name="end_session_endpoint",
+                    require_issuer_origin=True,
+                )
                 if end_session_raw
                 else None
             )
@@ -283,14 +458,26 @@ class StandardOidcProviderAdapter:
 
     def _fetch_jwks(self) -> dict[str, Any]:
         meta = self.get_metadata()
+        self._validate_provider_url(
+            meta.jwks_uri, field_name="jwks_uri", require_issuer_origin=True
+        )
         try:
             with self._new_client() as client:
                 resp = client.get(meta.jwks_uri)
-                resp.raise_for_status()
-                doc = resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except httpx.HTTPError as exc:
             logger.warning(
                 "OIDC JWKS fetch failed.",
+                extra=build_safe_log_extra(error_type=type(exc).__name__),
+            )
+            raise OidcProviderUnavailableError("Unable to reach OIDC JWKS endpoint.") from exc
+        if 300 <= resp.status_code < 400:
+            raise OidcAuthenticationError("OIDC JWKS redirects are prohibited.")
+        try:
+            resp.raise_for_status()
+            doc = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(
+                "OIDC JWKS response invalid.",
                 extra=build_safe_log_extra(error_type=type(exc).__name__),
             )
             raise OidcProviderUnavailableError("Unable to reach OIDC JWKS endpoint.") from exc
@@ -316,6 +503,9 @@ class StandardOidcProviderAdapter:
 
     def exchange_authorization_code(self, *, code: str, code_verifier: str) -> dict[str, Any]:
         meta = self.get_metadata()
+        self._validate_provider_url(
+            meta.token_endpoint, field_name="token_endpoint", require_issuer_origin=True
+        )
         form_data: dict[str, str] = {
             "grant_type": "authorization_code",
             "code": code,
@@ -340,6 +530,8 @@ class StandardOidcProviderAdapter:
             )
             raise OidcProviderUnavailableError("OIDC token endpoint unreachable.") from exc
 
+        if 300 <= resp.status_code < 400:
+            raise OidcAuthenticationError("OIDC token endpoint redirects are prohibited.")
         if resp.status_code >= 500:
             raise OidcProviderUnavailableError("OIDC token endpoint returned upstream error.")
         if resp.status_code != 200:
@@ -478,25 +670,30 @@ class StandardOidcProviderAdapter:
             if (now_ts - auth_time_ts) > self._settings.oidc_max_auth_age_seconds:
                 raise OidcAuthenticationError("Authentication is older than permitted max_auth_age.")
 
-            # Check ACR and/or AMR second-factor verification
+            # Check ACR and AMR second-factor verification
             allowed_acr = set(self._settings.oidc_allowed_acr)
             allowed_amr = set(self._settings.oidc_allowed_amr)
 
-            # Explicit safeguard: password-only amr MUST never pass MFA even if claimed alongside weak state
             amr_set = set(amr_tuple)
-            has_second_factor_amr = bool(amr_set & allowed_amr)
-            if amr_tuple and amr_set <= {"pwd"}:
+            if not amr_set:
+                raise OidcAuthenticationError(
+                    "MFA policy requires non-empty amr claim proving second-factor authentication."
+                )
+            if amr_set <= {"pwd", "password"}:
                 raise OidcAuthenticationError("Password-only authentication does not satisfy MFA.")
 
-            acr_ok = bool(acr_value and acr_value in allowed_acr) if allowed_acr else False
-            amr_ok = has_second_factor_amr if allowed_amr else False
+            has_second_factor_amr = bool(amr_set & allowed_amr)
+            if not has_second_factor_amr:
+                raise OidcAuthenticationError(
+                    "Token amr lacks an authorized MFA second-factor method."
+                )
 
-            if self._settings.oidc_require_both_acr_and_amr:
-                if not (acr_ok and amr_ok):
-                    raise OidcAuthenticationError("Token lacks both required MFA acr and amr evidence.")
-            else:
-                if not (acr_ok or amr_ok):
-                    raise OidcAuthenticationError("Token lacks verifiable MFA acr or amr evidence.")
+            acr_ok = bool(acr_value and acr_value in allowed_acr) if allowed_acr else False
+            if self._settings.oidc_require_both_acr_and_amr or allowed_acr:
+                if not acr_ok:
+                    raise OidcAuthenticationError(
+                        "Token lacks required MFA acr assurance level."
+                    )
         else:
             auth_time_ts = int(auth_time_raw) if isinstance(auth_time_raw, (int, float)) else fallback_iat
 

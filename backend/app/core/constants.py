@@ -1,5 +1,7 @@
 """Domain constants and constrained taxonomies for JYXIA institutional backend."""
 
+from __future__ import annotations
+
 from enum import StrEnum
 
 APP_NAME = "JYXIA Institutional Foundation"
@@ -25,9 +27,19 @@ class OrganizationRole(StrEnum):
     ORG_ADMIN = "org_admin"
     # Kept as 'clinical_reviewer' in schema/enum for backward compatibility; strictly administrative document reviewer.
     CLINICAL_REVIEWER = "clinical_reviewer"
+    DOCUMENT_REVIEWER = "clinical_reviewer"
+    ADMINISTRATIVE_REVIEWER = "clinical_reviewer"
     ADMIN_OPERATOR = "admin_operator"
     AUDITOR_READONLY = "auditor_readonly"
     READ_ONLY = "read_only"
+
+    @classmethod
+    def _missing_(cls, value: object) -> OrganizationRole | None:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"document_reviewer", "administrative_reviewer"}:
+                return cls.CLINICAL_REVIEWER
+        return None
 
 
 class MembershipStatus(StrEnum):
@@ -38,6 +50,7 @@ class MembershipStatus(StrEnum):
 
 class ExternalIdentityStatus(StrEnum):
     ACTIVE = "active"
+    SUSPENDED = "suspended"
     REVOKED = "revoked"
 
 

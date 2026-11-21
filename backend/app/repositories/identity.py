@@ -21,7 +21,7 @@ from app.core.constants import (
     SecurityAuditOutcome,
 )
 from app.db.base import new_uuid, utc_now
-from app.db.session import apply_pg_rls_context
+from app.db.session import apply_pg_identity_context, apply_pg_rls_context
 from app.models.entities import (
     SECURITY_AUDIT_SCHEMA_VERSION,
     AuthSession,
@@ -111,10 +111,18 @@ class IdentityAndSessionRepository:
         email_at_binding: str | None = None,
         status: str = ExternalIdentityStatus.ACTIVE.value,
     ) -> ExternalIdentity:
+        cleaned_issuer = issuer.strip()
+        cleaned_subject = subject.strip()
+        apply_pg_rls_context(session, organization_id=None, user_id=user_id)
+        apply_pg_identity_context(
+            session,
+            oidc_issuer=cleaned_issuer,
+            oidc_subject=cleaned_subject,
+        )
         identity = ExternalIdentity(
             user_id=user_id,
-            issuer=issuer.strip(),
-            subject=subject.strip(),
+            issuer=cleaned_issuer,
+            subject=cleaned_subject,
             email_at_binding=email_at_binding.strip().lower() if email_at_binding else None,
             status=status,
         )
@@ -127,6 +135,7 @@ class IdentityAndSessionRepository:
         session: Session, *, issuer: str, subject: str
     ) -> tuple[ExternalIdentity, User] | None:
         """Resolve institutional user STRICTLY by (issuer, subject), never by email."""
+        apply_pg_identity_context(session, oidc_issuer=issuer, oidc_subject=subject)
         row = session.execute(
             select(ExternalIdentity, User)
             .join(User, User.id == ExternalIdentity.user_id)
@@ -137,6 +146,7 @@ class IdentityAndSessionRepository:
         ).first()
         if row is None:
             return None
+        apply_pg_rls_context(session, organization_id=None, user_id=row[1].id)
         return row[0], row[1]
 
     @staticmethod
@@ -161,6 +171,7 @@ class IdentityAndSessionRepository:
         next_path: str | None,
         expires_at: datetime,
     ) -> OidcAuthState:
+        apply_pg_identity_context(session, oidc_state_hash=state_hash)
         row = OidcAuthState(
             state_hash=state_hash,
             nonce_hash=nonce_hash,
@@ -179,6 +190,7 @@ class IdentityAndSessionRepository:
         session: Session, *, state_hash: str, now: datetime
     ) -> OidcAuthState | None:
         """Atomically consume a non-expired, unconsumed OIDC state entry once."""
+        apply_pg_identity_context(session, oidc_state_hash=state_hash)
         result = session.execute(
             update(OidcAuthState)
             .where(
@@ -212,6 +224,8 @@ class IdentityAndSessionRepository:
         absolute_expires_at: datetime,
         now: datetime,
     ) -> AuthSession:
+        apply_pg_rls_context(session, organization_id=active_organization_id, user_id=user_id)
+        apply_pg_identity_context(session, session_token_hash=session_token_hash)
         row = AuthSession(
             user_id=user_id,
             external_identity_id=external_identity_id,
@@ -236,6 +250,7 @@ class IdentityAndSessionRepository:
     def get_session_with_identity(
         session: Session, *, session_token_hash: str
     ) -> tuple[AuthSession, User, ExternalIdentity] | None:
+        apply_pg_identity_context(session, session_token_hash=session_token_hash)
         row = session.execute(
             select(AuthSession, User, ExternalIdentity)
             .join(User, User.id == AuthSession.user_id)
@@ -244,6 +259,11 @@ class IdentityAndSessionRepository:
         ).first()
         if row is None:
             return None
+        apply_pg_rls_context(
+            session,
+            organization_id=row[0].active_organization_id,
+            user_id=row[1].id,
+        )
         return row[0], row[1], row[2]
 
     @staticmethod
@@ -280,6 +300,7 @@ class IdentityAndSessionRepository:
     def revoke_all_user_sessions(
         session: Session, *, user_id: str, now: datetime, reason: str
     ) -> int:
+        apply_pg_rls_context(session, organization_id=None, user_id=user_id)
         result = session.execute(
             update(AuthSession)
             .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
@@ -310,7 +331,7 @@ class IdentityAndSessionRepository:
         session: Session, *, user_id: str, organization_id: str
     ) -> tuple[OrganizationMembership, Organization] | None:
         """Resolve an active membership in an active organization under tenant RLS."""
-        apply_pg_rls_context(session, organization_id=organization_id, user_id=None)
+        apply_pg_rls_context(session, organization_id=organization_id, user_id=user_id)
         row = session.execute(
             select(OrganizationMembership, Organization)
             .join(Organization, Organization.id == OrganizationMembership.organization_id)
@@ -322,6 +343,7 @@ class IdentityAndSessionRepository:
             )
         ).first()
         if row is None:
+            apply_pg_rls_context(session, organization_id=None, user_id=user_id)
             return None
         return row[0], row[1]
 
@@ -356,6 +378,11 @@ class SecurityAuditRepository:
         is_pg = bind is not None and bind.dialect.name == "postgresql"
 
         if is_pg:
+            apply_pg_rls_context(
+                session,
+                organization_id=organization_id,
+                user_id=user_id,
+            )
             session.execute(text("SELECT pg_advisory_xact_lock(9021042)"))
             head_row = session.execute(
                 text("SELECT last_sequence, last_event_hash FROM public.jyxia_get_security_audit_head()")

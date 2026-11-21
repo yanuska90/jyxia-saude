@@ -141,5 +141,5 @@ class UnimplementedOcrAdapter:
 
     def extract_ocr(self, content: bytes, *, mime_type: str) -> ExtractionBatchResultContract:
         raise NotImplementedError(
-            "OCR ingestion is not implemented in JYXIA 0.1.0; unreadable documents must abstain/quarantine."
+            "OCR ingestion is not implemented in JYXIA 0.2.0; unreadable documents must abstain/quarantine."
         )

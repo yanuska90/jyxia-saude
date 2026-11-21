@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import Settings
+from app.core.config import Settings, load_settings
 from app.core.constants import (
     ExternalIdentityStatus,
     OrganizationRole,
@@ -69,11 +69,55 @@ class AuthorizedMembershipContext:
     organization: Organization
 
 
-def _origin_of(url: str) -> str | None:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+@dataclass(frozen=True, slots=True)
+class OrganizationSelectionResult:
+    organization: Organization
+    role: OrganizationRole
+    permissions: list[str]
+    session_token: str
+    csrf_token: str
+    session_id: str
+
+
+def _extract_strict_origin(
+    raw_url: str | None,
+    *,
+    allow_path_and_query: bool = False,
+) -> tuple[str, str, int] | None:
+    """Parse and normalize a strict (scheme, hostname, port) origin without userinfo or wildcards."""
+    if raw_url is None:
         return None
-    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+    cleaned = raw_url.strip()
+    if not cleaned or cleaned.lower() == "null" or "*" in cleaned:
+        return None
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        return None
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return None
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        return None
+    if parsed.fragment:
+        return None
+    if not allow_path_and_query:
+        if parsed.path not in {"", "/"} or parsed.query:
+            return None
+
+    hostname = (parsed.hostname or "").strip().lower().strip("[]")
+    if not hostname or ".." in hostname:
+        return None
+    try:
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return None
+    if port <= 0 or port > 65535:
+        return None
+    return scheme, hostname, port
 
 
 def sanitize_next_path(next_path: str | None) -> str | None:
@@ -107,18 +151,25 @@ def verify_csrf_and_origin(
     correlation_id: str | None = None,
 ) -> None:
     """Enforce trusted Origin/Referer and server-bound double-submit CSRF verification."""
-    allowed_origins: set[str] = set()
-    app_origin = _origin_of(settings.app_base_url)
+    allowed_origins: set[tuple[str, str, int]] = set()
+    app_origin = _extract_strict_origin(settings.app_base_url, allow_path_and_query=False)
     if app_origin is not None:
         allowed_origins.add(app_origin)
     for cors_origin in settings.cors_allowed_origins:
-        parsed_cors = _origin_of(cors_origin)
+        parsed_cors = _extract_strict_origin(cors_origin, allow_path_and_query=False)
         if parsed_cors is not None:
             allowed_origins.add(parsed_cors)
 
-    candidate_origin = _origin_of(origin_header) if origin_header else None
-    if candidate_origin is None and referer_header:
-        candidate_origin = _origin_of(referer_header)
+    # When Origin header is present, validate it directly and NEVER fall back to Referer.
+    if origin_header is not None:
+        candidate_origin = _extract_strict_origin(origin_header, allow_path_and_query=False)
+        reason_code = "untrusted_or_invalid_origin"
+    elif referer_header is not None:
+        candidate_origin = _extract_strict_origin(referer_header, allow_path_and_query=True)
+        reason_code = "untrusted_or_invalid_referer"
+    else:
+        candidate_origin = None
+        reason_code = "missing_origin_and_referer"
 
     if candidate_origin is None or candidate_origin not in allowed_origins:
         if session_factory is not None:
@@ -126,8 +177,8 @@ def verify_csrf_and_origin(
                 session_factory,
                 event_type="CSRF_ORIGIN_DENIED",
                 outcome=SecurityAuditOutcome.DENIED,
-                reason_code="untrusted_or_missing_origin",
-                payload_json={"had_origin": bool(origin_header), "had_referer": bool(referer_header)},
+                reason_code=reason_code,
+                payload_json={"had_origin": origin_header is not None, "had_referer": referer_header is not None},
                 user_id=principal.user_id,
                 organization_id=principal.selected_organization_id,
                 session_id=principal.session_id,
@@ -670,9 +721,11 @@ def select_active_organization(
     *,
     principal: AuthenticatedSessionPrincipal,
     organization_id: str,
+    settings: Settings | None = None,
     correlation_id: str | None = None,
-) -> tuple[Organization, OrganizationRole, list[str]]:
-    """Switch active session organization strictly upon verified active DB membership."""
+) -> OrganizationSelectionResult:
+    """Switch active session organization and rotate session/CSRF tokens upon verified DB membership."""
+    resolved_settings = settings if settings is not None else load_settings(strict_database=False)
     now = utc_now().astimezone(timezone.utc)
     found = IdentityAndSessionRepository.get_active_membership_for_org(
         session, user_id=principal.user_id, organization_id=organization_id
@@ -695,18 +748,67 @@ def select_active_organization(
 
     membership, org = found
     role = OrganizationRole(membership.role)
-    IdentityAndSessionRepository.set_session_active_organization(
-        session, session_id=principal.session_id, organization_id=org.id
+
+    # Invalidate previous session and rotate both session and CSRF tokens for the new tenant context
+    IdentityAndSessionRepository.revoke_session(
+        session,
+        session_id=principal.session_id,
+        now=now,
+        reason="rotated_on_organization_select",
     )
+
+    new_raw_session_token = generate_opaque_token(32)
+    new_raw_csrf_token = generate_opaque_token(32)
+    new_session_token_hash = hmac_token_digest(
+        new_raw_session_token,
+        secret=resolved_settings.session_secret,
+        context="session_token",
+    )
+    new_csrf_token_hash = hmac_token_digest(
+        new_raw_csrf_token,
+        secret=resolved_settings.csrf_secret,
+        context="csrf_token",
+    )
+    abs_exp = (
+        _as_utc(principal.absolute_expires_at)
+        if principal.absolute_expires_at is not None
+        else (now + timedelta(seconds=resolved_settings.session_absolute_timeout_seconds))
+    )
+    new_idle = min(
+        abs_exp,
+        now + timedelta(seconds=resolved_settings.session_idle_timeout_seconds),
+    )
+
+    rotated_session = IdentityAndSessionRepository.create_auth_session(
+        session,
+        user_id=principal.user_id,
+        external_identity_id=principal.external_identity_id,
+        active_organization_id=org.id,
+        session_token_hash=new_session_token_hash,
+        csrf_token_hash=new_csrf_token_hash,
+        auth_method="oidc_pkce_mfa",
+        acr=principal.acr or "urn:jyxia:loa:mfa",
+        amr_json=list(principal.amr),
+        mfa_verified_at=_as_utc(principal.mfa_verified_at),
+        oidc_auth_time=_as_utc(principal.auth_time),
+        idle_expires_at=new_idle,
+        absolute_expires_at=abs_exp,
+        now=now,
+    )
+
     SecurityAuditRepository.append_event(
         session,
         event_type="ORG_CONTEXT_SELECTED",
         outcome=SecurityAuditOutcome.SUCCESS,
-        reason_code="active_membership_verified",
-        payload_json={"role": role.value},
+        reason_code="active_membership_verified_session_rotated",
+        payload_json={
+            "role": role.value,
+            "previous_session_id": principal.session_id,
+            "rotated": True,
+        },
         user_id=principal.user_id,
         organization_id=org.id,
-        session_id=principal.session_id,
+        session_id=rotated_session.id,
         correlation_id=correlation_id,
         created_at=now,
     )
@@ -719,13 +821,24 @@ def select_active_organization(
         ),
         event_type="ORGANIZATION_CONTEXT_SELECTED",
         target_entity_type="auth_session",
-        target_entity_id=principal.session_id,
-        payload_json={"role": role.value},
+        target_entity_id=rotated_session.id,
+        payload_json={
+            "role": role.value,
+            "previous_session_id": principal.session_id,
+            "rotated": True,
+        },
         created_at=now,
     )
     session.commit()
     perms = sorted(perm.value for perm in permissions_for_role(role))
-    return org, role, perms
+    return OrganizationSelectionResult(
+        organization=org,
+        role=role,
+        permissions=perms,
+        session_token=new_raw_session_token,
+        csrf_token=new_raw_csrf_token,
+        session_id=rotated_session.id,
+    )
 
 
 def resolve_authorized_tenant_principal(

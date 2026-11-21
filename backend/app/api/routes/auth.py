@@ -190,24 +190,45 @@ def auth_select_organization(
     body: SelectOrganizationRequest,
     response: Response,
     session: Annotated[Session, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     principal: Annotated[AuthenticatedSessionPrincipal, Depends(require_csrf_protection)],
     correlation_id: Annotated[str, Depends(get_correlation_id)],
 ) -> SelectOrganizationResponse:
-    """Switch session's active organization strictly when backed by an active DB membership."""
+    """Switch session's active organization and rotate session/CSRF cookies upon verified DB membership."""
     for key, val in _NO_STORE_HEADERS.items():
         response.headers[key] = val
-    org, role, perms = select_active_organization(
+    selection = select_active_organization(
         session,
         principal=principal,
         organization_id=body.organization_id,
+        settings=settings,
         correlation_id=correlation_id,
     )
+    secure = _effective_cookie_secure(settings)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=selection.session_token,
+        max_age=settings.session_absolute_timeout_seconds,
+        path="/",
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=selection.csrf_token,
+        max_age=settings.session_absolute_timeout_seconds,
+        path="/",
+        httponly=False,
+        secure=secure,
+        samesite="lax",
+    )
     return SelectOrganizationResponse(
-        active_organization_id=org.id,
-        organization_slug=org.slug,
-        organization_name=org.name,
-        role=role,
-        permissions=perms,
+        active_organization_id=selection.organization.id,
+        organization_slug=selection.organization.slug,
+        organization_name=selection.organization.name,
+        role=selection.role,
+        permissions=selection.permissions,
     )
 
 

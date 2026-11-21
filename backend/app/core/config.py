@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from collections.abc import Mapping
 from typing import Literal
 from urllib.parse import urlparse
@@ -11,12 +13,22 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app.core.constants import APP_NAME, APP_VERSION, DEFAULT_MAX_DOCUMENT_BYTES
 
+_DEFAULT_DEV_SESSION_SECRET = "jyxia-dev-only-ephemeral-session-secret-not-for-production"
+_DEFAULT_DEV_CSRF_SECRET = "jyxia-dev-only-ephemeral-csrf-secret-not-for-production"
+
 _WEAK_SECRET_FRAGMENTS: tuple[str, ...] = (
     "changeme",
     "change_me",
     "synthetic_local_only",
+    "synthetic_dev",
+    "synthetic_app",
+    "synthetic_kc",
     "placeholder",
     "dev_only",
+    "not_for_production",
+    "ephemeral_session_secret",
+    "ephemeral_csrf_secret",
+    "default_secret",
     "example",
 )
 
@@ -32,6 +44,30 @@ _WEAK_PASSWORDS: frozenset[str] = frozenset(
         "123456",
         "test",
         "secret",
+        _DEFAULT_DEV_SESSION_SECRET,
+        _DEFAULT_DEV_CSRF_SECRET,
+    }
+)
+
+_FORBIDDEN_RUNTIME_DB_USERS: frozenset[str] = frozenset(
+    {
+        "postgres",
+        "jyxia_migrator",
+        "migration_owner",
+        "root",
+        "admin",
+        "superuser",
+    }
+)
+
+_WEAK_FIRST_FACTOR_AMR: frozenset[str] = frozenset(
+    {
+        "pwd",
+        "password",
+        "email",
+        "sms",
+        "kba",
+        "none",
     }
 )
 
@@ -73,13 +109,55 @@ def _parse_csv(raw: str | None, *, lowercase: bool = False) -> tuple[str, ...]:
     return tuple(items)
 
 
+def _normalize_secret_for_comparison(value: str) -> tuple[str, str, str]:
+    lowered = value.strip().lower()
+    snake = re.sub(r"[\s\-_.]+", "_", lowered)
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    return lowered, snake, compact
+
+
 def _is_weak_secret(value: str | None, *, min_len: int = 32) -> bool:
-    if not value or len(value) < min_len:
+    if not value:
         return True
-    lowered = value.lower()
-    if lowered in _WEAK_PASSWORDS:
+    cleaned = value.strip()
+    if len(cleaned) < min_len:
         return True
-    return any(frag in lowered for frag in _WEAK_SECRET_FRAGMENTS)
+    lowered, snake, compact = _normalize_secret_for_comparison(cleaned)
+    if lowered in _WEAK_PASSWORDS or snake in _WEAK_PASSWORDS:
+        return True
+    for frag in _WEAK_SECRET_FRAGMENTS:
+        frag_compact = re.sub(r"[^a-z0-9]+", "", frag)
+        if frag in lowered or frag in snake or (frag_compact and frag_compact in compact):
+            return True
+    return False
+
+
+def _is_non_global_or_loopback_host(hostname: str | None) -> bool:
+    if not hostname:
+        return True
+    lowered = hostname.strip().lower().strip("[]")
+    if lowered in _LOOPBACK_HOSTS or lowered.endswith(".localhost"):
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(lowered)
+    except ValueError:
+        return False
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        ip_obj = ip_obj.ipv4_mapped
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+        or ip_obj.is_reserved
+        or not ip_obj.is_global
+    )
+
+
+def _has_url_userinfo(raw_url: str) -> bool:
+    parsed = urlparse(raw_url)
+    return bool(parsed.username is not None or parsed.password is not None or "@" in parsed.netloc)
 
 
 def mask_database_url(database_url: str | None) -> str:
@@ -131,7 +209,7 @@ class Settings(BaseModel):
     oidc_mfa_required: bool = True
     oidc_allowed_acr: tuple[str, ...] = ("urn:jyxia:loa:mfa", "2", "aal2")
     oidc_allowed_amr: tuple[str, ...] = ("otp", "totp", "webauthn", "hwk", "mfa")
-    oidc_require_both_acr_and_amr: bool = False
+    oidc_require_both_acr_and_amr: bool = True
     oidc_max_auth_age_seconds: int = Field(default=3600, ge=60, le=86400)
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=120)
     oidc_http_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
@@ -140,8 +218,8 @@ class Settings(BaseModel):
     oidc_allow_http_dev: bool = False
 
     # Session & CSRF
-    session_secret: str = "jyxia-dev-only-ephemeral-session-secret-not-for-production"
-    csrf_secret: str = "jyxia-dev-only-ephemeral-csrf-secret-not-for-production"
+    session_secret: str = _DEFAULT_DEV_SESSION_SECRET
+    csrf_secret: str = _DEFAULT_DEV_CSRF_SECRET
     session_cookie_secure: bool = True
     session_idle_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
     session_absolute_timeout_seconds: int = Field(default=28800, ge=300, le=604800)
@@ -201,58 +279,126 @@ class Settings(BaseModel):
                 raise ValueError(
                     "Enabling OIDC requires JYXIA_OIDC_ISSUER, CLIENT_ID and REDIRECT_URI."
                 )
+            if _has_url_userinfo(self.oidc_issuer) or _has_url_userinfo(self.oidc_redirect_uri):
+                raise ValueError("OIDC issuer and redirect_uri must not contain URL userinfo.")
             parsed_issuer = urlparse(self.oidc_issuer)
             parsed_redirect = urlparse(self.oidc_redirect_uri)
             if parsed_issuer.scheme == "http":
-                if not (self.oidc_allow_http_dev and parsed_issuer.hostname in _LOOPBACK_HOSTS):
+                if not (
+                    self.oidc_allow_http_dev
+                    and self.env in {"development", "test"}
+                    and parsed_issuer.hostname in _LOOPBACK_HOSTS
+                ):
                     raise ValueError(
                         "HTTP OIDC issuer is only permitted in dev/test with loopback/keycloak host."
                     )
             elif parsed_issuer.scheme != "https" or not parsed_issuer.netloc:
                 raise ValueError("JYXIA_OIDC_ISSUER must be a valid HTTPS URL.")
             if parsed_redirect.scheme == "http":
-                if not (self.oidc_allow_http_dev and parsed_redirect.hostname in _LOOPBACK_HOSTS):
+                if not (
+                    self.oidc_allow_http_dev
+                    and self.env in {"development", "test"}
+                    and parsed_redirect.hostname in _LOOPBACK_HOSTS
+                ):
                     raise ValueError("HTTP redirect_uri is only permitted in dev/test on loopback.")
             elif parsed_redirect.scheme != "https" or not parsed_redirect.netloc:
                 raise ValueError("JYXIA_OIDC_REDIRECT_URI must be a valid HTTPS URL.")
 
-        if self.env == "production":
+        if self.oidc_mfa_required:
+            if not self.oidc_allowed_amr:
+                raise ValueError("Mandatory MFA requires at least one allowed second-factor AMR.")
+            normalized_amr = {item.strip().lower() for item in self.oidc_allowed_amr if item.strip()}
+            if not normalized_amr or (normalized_amr & _WEAK_FIRST_FACTOR_AMR):
+                raise ValueError(
+                    "JYXIA_OIDC_ALLOWED_AMR cannot include first-factor or weak methods (pwd, email, sms)."
+                )
+            if not self.oidc_allowed_acr:
+                raise ValueError("Mandatory MFA requires at least one allowed ACR assurance value.")
+
+        if self.env in {"production", "staging"}:
+            env_label = self.env.capitalize()
             if self.debug or self.log_level == "DEBUG":
-                raise ValueError("Debug mode and DEBUG logging are prohibited in production.")
+                raise ValueError(f"Debug mode and DEBUG logging are prohibited in {self.env}.")
             if not self.database_url:
-                raise ValueError("Production environment requires JYXIA_DATABASE_URL.")
+                raise ValueError(f"{env_label} environment requires JYXIA_DATABASE_URL.")
             if self.database_url.startswith("sqlite"):
-                raise ValueError("SQLite is prohibited when JYXIA_ENV=production.")
+                raise ValueError(f"SQLite is prohibited when JYXIA_ENV={self.env}.")
             parsed_db = urlparse(self.database_url)
+            db_user = (parsed_db.username or "").strip().lower()
             pw = parsed_db.password or ""
+            if not db_user or db_user in _FORBIDDEN_RUNTIME_DB_USERS:
+                raise ValueError(
+                    f"{env_label} runtime database URL cannot use privileged/default role '{db_user}'."
+                )
             if _is_weak_secret(pw, min_len=12):
-                raise ValueError("Production database credentials must be strong non-placeholder secrets.")
+                raise ValueError(
+                    f"{env_label} database credentials must be strong non-placeholder secrets."
+                )
             if self.migration_database_url:
                 parsed_mig = urlparse(self.migration_database_url)
                 if parsed_mig.username and parsed_mig.username == parsed_db.username:
                     raise ValueError(
-                        "Production runtime database role must differ from migration database role."
+                        f"{env_label} runtime database role must differ from migration database role."
                     )
             if self.allow_local_synthetic_storage:
                 raise ValueError(
-                    "Local synthetic disk storage must be disabled when JYXIA_ENV=production."
+                    f"Local synthetic disk storage must be disabled when JYXIA_ENV={self.env}."
                 )
-            if not self.oidc_enabled or not self.oidc_mfa_required:
-                raise ValueError("Production requires active OIDC and mandatory MFA enforcement.")
+            if (
+                not self.oidc_enabled
+                or not self.oidc_mfa_required
+                or not self.oidc_require_both_acr_and_amr
+            ):
+                raise ValueError(
+                    f"{env_label} requires active OIDC and mandatory MFA with both ACR and AMR enforcement."
+                )
+            assert self.oidc_issuer is not None and self.oidc_redirect_uri is not None
+            if _is_non_global_or_loopback_host(urlparse(self.oidc_issuer).hostname):
+                raise ValueError(
+                    f"{env_label} JYXIA_OIDC_ISSUER cannot target loopback, private, or non-global hosts."
+                )
+            if _is_non_global_or_loopback_host(urlparse(self.oidc_redirect_uri).hostname):
+                raise ValueError(
+                    f"{env_label} JYXIA_OIDC_REDIRECT_URI cannot target loopback or private hosts."
+                )
             if _is_weak_secret(self.oidc_client_secret, min_len=16):
-                raise ValueError("Production requires a strong non-placeholder OIDC client secret.")
+                raise ValueError(
+                    f"{env_label} requires a strong non-placeholder OIDC client secret."
+                )
             if _is_weak_secret(self.session_secret, min_len=32) or _is_weak_secret(
                 self.csrf_secret, min_len=32
             ):
-                raise ValueError("Production requires strong non-placeholder session/CSRF secrets.")
+                raise ValueError(
+                    f"{env_label} requires strong non-placeholder session/CSRF secrets."
+                )
+            if self.session_secret.strip() == self.csrf_secret.strip():
+                raise ValueError(
+                    f"{env_label} requires distinct JYXIA_SESSION_SECRET and JYXIA_CSRF_SECRET values."
+                )
             if not self.session_cookie_secure:
-                raise ValueError("JYXIA_SESSION_COOKIE_SECURE must be true in production.")
-            if urlparse(self.app_base_url).scheme != "https":
-                raise ValueError("JYXIA_APP_BASE_URL must use HTTPS in production.")
-            if "*" in self.cors_allowed_origins or any(
-                urlparse(o).scheme != "https" for o in self.cors_allowed_origins
+                raise ValueError(f"JYXIA_SESSION_COOKIE_SECURE must be true in {self.env}.")
+            parsed_base = urlparse(self.app_base_url)
+            if (
+                parsed_base.scheme != "https"
+                or not parsed_base.hostname
+                or _has_url_userinfo(self.app_base_url)
+                or _is_non_global_or_loopback_host(parsed_base.hostname)
             ):
-                raise ValueError("Production CORS origins must be explicit HTTPS URLs (never '*').")
+                raise ValueError(
+                    f"JYXIA_APP_BASE_URL must use a public HTTPS origin without userinfo in {self.env}."
+                )
+            if (
+                "*" in self.cors_allowed_origins
+                or any(
+                    urlparse(o).scheme != "https"
+                    or _has_url_userinfo(o)
+                    or _is_non_global_or_loopback_host(urlparse(o).hostname)
+                    for o in self.cors_allowed_origins
+                )
+            ):
+                raise ValueError(
+                    f"{env_label} CORS origins must be explicit non-local HTTPS URLs (never '*')."
+                )
         return self
 
     def effective_oidc_audience(self) -> str:
@@ -338,7 +484,7 @@ def load_settings(
             or ("otp", "totp", "webauthn", "hwk", "mfa"),
             oidc_require_both_acr_and_amr=_parse_bool(
                 source.get("JYXIA_OIDC_REQUIRE_BOTH_ACR_AND_AMR"),
-                default=False,
+                default=True,
                 field_name="JYXIA_OIDC_REQUIRE_BOTH_ACR_AND_AMR",
             ),
             oidc_max_auth_age_seconds=_parse_int(
@@ -357,14 +503,21 @@ def load_settings(
                 field_name="JYXIA_OIDC_ALLOW_HTTP_DEV",
             ),
             session_secret=(
-                source.get("JYXIA_SESSION_SECRET")
-                or "jyxia-dev-only-ephemeral-session-secret-not-for-production"
-            ).strip(),
+                (source.get("JYXIA_SESSION_SECRET") or "").strip()
+                if env_name in {"production", "staging"}
+                else (
+                    source.get("JYXIA_SESSION_SECRET") or _DEFAULT_DEV_SESSION_SECRET
+                ).strip()
+            ),
             csrf_secret=(
-                source.get("JYXIA_CSRF_SECRET")
-                or source.get("CSRF_SECRET")
-                or "jyxia-dev-only-ephemeral-csrf-secret-not-for-production"
-            ).strip(),
+                (source.get("JYXIA_CSRF_SECRET") or source.get("CSRF_SECRET") or "").strip()
+                if env_name in {"production", "staging"}
+                else (
+                    source.get("JYXIA_CSRF_SECRET")
+                    or source.get("CSRF_SECRET")
+                    or _DEFAULT_DEV_CSRF_SECRET
+                ).strip()
+            ),
             session_cookie_secure=_parse_bool(
                 source.get("JYXIA_SESSION_COOKIE_SECURE") or source.get("SESSION_COOKIE_SECURE"),
                 default=default_secure_cookie,

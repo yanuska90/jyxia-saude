@@ -75,15 +75,53 @@ def apply_pg_rls_context(
     )
 
 
+def apply_pg_identity_context(
+    session: Session,
+    *,
+    session_token_hash: str | None = None,
+    oidc_state_hash: str | None = None,
+    oidc_issuer: str | None = None,
+    oidc_subject: str | None = None,
+) -> None:
+    """Bind transaction-local PostgreSQL session/identity lookup GUCs for RLS on auth tables."""
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    if session_token_hash is not None:
+        session.execute(
+            text("SELECT set_config('app.current_session_token_hash', :val, true)"),
+            {"val": session_token_hash},
+        )
+    if oidc_state_hash is not None:
+        session.execute(
+            text("SELECT set_config('app.current_oidc_state_hash', :val, true)"),
+            {"val": oidc_state_hash},
+        )
+    if oidc_issuer is not None:
+        session.execute(
+            text("SELECT set_config('app.current_oidc_issuer', :val, true)"),
+            {"val": oidc_issuer},
+        )
+    if oidc_subject is not None:
+        session.execute(
+            text("SELECT set_config('app.current_oidc_subject', :val, true)"),
+            {"val": oidc_subject},
+        )
+
+
 def clear_pg_rls_context(session: Session) -> None:
-    """Reset PostgreSQL transaction-local tenant and user RLS context to empty strings."""
+    """Reset PostgreSQL transaction-local tenant, user, and identity RLS context to empty strings."""
     bind = session.get_bind()
     if bind is None or bind.dialect.name != "postgresql":
         return
     session.execute(
         text(
             "SELECT set_config('app.current_organization_id', '', true), "
-            "set_config('app.current_user_id', '', true)"
+            "set_config('app.current_user_id', '', true), "
+            "set_config('app.current_session_token_hash', '', true), "
+            "set_config('app.current_oidc_state_hash', '', true), "
+            "set_config('app.current_oidc_issuer', '', true), "
+            "set_config('app.current_oidc_subject', '', true)"
         )
     )
 

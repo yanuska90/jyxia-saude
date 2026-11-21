@@ -49,6 +49,7 @@ def get_db_session(
         session.rollback()
         raise
     finally:
+        session.rollback()
         session.close()
 
 
