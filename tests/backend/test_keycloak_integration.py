@@ -451,7 +451,7 @@ def test_real_keycloak_oidc_pkce_totp_mfa_and_pg_runtime_e2e(migrated_engine, ap
         assert bff_client.get("/api/v1/me").status_code == 401
 
     # 2. Invalid TOTP code against live Keycloak 26.8.2 MUST be rejected by Keycloak OTP form!
-    kc_http_bad_otp, kc_jar_bad_otp = _new_loopback_keycloak_client()
+    kc_http_bad_otp, _kc_jar_bad_otp = _new_loopback_keycloak_client()
     with TestClient(app, base_url="http://127.0.0.1:8000") as bad_otp_bff, kc_http_bad_otp:
         login_res = bad_otp_bff.get("/api/v1/auth/login", follow_redirects=False)
         assert login_res.status_code == 302

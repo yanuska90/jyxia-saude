@@ -56,7 +56,7 @@ jobs:
           python3 tools/sync_backend_deps.py --check
           python3 -m venv /tmp/jyxia-ci-venv
           /tmp/jyxia-ci-venv/bin/pip install --no-cache-dir -r backend/requirements-dev.txt
-          /tmp/jyxia-ci-venv/bin/ruff check backend tests/backend tools
+          /tmp/jyxia-ci-venv/bin/ruff check --config backend/pyproject.toml backend tests/backend tools
           /tmp/jyxia-ci-venv/bin/pip-audit
       - name: Inicializar role restrita jyxia_app no PostgreSQL 16 e verificar migracoes Alembic
         env:
