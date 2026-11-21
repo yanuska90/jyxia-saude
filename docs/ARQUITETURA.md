@@ -1,8 +1,9 @@
-# Arquitetura JYXIA — Demonstração v3.2.0 e Fundação Institucional 0.1.0
+# Arquitetura JYXIA — Demonstração v3.2.0 e Fundação Institucional 0.2.0 (Etapa 3.2.1)
 
 Consulte também:
 - [`ESTRUTURA_DO_PROJETO.md`](ESTRUTURA_DO_PROJETO.md) — mapa definitivo de pastas do repositório e política para `legacy/v2/`.
-- [`ARQUITETURA_INSTITUCIONAL.md`](ARQUITETURA_INSTITUCIONAL.md) — detalhamento completo do `backend/` institucional (`0.1.0`).
+- [`ARQUITETURA_INSTITUCIONAL.md`](ARQUITETURA_INSTITUCIONAL.md) — detalhamento completo do `backend/` institucional (`0.2.0`).
+- [`IDENTIDADE_E_AUTORIZACAO.md`](IDENTIDADE_E_AUTORIZACAO.md) — autenticação OIDC PKCE `S256` + MFA obrigatório, sessões BFF, CSRF/Origin, RBAC em 5 papéis e PostgreSQL 16 RLS (`FORCE ROW LEVEL SECURITY`).
 
 ## 1. Modalidade A — Demonstração pública seletiva (`31` arquivos em `.github/workflows/pages.yml`)
 
@@ -28,8 +29,8 @@ Os arquivos [`frontend/lab/lab-local.html`](../frontend/lab/lab-local.html), [`f
 - **Benchmark (`tests/benchmark/`):** gerador determinístico e executor (`run_benchmark.mjs`) sobre `8` PDFs sintéticos em `development`, `regression` e `reserved_evaluation`. Excluído do Pages.
 - **Legado isolado (`legacy/v2/` + `tests/legacy/`):** artefatos `v2.x` (`demo-v2.html`, `app.py`, `integration.py` e suítes `18` JS + `11` Python) preservados apenas para regressão histórica, sem conexão com `frontend/public/` nem reutilização em `backend/`.
 
-## 4. Modalidade C — Fundação institucional (`backend/` `0.1.0`) e próximos passos
+## 4. Modalidade C — Fundação institucional (`backend/` `0.2.0`) e próximos passos
 
-Na Etapa 3.0 foi implementada a fundação inicial em [`backend/`](../backend/) (detalhes em [`ARQUITETURA_INSTITUCIONAL.md`](ARQUITETURA_INSTITUCIONAL.md)): servidor FastAPI com `/api/v1/health/live` e `/api/v1/health/ready`, `11` modelos relacionais multi-tenant com FKs compostas por organização, primeira migração Alembic pronta para PostgreSQL, trilha `AuditEvent` append-only em banco, armazenamento sintético controlado (`LocalControlledSyntheticStorage`) e contratos preparatórios de OIDC/MFA/RBAC e pipeline.
+Nas Etapas 3.0 a 3.2.1 foi consolidada a fundação institucional em [`backend/`](../backend/) (detalhes em [`ARQUITETURA_INSTITUCIONAL.md`](ARQUITETURA_INSTITUCIONAL.md) e [`IDENTIDADE_E_AUTORIZACAO.md`](IDENTIDADE_E_AUTORIZACAO.md)): servidor FastAPI com `/api/v1/health/*`, `/api/v1/auth/*`, `/api/v1/me*` e `/api/v1/organizations/{organization_id}/*`, autenticação BFF OpenID Connect (PKCE `S256` + JWKS + **MFA obrigatório exigindo simultaneamente `acr` e segundo fator em `amr`** + proteção anti-SSRF contra IPs privados e DNS rebinding), vinculação estrita `(issuer, subject)` (`ExternalIdentity`), sessões opacas com rotação de token e CSRF na troca de organização, matriz RBAC administrativa em 5 papéis (`OrganizationRole`, com aliases `document_reviewer`/`administrative_reviewer` para o papel técnico `clinical_reviewer`), `15` modelos relacionais multi-tenant, migrations `0001`–`0004`, PostgreSQL 16 com separação `migration_owner` vs. `jyxia_app`, **`FORCE ROW LEVEL SECURITY`** nas tabelas multi-tenant e de sessões/identidades, funções `SECURITY DEFINER` com validação de contexto/ator/vínculo ativo e `LocalControlledSyntheticStorage`.
 
-Permanecem **não implementados** e condicionados à descoberta em campo e pareceres regulatórios: autenticação OIDC/MFA ativa, rotas HTTP autenticadas de upload/revisão, OCR auditado para scans, armazenamento S3 cifrado e conectores hospitalares/FHIR ativos.
+Permanecem **não implementados** e reservados às próximas etapas: rotas HTTP institucionais completas de upload/processamento documental/revisão humana, interface web conectada ao BFF, OCR auditado para scans, armazenamento S3 cifrado com KMS, WORM externo, antivírus/CDR e conectores hospitalares/FHIR ativos.

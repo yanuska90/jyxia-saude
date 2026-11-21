@@ -18,4 +18,4 @@ Baixe [`frontend/public/assets/fixtures-jyxia.zip`](../frontend/public/assets/fi
 
 - **Catálogo público (`frontend/public/documental-manifest.json`):** `18` arquivos estritamente bloqueados por SHA-256 e tamanho (`<= 512 KB`) na Modalidade A.
 - **Benchmark sintético separado (`tests/benchmark/benchmark-manifest.json`):** `8` PDFs sintéticos em `development` (`1`), `regression` (`3`) e `reserved_evaluation` (`4`) usados localmente com a Modalidade B (`frontend/lab/lab-extractor.mjs`). **Não é publicado no GitHub Pages e não constitui holdout independente nem evidência com documentos reais.**
-- **Storage local controlado (`backend/` `0.1.0`):** aceita exclusivamente binários sintéticos (`%PDF-` ou PNG) gravados sob `JYXIA_STORAGE_ROOT=../JYXIA_LOCAL_WORK/synthetic_storage`, sempre fora do repositório Git.
+- **Storage local controlado (`backend/` `0.2.0`):** aceita exclusivamente binários sintéticos (`%PDF-` ou PNG) gravados sob `JYXIA_STORAGE_ROOT=../JYXIA_LOCAL_WORK/synthetic_storage`, sempre fora do repositório Git.

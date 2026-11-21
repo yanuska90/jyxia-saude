@@ -22,10 +22,11 @@
   - `PyJWT==2.15.1` (MIT — verificação RS256/ES256 de ID Tokens OIDC com JWKS)
   - `sqlalchemy==2.1.1` (MIT)
   - `uvicorn==0.54.0` (BSD-3-Clause)
-- **Dependências exclusivas de teste e auditoria ([`backend/requirements-dev.txt`](../backend/requirements-dev.txt) — fora da imagem Docker de produção):**
+- **Dependências exclusivas de teste, lint e auditoria ([`backend/requirements-dev.txt`](../backend/requirements-dev.txt) — fora da imagem Docker de produção):**
   - Inclui todas as dependências de runtime acima mais:
   - `pip-audit==2.10.1` (Apache-2.0)
   - `pytest==9.2.0` (MIT)
+  - `ruff==0.17.6` (MIT — linter estático executado localmente e em CI)
 
 ## 3. Provedor de identidade de desenvolvimento/CI e containers
 

@@ -5,30 +5,30 @@ Documento técnico atualizado na **Etapa 3.2** (`backend/` `0.2.0`), evoluindo a
 ## 1. Camadas e controles implementados (`backend/app/`)
 
 - **`core/` (`config.py`, `constants.py`, `logging.py`, `session_crypto.py`, `oidc.py`, `rbac.py`, `processing_contracts.py`):**
-  - **Configuração (`config.py`):** `Settings` fail-closed recusa em `JYXIA_ENV=production`: SQLite, armazenamento local sintético, `debug=True`, `JYXIA_LOG_LEVEL=DEBUG`, OIDC inativo, `oidc_allow_http_dev=true`, OIDC/CORS sem HTTPS ou com `*`, além de `session_secret`/`csrf_secret`/senhas fracas ou placeholders. Inclui `migration_database_url` separado do runtime;
+  - **Configuração (`config.py`):** `Settings` fail-closed recusa tanto em `JYXIA_ENV=production` quanto em `JYXIA_ENV=staging`: SQLite, armazenamento local sintético, `debug=True`, `JYXIA_LOG_LEVEL=DEBUG`, OIDC/MFA inativos, `oidc_require_both_acr_and_amr=false`, `oidc_allow_http_dev=true`, OIDC/CORS/base URL sem HTTPS ou apontando para loopback/IP privado ou com `*`/userinfo, roles de banco privilegiadas (`postgres`, `jyxia_migrator`), além de `session_secret`/`csrf_secret` ausentes, iguais entre si, fracos ou variantes hifenizadas/sublinhadas dos defaults;
   - **Criptografia de sessão e PKCE (`session_crypto.py`):** tokens opacos aleatórios, digests HMAC-SHA256 com chaves/contextos separados e cifra AES-256-GCM para `code_verifier` em repouso;
-  - **Adaptador OIDC padrão (`oidc.py`):** discovery com pinning de `issuer`, cache JWKS limitado com cooldown anti-DoS, verificação `RS256`/`ES256` via `PyJWT`, separação estrita de ID Token vs. Access Token (`at+jwt` / `token_use=access` recusados) e validação obrigatória de MFA (`acr`, `amr`, `auth_time`, bloqueando `["pwd"]` isolado);
-  - **RBAC centralizado (`rbac.py`):** matriz declarativa `ROLE_PERMISSIONS` para `org_admin`, `admin_operator`, `clinical_reviewer` (mantido para compatibilidade apenas na revisão de campos/evidências), `auditor_readonly` e `read_only`;
+  - **Adaptador OIDC padrão (`oidc.py`):** discovery com pinning de `issuer` e de origem dos endpoints, proteção anti-SSRF contra IPs privados/link-local/loopback e DNS rebinding, cache JWKS limitado com cooldown anti-DoS e rotação de chaves, verificação `RS256`/`ES256` via `PyJWT`, separação estrita de ID Token vs. Access Token (`at+jwt` / `token_use=access` recusados) e validação obrigatória simultânea de MFA (`acr` autorizado **e** segundo fator em `amr`, mais `auth_time`, bloqueando `["pwd"]`, `[]` ou métodos fracos como `["pwd", "email"]`);
+  - **RBAC centralizado (`rbac.py`):** matriz declarativa `ROLE_PERMISSIONS` para `org_admin`, `admin_operator`, `clinical_reviewer` (mantido apenas por compatibilidade de schema com aliases `document_reviewer` e `administrative_reviewer`, restrito à revisão administrativa de campos/evidências sem aprovação clínica), `auditor_readonly` e `read_only`;
   - **Logs e contratos (`logging.py`, `processing_contracts.py`):** sanitização recursiva estendida para cookies/tokens/verifiers PKCE/nonces e contratos de extração sem OCR/LLM.
 
 - **`db/` (`base.py`, `session.py`):**
-  - `apply_pg_rls_context()` vincula `app.current_organization_id` e `app.current_user_id` transacionalmente via `set_config(..., true)` para enforcement efetivo do RLS no PostgreSQL 16.
+  - `apply_pg_rls_context()` e `apply_pg_identity_context()` vinculam `app.current_organization_id`, `app.current_user_id`, `app.current_session_token_hash`, `app.current_oidc_state_hash`, `app.current_oidc_issuer` e `app.current_oidc_subject` transacionalmente via `set_config(..., true)` para enforcement efetivo do RLS no PostgreSQL 16 sem vazamento entre conexões do pool.
 
 - **`models/entities.py` (`15` modelos relacionais multi-tenant + identidade):**
   - Preserva integralmente os `11` modelos multi-tenant (`Organization`, `User`, `OrganizationMembership` incluindo `read_only` e status `suspended`/`revoked`, `DocumentCase`, `Document`, `DocumentVersion`, `ProcessingRun`, `ExtractedField`, `EvidenceReference`, `HumanReview`, `AuditEvent`);
   - Adiciona **`4` modelos de identidade e segurança:**
-    12. `ExternalIdentity` (`external_identities`) — vinculação única `(issuer, subject)` -> `user_id` sem matching por e-mail;
+    12. `ExternalIdentity` (`external_identities`) — vinculação única `(issuer, subject)` -> `user_id` sem matching por e-mail e com status alinhados (`active`, `suspended`, `revoked`);
     13. `OidcAuthState` (`oidc_auth_states`) — transação PKCE efêmera com `state_hash`, `nonce_hash`, `code_verifier_ciphertext` (AES-256-GCM) e consumo único atômico (`consumed_at`);
-    14. `AuthSession` (`auth_sessions`) — sessão BFF server-side com digests `session_token_hash` / `csrf_token_hash`, `acr`, `amr_json`, `mfa_verified_at`, timeouts de ociosidade/absoluto e `revoked_at` (sem tokens OIDC em claro);
+    14. `AuthSession` (`auth_sessions`) — sessão BFF server-side com digests `session_token_hash` / `csrf_token_hash`, `acr`, `amr_json`, `mfa_verified_at`, timeouts de ociosidade/absoluto, rotação de sessão/CSRF na troca de organização e `revoked_at` (sem tokens OIDC em claro);
     15. `SecurityAuditEvent` (`security_auth_events`) — trilha global append-only encadeada (`jyxia.sec_audit.v1`) para logins, recusas MFA, CSRF, cross-tenant e negações RBAC.
 
-## 2. Separação de privilégios no PostgreSQL 16, RLS e trilha append-only
+## 2. Separação de privilégios no PostgreSQL 16, FORCE RLS e trilha append-only
 
-- **Migration `20261120_0003` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
+- **Migrations `20261120_0003` e `20261121_0004` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
   - Separa `migration_owner` (dona do schema/DDL/funções `SECURITY DEFINER`) da role restrita de runtime `jyxia_app` (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION`, sem `DDL`, sem `DELETE`/`TRUNCATE` e sem `INSERT` direto nas tabelas de auditoria);
-  - Habilita **Row-Level Security (RLS)** nas tabelas organizacionais e de auditoria vinculadas a `app.current_organization_id` (e `app.current_user_id` em `organization_memberships`);
+  - Habilita **Row-Level Security com `FORCE ROW LEVEL SECURITY`** nas 9 tabelas organizacionais/auditoria (`organization_memberships`, `document_cases`, `documents`, `document_versions`, `processing_runs`, `extracted_fields`, `evidence_references`, `human_reviews`, `audit_events`) e nas 3 tabelas sensíveis de sessão/identidade (`auth_sessions`, `external_identities`, `oidc_auth_states`), além de RLS em `security_auth_events`;
   - Instala triggers **`BEFORE TRUNCATE`** em `audit_events` e triggers `BEFORE UPDATE / DELETE / TRUNCATE` em `security_auth_events`;
-  - Em PostgreSQL, `AuditEventRepository` e `SecurityAuditRepository` gravam via funções **`SECURITY DEFINER SET search_path = pg_catalog, public`** (`jyxia_append_audit_event`, `jyxia_append_security_event`, `jyxia_get_security_audit_head`).
+  - Em PostgreSQL, `AuditEventRepository` e `SecurityAuditRepository` gravam via funções **`SECURITY DEFINER SET search_path = pg_catalog, public`** (`jyxia_append_audit_event`, `jyxia_append_security_event`, `jyxia_get_security_audit_head`) que validam em SQL o contexto transacional (`app.current_organization_id`, `app.current_user_id`), o usuário ativo e a membership ativa na organização.
 
 ## 3. Endpoints HTTP (`backend/` `0.2.0`)
 
