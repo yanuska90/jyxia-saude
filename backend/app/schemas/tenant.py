@@ -44,6 +44,9 @@ class TenantContext(BaseModel):
 
     organization_id: str = Field(min_length=1, max_length=36)
     actor_user_id: str | None = Field(default=None, min_length=1, max_length=36)
+    session_token_hash: str | None = Field(
+        default=None, min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"
+    )
     source: Literal["internal_service", "authenticated_request", "test", "cli"] = (
         "internal_service"
     )

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
+
+from pydantic import GetJsonSchemaHandler
+from pydantic_core import CoreSchema
 
 APP_NAME = "JYXIA Institutional Foundation"
 APP_VERSION = "0.2.0"
@@ -25,10 +29,11 @@ class OrganizationStatus(StrEnum):
 
 class OrganizationRole(StrEnum):
     ORG_ADMIN = "org_admin"
-    # Kept as 'clinical_reviewer' in schema/enum for backward compatibility; strictly administrative document reviewer.
-    CLINICAL_REVIEWER = "clinical_reviewer"
-    DOCUMENT_REVIEWER = "clinical_reviewer"
-    ADMINISTRATIVE_REVIEWER = "clinical_reviewer"
+    # Canonical external and internal role identifier is 'document_reviewer' (strictly administrative).
+    # Legacy 'clinical_reviewer' and 'administrative_reviewer' resolve as aliases to DOCUMENT_REVIEWER.
+    DOCUMENT_REVIEWER = "document_reviewer"
+    CLINICAL_REVIEWER = "document_reviewer"
+    ADMINISTRATIVE_REVIEWER = "document_reviewer"
     ADMIN_OPERATOR = "admin_operator"
     AUDITOR_READONLY = "auditor_readonly"
     READ_ONLY = "read_only"
@@ -37,9 +42,17 @@ class OrganizationRole(StrEnum):
     def _missing_(cls, value: object) -> OrganizationRole | None:
         if isinstance(value, str):
             normalized = value.strip().lower()
-            if normalized in {"document_reviewer", "administrative_reviewer"}:
-                return cls.CLINICAL_REVIEWER
+            if normalized in {"clinical_reviewer", "administrative_reviewer", "document_reviewer"}:
+                return cls.DOCUMENT_REVIEWER
         return None
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> dict[str, Any]:
+        json_schema = handler(core_schema)
+        json_schema["enum"] = [member.value for member in cls]
+        return json_schema
 
 
 class MembershipStatus(StrEnum):

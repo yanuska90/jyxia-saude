@@ -38,7 +38,7 @@ from app.core.session_crypto import (
     hmac_token_digest,
 )
 from app.db.base import utc_now
-from app.db.session import apply_pg_rls_context
+from app.db.session import apply_pg_identity_context, apply_pg_rls_context
 from app.models.entities import Organization
 from app.repositories.identity import (
     IdentityAndSessionRepository,
@@ -182,6 +182,7 @@ def verify_csrf_and_origin(
                 user_id=principal.user_id,
                 organization_id=principal.selected_organization_id,
                 session_id=principal.session_id,
+                session_token_hash=principal.session_token_hash,
                 correlation_id=correlation_id,
             )
         raise AuthorizationDeniedError("Untrusted or missing request Origin.")
@@ -197,6 +198,7 @@ def verify_csrf_and_origin(
                 user_id=principal.user_id,
                 organization_id=principal.selected_organization_id,
                 session_id=principal.session_id,
+                session_token_hash=principal.session_token_hash,
                 correlation_id=correlation_id,
             )
         raise AuthorizationDeniedError("Missing or mismatched CSRF token.")
@@ -217,6 +219,7 @@ def verify_csrf_and_origin(
                 user_id=principal.user_id,
                 organization_id=principal.selected_organization_id,
                 session_id=principal.session_id,
+                session_token_hash=principal.session_token_hash,
                 correlation_id=correlation_id,
             )
         raise AuthorizationDeniedError("Invalid session CSRF token.")
@@ -280,6 +283,7 @@ def start_oidc_login(
             reason_code="pkce_state_issued",
             payload_json={"has_next_path": safe_next is not None},
             issuer=issuer,
+            oidc_state_hash=state_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -306,19 +310,62 @@ def _record_failed_callback(
     issuer: str | None = None,
     subject: str | None = None,
     user_id: str | None = None,
+    oidc_state_hash: str | None = None,
+    state_exists_in_db: bool = False,
     correlation_id: str | None = None,
 ) -> None:
-    SecurityAuditRepository.append_event_atomic(
-        session_factory,
-        event_type=event_type,
-        outcome=outcome,
-        reason_code=reason_code,
-        payload_json={"flow": "oidc_callback"},
-        user_id=user_id,
-        issuer=issuer,
-        subject=subject,
-        correlation_id=correlation_id,
-    )
+    effective_issuer = issuer or "https://oidc.unverified.invalid"
+    now = utc_now().astimezone(timezone.utc)
+    session = session_factory()
+    try:
+        bound_state_hash = oidc_state_hash
+        if not state_exists_in_db or not bound_state_hash:
+            ephemeral_token = generate_opaque_token(32)
+            bound_state_hash = hmac_token_digest(
+                ephemeral_token,
+                secret="jyxia-callback-failure-audit-state-context",
+                context="oidc_state",
+            )
+            nonce_hash = hmac_token_digest(
+                ephemeral_token,
+                secret="jyxia-callback-failure-audit-nonce-context",
+                context="oidc_nonce",
+            )
+            IdentityAndSessionRepository.create_oidc_auth_state(
+                session,
+                state_hash=bound_state_hash,
+                nonce_hash=nonce_hash,
+                code_verifier_ciphertext="callback_failure_ephemeral_audit_state",
+                issuer=effective_issuer,
+                redirect_uri="https://callback.audit.invalid/api/v1/auth/callback",
+                next_path=None,
+                expires_at=now + timedelta(seconds=60),
+            )
+            IdentityAndSessionRepository.consume_oidc_auth_state_atomic(
+                session, state_hash=bound_state_hash, now=now
+            )
+        SecurityAuditRepository.append_event(
+            session,
+            event_type=event_type,
+            outcome=outcome,
+            reason_code=reason_code,
+            payload_json={"flow": "oidc_callback"},
+            user_id=user_id,
+            issuer=effective_issuer,
+            subject=subject,
+            oidc_state_hash=bound_state_hash,
+            correlation_id=correlation_id,
+            created_at=now,
+        )
+        IdentityAndSessionRepository.finalize_oidc_auth_state(
+            session, state_hash=bound_state_hash, now=now
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def complete_oidc_callback(
@@ -404,7 +451,9 @@ def complete_oidc_callback(
             event_type="OIDC_CALLBACK_FAILED",
             outcome=SecurityAuditOutcome.DENIED,
             reason_code="oidc_state_issuer_mismatch",
-            issuer=oidc_adapter.configured_issuer(),
+            issuer=auth_state.issuer,
+            oidc_state_hash=state_hash,
+            state_exists_in_db=True,
             correlation_id=correlation_id,
         )
         raise AuthenticationRequiredError("OIDC issuer mismatch.")
@@ -422,6 +471,8 @@ def complete_oidc_callback(
             outcome=SecurityAuditOutcome.FAILURE,
             reason_code="pkce_verifier_decrypt_failed",
             issuer=auth_state.issuer,
+            oidc_state_hash=state_hash,
+            state_exists_in_db=True,
             correlation_id=correlation_id,
         )
         raise AuthenticationRequiredError("Failed to validate OIDC transaction verifier.") from exc
@@ -443,6 +494,8 @@ def complete_oidc_callback(
             outcome=SecurityAuditOutcome.FAILURE,
             reason_code=exc.reason_code,
             issuer=auth_state.issuer,
+            oidc_state_hash=state_hash,
+            state_exists_in_db=True,
             correlation_id=correlation_id,
         )
         raise
@@ -453,15 +506,20 @@ def complete_oidc_callback(
             outcome=SecurityAuditOutcome.DENIED,
             reason_code=exc.reason_code,
             issuer=auth_state.issuer,
+            oidc_state_hash=state_hash,
+            state_exists_in_db=True,
             correlation_id=correlation_id,
         )
         raise AuthenticationRequiredError("OIDC token or MFA policy rejected.") from exc
 
-    # Resolve federated identity strictly by (issuer, subject).
+    # Resolve federated identity strictly by (issuer, subject) bound to consumed OIDC callback state.
     session = session_factory()
     try:
         resolved = IdentityAndSessionRepository.get_external_identity_by_issuer_subject(
-            session, issuer=verified.issuer, subject=verified.subject
+            session,
+            issuer=verified.issuer,
+            subject=verified.subject,
+            oidc_state_hash=state_hash,
         )
         if resolved is None:
             SecurityAuditRepository.append_event(
@@ -472,8 +530,12 @@ def complete_oidc_callback(
                 payload_json={"mfa_acr": verified.acr},
                 issuer=verified.issuer,
                 subject=verified.subject,
+                oidc_state_hash=state_hash,
                 correlation_id=correlation_id,
                 created_at=now,
+            )
+            IdentityAndSessionRepository.finalize_oidc_auth_state(
+                session, state_hash=state_hash, now=now
             )
             session.commit()
             raise AuthorizationDeniedError(
@@ -491,8 +553,12 @@ def complete_oidc_callback(
                 user_id=user.id,
                 issuer=verified.issuer,
                 subject=verified.subject,
+                oidc_state_hash=state_hash,
                 correlation_id=correlation_id,
                 created_at=now,
+            )
+            IdentityAndSessionRepository.finalize_oidc_auth_state(
+                session, state_hash=state_hash, now=now
             )
             session.commit()
             raise AuthorizationDeniedError("Institutional user or federated identity is inactive.")
@@ -510,8 +576,12 @@ def complete_oidc_callback(
                 user_id=user.id,
                 issuer=verified.issuer,
                 subject=verified.subject,
+                oidc_state_hash=state_hash,
                 correlation_id=correlation_id,
                 created_at=now,
+            )
+            IdentityAndSessionRepository.finalize_oidc_auth_state(
+                session, state_hash=state_hash, now=now
             )
             session.commit()
             raise AuthorizationDeniedError(
@@ -547,6 +617,7 @@ def complete_oidc_callback(
             idle_expires_at=idle_expires_at,
             absolute_expires_at=absolute_expires_at,
             now=now,
+            oidc_state_hash=state_hash,
         )
         IdentityAndSessionRepository.touch_external_identity_login(
             session, external_identity.id, authenticated_at=now
@@ -566,6 +637,7 @@ def complete_oidc_callback(
             issuer=verified.issuer,
             subject=verified.subject,
             session_id=auth_session.id,
+            session_token_hash=session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -575,6 +647,7 @@ def complete_oidc_callback(
                 TenantContext(
                     organization_id=active_org_id,
                     actor_user_id=user.id,
+                    session_token_hash=session_token_hash,
                     source="authenticated_request",
                 ),
                 event_type="AUTH_SESSION_ESTABLISHED",
@@ -583,6 +656,9 @@ def complete_oidc_callback(
                 payload_json={"auth_method": "oidc_pkce_mfa", "acr": effective_acr},
                 created_at=now,
             )
+        IdentityAndSessionRepository.finalize_oidc_auth_state(
+            session, state_hash=state_hash, now=now
+        )
         session.commit()
 
         principal = AuthenticatedSessionPrincipal(
@@ -602,6 +678,7 @@ def complete_oidc_callback(
             idle_expires_at=idle_expires_at,
             absolute_expires_at=absolute_expires_at,
             csrf_token_hash=csrf_token_hash,
+            session_token_hash=session_token_hash,
         )
         return CallbackSuccessResult(
             session_token=raw_session_token,
@@ -651,7 +728,11 @@ def authenticate_session_cookie(
     if now >= abs_exp or now >= idle_exp:
         reason = "session_absolute_timeout" if now >= abs_exp else "session_idle_timeout"
         IdentityAndSessionRepository.revoke_session(
-            session, session_id=auth_session.id, now=now, reason=reason
+            session,
+            session_id=auth_session.id,
+            now=now,
+            reason=reason,
+            session_token_hash=token_hash,
         )
         SecurityAuditRepository.append_event(
             session,
@@ -662,6 +743,7 @@ def authenticate_session_cookie(
             user_id=user.id,
             organization_id=auth_session.active_organization_id,
             session_id=auth_session.id,
+            session_token_hash=token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -670,7 +752,11 @@ def authenticate_session_cookie(
 
     if not user.is_active or external_identity.status != ExternalIdentityStatus.ACTIVE.value:
         IdentityAndSessionRepository.revoke_session(
-            session, session_id=auth_session.id, now=now, reason="identity_or_user_inactive"
+            session,
+            session_id=auth_session.id,
+            now=now,
+            reason="identity_or_user_inactive",
+            session_token_hash=token_hash,
         )
         SecurityAuditRepository.append_event(
             session,
@@ -681,6 +767,7 @@ def authenticate_session_cookie(
             user_id=user.id,
             organization_id=auth_session.active_organization_id,
             session_id=auth_session.id,
+            session_token_hash=token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -695,6 +782,14 @@ def authenticate_session_cookie(
         session, session_id=auth_session.id, now=now, new_idle_expires_at=new_idle
     )
     session.commit()
+
+    # Re-bind transaction-local authenticated session & RLS context after commit
+    apply_pg_rls_context(
+        session,
+        organization_id=auth_session.active_organization_id,
+        user_id=user.id,
+    )
+    apply_pg_identity_context(session, session_token_hash=token_hash)
 
     return AuthenticatedSessionPrincipal(
         session_id=auth_session.id,
@@ -713,6 +808,7 @@ def authenticate_session_cookie(
         idle_expires_at=new_idle,
         absolute_expires_at=abs_exp,
         csrf_token_hash=auth_session.csrf_token_hash,
+        session_token_hash=token_hash,
     )
 
 
@@ -727,6 +823,7 @@ def select_active_organization(
     """Switch active session organization and rotate session/CSRF tokens upon verified DB membership."""
     resolved_settings = settings if settings is not None else load_settings(strict_database=False)
     now = utc_now().astimezone(timezone.utc)
+    apply_pg_identity_context(session, session_token_hash=principal.session_token_hash)
     found = IdentityAndSessionRepository.get_active_membership_for_org(
         session, user_id=principal.user_id, organization_id=organization_id
     )
@@ -740,6 +837,7 @@ def select_active_organization(
             user_id=principal.user_id,
             organization_id=principal.selected_organization_id,
             session_id=principal.session_id,
+            session_token_hash=principal.session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -748,14 +846,6 @@ def select_active_organization(
 
     membership, org = found
     role = OrganizationRole(membership.role)
-
-    # Invalidate previous session and rotate both session and CSRF tokens for the new tenant context
-    IdentityAndSessionRepository.revoke_session(
-        session,
-        session_id=principal.session_id,
-        now=now,
-        reason="rotated_on_organization_select",
-    )
 
     new_raw_session_token = generate_opaque_token(32)
     new_raw_csrf_token = generate_opaque_token(32)
@@ -794,7 +884,23 @@ def select_active_organization(
         idle_expires_at=new_idle,
         absolute_expires_at=abs_exp,
         now=now,
+        prev_session_token_hash=principal.session_token_hash,
     )
+
+    # Invalidate previous session and bind context strictly to the newly rotated session
+    IdentityAndSessionRepository.revoke_session(
+        session,
+        session_id=principal.session_id,
+        now=now,
+        reason="rotated_on_organization_select",
+        session_token_hash=principal.session_token_hash,
+    )
+    apply_pg_identity_context(
+        session,
+        session_token_hash=new_session_token_hash,
+        prev_session_token_hash="",
+    )
+    apply_pg_rls_context(session, organization_id=org.id, user_id=principal.user_id)
 
     SecurityAuditRepository.append_event(
         session,
@@ -809,6 +915,7 @@ def select_active_organization(
         user_id=principal.user_id,
         organization_id=org.id,
         session_id=rotated_session.id,
+        session_token_hash=new_session_token_hash,
         correlation_id=correlation_id,
         created_at=now,
     )
@@ -817,6 +924,7 @@ def select_active_organization(
         TenantContext(
             organization_id=org.id,
             actor_user_id=principal.user_id,
+            session_token_hash=new_session_token_hash,
             source="authenticated_request",
         ),
         event_type="ORGANIZATION_CONTEXT_SELECTED",
@@ -852,6 +960,7 @@ def resolve_authorized_tenant_principal(
 ) -> AuthorizedMembershipContext:
     """Derive DB-verified multi-tenant authorization context and bind PostgreSQL RLS."""
     now = utc_now().astimezone(timezone.utc)
+    apply_pg_identity_context(session, session_token_hash=principal.session_token_hash)
     if spoofed_org_header and spoofed_org_header.strip() != organization_id:
         SecurityAuditRepository.append_event(
             session,
@@ -862,6 +971,7 @@ def resolve_authorized_tenant_principal(
             user_id=principal.user_id,
             organization_id=principal.selected_organization_id,
             session_id=principal.session_id,
+            session_token_hash=principal.session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -878,6 +988,7 @@ def resolve_authorized_tenant_principal(
             user_id=principal.user_id,
             organization_id=None,
             session_id=principal.session_id,
+            session_token_hash=principal.session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -894,6 +1005,7 @@ def resolve_authorized_tenant_principal(
             user_id=principal.user_id,
             organization_id=principal.selected_organization_id,
             session_id=principal.session_id,
+            session_token_hash=principal.session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -915,6 +1027,7 @@ def resolve_authorized_tenant_principal(
             user_id=principal.user_id,
             organization_id=None,
             session_id=principal.session_id,
+            session_token_hash=principal.session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -942,10 +1055,11 @@ def resolve_authorized_tenant_principal(
             event_type="RBAC_PERMISSION_DENIED",
             outcome=SecurityAuditOutcome.DENIED,
             reason_code=f"missing_{required_permission.value}",
-            payload_json={"role": membership.role, "permission": required_permission.value},
+            payload_json={"role": role.value, "permission": required_permission.value},
             user_id=principal.user_id,
             organization_id=org.id,
             session_id=principal.session_id,
+            session_token_hash=principal.session_token_hash,
             correlation_id=correlation_id,
             created_at=now,
         )
@@ -954,18 +1068,20 @@ def resolve_authorized_tenant_principal(
             TenantContext(
                 organization_id=org.id,
                 actor_user_id=principal.user_id,
+                session_token_hash=principal.session_token_hash,
                 source="authenticated_request",
             ),
             event_type="RBAC_PERMISSION_DENIED",
             target_entity_type="organization",
             target_entity_id=org.id,
-            payload_json={"role": membership.role, "permission": required_permission.value},
+            payload_json={"role": role.value, "permission": required_permission.value},
             created_at=now,
         )
         session.commit()
         raise
 
     apply_pg_rls_context(session, organization_id=org.id, user_id=principal.user_id)
+    apply_pg_identity_context(session, session_token_hash=principal.session_token_hash)
     return AuthorizedMembershipContext(principal=authorized, organization=org)
 
 
@@ -978,9 +1094,7 @@ def logout_session(
 ) -> str | None:
     """Revoke server-side session and emit optional RP-initiated logout redirect URL."""
     now = utc_now().astimezone(timezone.utc)
-    IdentityAndSessionRepository.revoke_session(
-        session, session_id=principal.session_id, now=now, reason="explicit_logout"
-    )
+    apply_pg_identity_context(session, session_token_hash=principal.session_token_hash)
     SecurityAuditRepository.append_event(
         session,
         event_type="AUTH_LOGOUT_SUCCEEDED",
@@ -990,8 +1104,16 @@ def logout_session(
         user_id=principal.user_id,
         organization_id=principal.selected_organization_id,
         session_id=principal.session_id,
+        session_token_hash=principal.session_token_hash,
         correlation_id=correlation_id,
         created_at=now,
+    )
+    IdentityAndSessionRepository.revoke_session(
+        session,
+        session_id=principal.session_id,
+        now=now,
+        reason="explicit_logout",
+        session_token_hash=principal.session_token_hash,
     )
     session.commit()
     return oidc_adapter.build_logout_url()

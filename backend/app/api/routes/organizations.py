@@ -46,6 +46,7 @@ def _to_tenant_ctx(auth_ctx: AuthorizedMembershipContext) -> TenantContext:
     return TenantContext(
         organization_id=auth_ctx.principal.organization_id,
         actor_user_id=auth_ctx.principal.user_id,
+        session_token_hash=auth_ctx.principal.session.session_token_hash,
         source="authenticated_request",
     )
 

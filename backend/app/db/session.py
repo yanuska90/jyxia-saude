@@ -79,6 +79,7 @@ def apply_pg_identity_context(
     session: Session,
     *,
     session_token_hash: str | None = None,
+    prev_session_token_hash: str | None = None,
     oidc_state_hash: str | None = None,
     oidc_issuer: str | None = None,
     oidc_subject: str | None = None,
@@ -91,6 +92,11 @@ def apply_pg_identity_context(
         session.execute(
             text("SELECT set_config('app.current_session_token_hash', :val, true)"),
             {"val": session_token_hash},
+        )
+    if prev_session_token_hash is not None:
+        session.execute(
+            text("SELECT set_config('app.current_prev_session_token_hash', :val, true)"),
+            {"val": prev_session_token_hash},
         )
     if oidc_state_hash is not None:
         session.execute(
@@ -119,6 +125,7 @@ def clear_pg_rls_context(session: Session) -> None:
             "SELECT set_config('app.current_organization_id', '', true), "
             "set_config('app.current_user_id', '', true), "
             "set_config('app.current_session_token_hash', '', true), "
+            "set_config('app.current_prev_session_token_hash', '', true), "
             "set_config('app.current_oidc_state_hash', '', true), "
             "set_config('app.current_oidc_issuer', '', true), "
             "set_config('app.current_oidc_subject', '', true)"

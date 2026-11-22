@@ -16,10 +16,10 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.constants import MembershipStatus
+from app.core.constants import MembershipStatus, OrganizationRole
 from app.core.logging import FORBIDDEN_LOG_KEYS, redact_sensitive_text
 from app.db.base import new_uuid, utc_now
-from app.db.session import apply_pg_rls_context
+from app.db.session import apply_pg_identity_context, apply_pg_rls_context
 from app.models.entities import (
     AUDIT_SCHEMA_VERSION,
     AuditEvent,
@@ -292,10 +292,14 @@ class OrganizationRepository:
         user = session.get(User, user_id)
         if user is None:
             raise TenantScopeError(f"User '{user_id}' does not exist.")
+        try:
+            normalized_role = OrganizationRole(role).value
+        except ValueError:
+            normalized_role = role
         membership = OrganizationMembership(
             organization_id=ctx.organization_id,
             user_id=user_id,
-            role=role,
+            role=normalized_role,
         )
         session.add(membership)
         session.flush()
@@ -658,6 +662,10 @@ class AuditEventRepository:
         apply_pg_rls_context(
             session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
         )
+        if ctx.session_token_hash is not None:
+            apply_pg_identity_context(
+                session, session_token_hash=ctx.session_token_hash
+            )
         bind = session.get_bind()
         is_pg = bind is not None and bind.dialect.name == "postgresql"
 

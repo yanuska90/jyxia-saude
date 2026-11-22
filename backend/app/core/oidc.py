@@ -6,10 +6,11 @@ discovery, JWKS fetching and server-to-server authorization code exchange.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import ipaddress
 import logging
 import socket
+import ssl
 import threading
 import time
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import urlencode, urlsplit
 
+import httpcore
 import httpx
 import jwt
 from jwt import PyJWK
@@ -203,6 +205,234 @@ def _is_loopback_ip_address(raw_ip: str) -> bool:
     return bool(ip_obj.is_loopback)
 
 
+@dataclass(slots=True)
+class PinnedConnectionRecord:
+    """Telemetry record proving the exact TCP IP connected and TLS SNI hostname preserved."""
+
+    requested_host: str
+    port: int
+    connected_ip: str
+    transport_mode: str
+    tls_server_hostname: str | None = None
+    tls_established: bool = False
+
+
+class _TracingNetworkStream(httpcore.NetworkStream):
+    """Wraps an httpcore NetworkStream to verify and record TLS SNI hostname preservation."""
+
+    def __init__(
+        self,
+        inner: httpcore.NetworkStream,
+        *,
+        expected_host: str,
+        record: PinnedConnectionRecord,
+    ) -> None:
+        self._inner = inner
+        self._expected_host = expected_host
+        self._record = record
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._inner.read(max_bytes, timeout=timeout)
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._inner.write(buffer, timeout=timeout)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        effective_sni = (server_hostname or "").strip().lower().strip("[]")
+        if effective_sni != self._expected_host:
+            self._inner.close()
+            raise httpcore.ConnectError(
+                f"TLS SNI hostname mismatch: expected {self._expected_host!r}, got {effective_sni!r}"
+            )
+        self._record.tls_server_hostname = effective_sni
+        tls_stream = self._inner.start_tls(
+            ssl_context=ssl_context,
+            server_hostname=server_hostname,
+            timeout=timeout,
+        )
+        self._record.tls_established = True
+        self._inner = tls_stream
+        return self
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
+
+
+class _PinnedOidcNetworkBackend(httpcore.NetworkBackend):
+    """Custom httpcore NetworkBackend that connects TCP strictly to pre-validated pinned IPs.
+
+    Eliminates TOCTOU DNS rebinding by never passing domain names to socket.create_connection.
+    """
+
+    def __init__(self, adapter: StandardOidcProviderAdapter) -> None:
+        self._adapter = adapter
+        self._sync_backend = httpcore.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.NetworkStream:
+        normalized_host = host.strip().lower().strip("[]")
+        approved_ips = self._adapter.get_pinned_ips(normalized_host, port)
+        if not approved_ips:
+            raise httpcore.ConnectError(
+                f"Refusing TCP connection to unpinned OIDC authority {normalized_host}:{port}."
+            )
+
+        last_exc: Exception | None = None
+        for pinned_ip in approved_ips:
+            self._adapter.assert_approved_connect_ip(
+                pinned_ip,
+                hostname=normalized_host,
+                port=port,
+            )
+            try:
+                inner_stream = self._sync_backend.connect_tcp(
+                    host=pinned_ip,
+                    port=port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+                record = PinnedConnectionRecord(
+                    requested_host=normalized_host,
+                    port=port,
+                    connected_ip=pinned_ip,
+                    transport_mode="pinned_tcp_socket",
+                )
+                self._adapter._record_connection(record)
+                return _TracingNetworkStream(
+                    inner_stream,
+                    expected_host=normalized_host,
+                    record=record,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout, OSError) as exc:
+                last_exc = exc
+                continue
+
+        if last_exc is not None:
+            raise last_exc
+        raise httpcore.ConnectError(
+            f"All approved pinned IPs failed for {normalized_host}:{port}."
+        )
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.NetworkStream:
+        raise httpcore.ConnectError("Unix domain sockets are prohibited for OIDC HTTP transport.")
+
+    def sleep(self, seconds: float) -> None:
+        self._sync_backend.sleep(seconds)
+
+
+class _PinnedOidcHttpTransport(httpx.HTTPTransport):
+    """Production/real-network HTTPTransport binding httpcore ConnectionPool to _PinnedOidcNetworkBackend."""
+
+    def __init__(
+        self,
+        adapter: StandardOidcProviderAdapter,
+        *,
+        verify: ssl.SSLContext | bool = True,
+    ) -> None:
+        super().__init__(
+            verify=verify,
+            trust_env=False,
+            http1=True,
+            http2=False,
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=0,
+                keepalive_expiry=0.0,
+            ),
+            retries=0,
+        )
+        self._adapter = adapter
+        self._pool._network_backend = _PinnedOidcNetworkBackend(adapter)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        raw_url = str(request.url)
+        scheme, hostname, port = self._adapter._extract_canonical_origin(
+            raw_url, field_name="oidc_http_request"
+        )
+        approved_ips = self._adapter.get_pinned_ips(hostname, port)
+        if not approved_ips:
+            raise OidcAuthenticationError(
+                f"Refusing unpinned HTTP request to {scheme}://{hostname}:{port}."
+            )
+        return super().handle_request(request)
+
+
+class _ValidatingTestTransportWrapper(httpx.BaseTransport):
+    """Wraps test MockTransports so destination and pinned-IP checks cannot be silently bypassed."""
+
+    def __init__(
+        self,
+        adapter: StandardOidcProviderAdapter,
+        inner: httpx.BaseTransport,
+    ) -> None:
+        self._adapter = adapter
+        self._inner = inner
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        raw_url = str(request.url)
+        _scheme, hostname, port = self._adapter._extract_canonical_origin(
+            raw_url, field_name="oidc_test_transport_request"
+        )
+        self._adapter._validate_provider_url(
+            raw_url,
+            field_name="oidc_test_transport_request",
+            require_issuer_origin=True,
+            re_resolve_dns=False,
+        )
+        approved_ips = self._adapter.get_pinned_ips(hostname, port)
+        if not approved_ips:
+            raise OidcAuthenticationError(
+                f"Test transport request rejected: no validated pinned IP for {hostname}:{port}."
+            )
+        for ip_str in approved_ips:
+            self._adapter.assert_approved_connect_ip(
+                ip_str,
+                hostname=hostname,
+                port=port,
+            )
+        record = PinnedConnectionRecord(
+            requested_host=hostname,
+            port=port,
+            connected_ip=approved_ips[0],
+            transport_mode="validated_test_transport",
+            tls_server_hostname=hostname if request.url.scheme == "https" else None,
+            tls_established=(request.url.scheme == "https"),
+        )
+        self._adapter._record_connection(record)
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+_SYNTHETIC_TEST_HOST_SUFFIXES: tuple[str, ...] = (
+    ".jyxia.local",
+    ".jyxia.invalid",
+    ".exemplo.invalid",
+)
+_SYNTHETIC_TEST_PUBLIC_IP = "93.184.216.34"
+
+
 class StandardOidcProviderAdapter:
     """Standards-compliant OIDC adapter using trusted discovery, JWKS, PKCE & strict MFA."""
 
@@ -212,18 +442,64 @@ class StandardOidcProviderAdapter:
         *,
         transport: httpx.BaseTransport | None = None,
         dns_resolver: Callable[[str, int], Sequence[str]] | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+        allow_loopback_target_in_test: bool = False,
     ) -> None:
+        if settings.env in {"production", "staging"}:
+            if (
+                transport is not None
+                or dns_resolver is not None
+                or ssl_context is not None
+                or allow_loopback_target_in_test
+            ):
+                raise OidcAuthenticationError(
+                    "Injected HTTP transport, custom DNS resolver, or test TLS overrides are prohibited in production and staging."
+                )
+        if allow_loopback_target_in_test and settings.env != "test":
+            raise OidcAuthenticationError(
+                "allow_loopback_target_in_test is restricted exclusively to JYXIA_ENV=test."
+            )
+        if ssl_context is not None and (
+            not ssl_context.check_hostname or ssl_context.verify_mode != ssl.CERT_REQUIRED
+        ):
+            raise OidcAuthenticationError(
+                "Custom SSLContext must enforce check_hostname=True and verify_mode=CERT_REQUIRED."
+            )
+
         self._settings = settings
         self._transport = transport
         self._dns_resolver = dns_resolver
+        self._ssl_context = ssl_context
+        self._allow_loopback_target_in_test = allow_loopback_target_in_test
         self._metadata_lock = threading.RLock()
         self._metadata: OidcProviderMetadata | None = None
         self._metadata_fetched_at: float = 0.0
-        self._pinned_host_ips: dict[tuple[str, int], frozenset[str]] = {}
+        self._pinned_host_ips: dict[tuple[str, int], tuple[str, ...]] = {}
+        self._connection_history: list[PinnedConnectionRecord] = []
         self._jwks_cache = _JwksKeyCache(
             ttl_seconds=settings.oidc_jwks_cache_ttl_seconds,
             cooldown_seconds=settings.oidc_jwks_refresh_cooldown_seconds,
         )
+
+    @property
+    def connection_history(self) -> tuple[PinnedConnectionRecord, ...]:
+        with self._metadata_lock:
+            return tuple(self._connection_history)
+
+    def _record_connection(self, record: PinnedConnectionRecord) -> None:
+        with self._metadata_lock:
+            self._connection_history.append(record)
+
+    def get_pinned_ips(self, hostname: str, port: int) -> tuple[str, ...]:
+        key = (hostname.strip().lower().strip("[]"), port)
+        with self._metadata_lock:
+            return self._pinned_host_ips.get(key, ())
+
+    def invalidate_pinned_hosts(self) -> None:
+        with self._metadata_lock:
+            self._pinned_host_ips.clear()
+            self._metadata = None
+            self._metadata_fetched_at = 0.0
 
     def is_configured(self) -> bool:
         return bool(
@@ -239,6 +515,7 @@ class StandardOidcProviderAdapter:
         return self._settings.oidc_issuer or ""
 
     def close(self) -> None:
+        self.invalidate_pinned_hosts()
         return None
 
     def _require_configured(self) -> None:
@@ -246,10 +523,25 @@ class StandardOidcProviderAdapter:
             raise OidcNotConfiguredError("OIDC authentication is not configured.")
 
     def _new_client(self) -> httpx.Client:
+        if self._transport is not None:
+            if self._settings.env not in {"development", "test"}:
+                raise OidcAuthenticationError(
+                    "Injected HTTP transport is prohibited outside development/test."
+                )
+            effective_transport: httpx.BaseTransport = _ValidatingTestTransportWrapper(
+                self, self._transport
+            )
+        else:
+            verify_arg: ssl.SSLContext | bool = (
+                self._ssl_context if self._ssl_context is not None else True
+            )
+            effective_transport = _PinnedOidcHttpTransport(self, verify=verify_arg)
+
         return httpx.Client(
             timeout=self._settings.oidc_http_timeout_seconds,
             follow_redirects=False,
-            transport=self._transport,
+            trust_env=False,
+            transport=effective_transport,
         )
 
     def _is_dev_loopback_allowed(self, hostname: str) -> bool:
@@ -258,6 +550,38 @@ class StandardOidcProviderAdapter:
             and self._settings.env in {"development", "test"}
             and hostname.lower().strip("[]") in _DEV_LOOPBACK_HOSTS
         )
+
+    def _is_ip_allowed_for_host(self, raw_ip: str, *, hostname: str) -> bool:
+        if self._is_dev_loopback_allowed(hostname) and _is_loopback_ip_address(raw_ip):
+            return True
+        if (
+            self._allow_loopback_target_in_test
+            and self._settings.env == "test"
+            and not _is_loopback_ip_address(hostname)
+            and hostname not in _DEV_LOOPBACK_HOSTS
+            and _is_loopback_ip_address(raw_ip)
+        ):
+            return True
+        return not _is_forbidden_ip_address(raw_ip)
+
+    def assert_approved_connect_ip(
+        self,
+        raw_ip: str,
+        *,
+        hostname: str,
+        port: int,
+    ) -> None:
+        cleaned = raw_ip.strip().strip("[]")
+        try:
+            ipaddress.ip_address(cleaned)
+        except ValueError as exc:
+            raise OidcAuthenticationError(
+                f"Pinned target {raw_ip!r} for {hostname}:{port} is not a literal IP address."
+            ) from exc
+        if not self._is_ip_allowed_for_host(cleaned, hostname=hostname):
+            raise OidcAuthenticationError(
+                f"Refusing connection to forbidden IP {cleaned} for {hostname}:{port}."
+            )
 
     def _extract_canonical_origin(self, raw_url: str, *, field_name: str) -> tuple[str, str, int]:
         if not raw_url or any(ch.isspace() or ord(ch) < 32 for ch in raw_url):
@@ -285,43 +609,76 @@ class StandardOidcProviderAdapter:
             raise OidcAuthenticationError(f"Out-of-range port in {field_name}.")
         return scheme, hostname, port
 
-    def _verify_and_resolve_host_ips(self, hostname: str, port: int, *, field_name: str) -> None:
+    def _verify_and_resolve_host_ips(
+        self, hostname: str, port: int, *, field_name: str
+    ) -> tuple[str, ...]:
         dev_loopback_ok = self._is_dev_loopback_allowed(hostname)
+        host_key = (hostname, port)
 
         # 1. Check literal IPv4 / IPv6 hostnames immediately
         try:
-            ipaddress.ip_address(hostname)
+            ip_obj = ipaddress.ip_address(hostname)
             is_ip_literal = True
+            canonical_ip = str(ip_obj)
         except ValueError:
             is_ip_literal = False
+            canonical_ip = ""
 
         if is_ip_literal:
-            if dev_loopback_ok and _is_loopback_ip_address(hostname):
-                return
-            if _is_forbidden_ip_address(hostname):
+            if not (dev_loopback_ok and _is_loopback_ip_address(canonical_ip)) and _is_forbidden_ip_address(
+                canonical_ip
+            ):
                 raise OidcAuthenticationError(
                     f"Refusing non-global or private IP literal for {field_name}."
                 )
-            return
+            with self._metadata_lock:
+                self._pinned_host_ips[host_key] = (canonical_ip,)
+            return (canonical_ip,)
 
         if hostname in _DEV_LOOPBACK_HOSTS or hostname.endswith(".localhost"):
             if not dev_loopback_ok:
                 raise OidcAuthenticationError(
                     f"Refusing loopback/local hostname for {field_name}."
                 )
-            return
+            if self._dns_resolver is not None:
+                resolved_loopback = tuple(
+                    str(ip).strip().strip("[]") for ip in self._dns_resolver(hostname, port)
+                )
+            elif hostname == "keycloak":
+                try:
+                    addr_info = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+                    resolved_loopback = tuple(
+                        str(item[4][0]).strip().strip("[]")
+                        for item in addr_info
+                        if item and len(item) >= 5 and item[4]
+                    )
+                except OSError:
+                    resolved_loopback = ("127.0.0.1",)
+            else:
+                resolved_loopback = ("::1",) if hostname == "::1" else ("127.0.0.1",)
+            with self._metadata_lock:
+                self._pinned_host_ips[host_key] = resolved_loopback
+            return resolved_loopback
 
-        # 2. Resolve DNS records when custom resolver is provided or real network transport is active
-        if self._dns_resolver is None and self._transport is not None:
-            return
-
+        # 2. Resolve DNS records. Never skip resolution when oidc_allow_http_dev is False.
         try:
             if self._dns_resolver is not None:
-                resolved_ips = tuple(str(ip).strip() for ip in self._dns_resolver(hostname, port))
+                resolved_ips = tuple(
+                    str(ip).strip().strip("[]") for ip in self._dns_resolver(hostname, port)
+                )
+            elif (
+                self._transport is not None
+                and self._settings.env in {"development", "test"}
+                and self._settings.oidc_allow_http_dev
+                and hostname.endswith(_SYNTHETIC_TEST_HOST_SUFFIXES)
+            ):
+                resolved_ips = (_SYNTHETIC_TEST_PUBLIC_IP,)
             else:
                 addr_info = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
                 resolved_ips = tuple(
-                    str(item[4][0]).strip() for item in addr_info if item and len(item) >= 5 and item[4]
+                    str(item[4][0]).strip().strip("[]")
+                    for item in addr_info
+                    if item and len(item) >= 5 and item[4]
                 )
         except OSError as exc:
             raise OidcProviderUnavailableError(
@@ -331,22 +688,30 @@ class StandardOidcProviderAdapter:
         if not resolved_ips:
             raise OidcAuthenticationError(f"DNS resolution returned no addresses for {field_name}.")
 
-        normalized_ips: set[str] = set()
+        normalized_ips: list[str] = []
         for ip_str in resolved_ips:
-            if _is_forbidden_ip_address(ip_str):
+            try:
+                parsed_ip = str(ipaddress.ip_address(ip_str))
+            except ValueError as exc:
+                raise OidcAuthenticationError(
+                    f"Refusing {field_name}: DNS resolver returned invalid IP literal."
+                ) from exc
+            if not self._is_ip_allowed_for_host(parsed_ip, hostname=hostname):
                 raise OidcAuthenticationError(
                     f"Refusing {field_name}: hostname resolved to private or non-global IP."
                 )
-            normalized_ips.add(ip_str)
+            if parsed_ip not in normalized_ips:
+                normalized_ips.append(parsed_ip)
 
-        host_key = (hostname, port)
+        pinned_tuple = tuple(normalized_ips)
         with self._metadata_lock:
             previous_ips = self._pinned_host_ips.get(host_key)
-            if previous_ips is not None and not (previous_ips & normalized_ips):
+            if previous_ips is not None and not (set(previous_ips) & set(pinned_tuple)):
                 raise OidcAuthenticationError(
                     f"Refusing {field_name}: suspicious DNS rebinding address change detected."
                 )
-            self._pinned_host_ips[host_key] = frozenset(normalized_ips)
+            self._pinned_host_ips[host_key] = pinned_tuple
+        return pinned_tuple
 
     def _validate_provider_url(
         self,
@@ -354,6 +719,7 @@ class StandardOidcProviderAdapter:
         *,
         field_name: str,
         require_issuer_origin: bool = False,
+        re_resolve_dns: bool = True,
     ) -> str:
         scheme, hostname, port = self._extract_canonical_origin(raw_url, field_name=field_name)
         if scheme == "http":
@@ -371,7 +737,8 @@ class StandardOidcProviderAdapter:
                     f"Refusing {field_name}: endpoint origin diverges from configured OIDC issuer."
                 )
 
-        self._verify_and_resolve_host_ips(hostname, port, field_name=field_name)
+        if re_resolve_dns or not self.get_pinned_ips(hostname, port):
+            self._verify_and_resolve_host_ips(hostname, port, field_name=field_name)
         return raw_url
 
     def get_metadata(self) -> OidcProviderMetadata:
@@ -385,16 +752,19 @@ class StandardOidcProviderAdapter:
                 return self._metadata
 
             assert self._settings.oidc_issuer is not None
-            self._validate_provider_url(self._settings.oidc_issuer, field_name="oidc_issuer")
+            self._validate_provider_url(
+                self._settings.oidc_issuer, field_name="oidc_issuer", re_resolve_dns=True
+            )
             discovery_url = self._validate_provider_url(
                 f"{self._settings.oidc_issuer}/.well-known/openid-configuration",
                 field_name="oidc_discovery",
                 require_issuer_origin=True,
+                re_resolve_dns=False,
             )
             try:
                 with self._new_client() as client:
                     resp = client.get(discovery_url)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                 logger.warning(
                     "OIDC discovery fetch failed.",
                     extra=build_safe_log_extra(error_type=type(exc).__name__),
@@ -424,16 +794,19 @@ class StandardOidcProviderAdapter:
                 str(doc.get("authorization_endpoint") or ""),
                 field_name="authorization_endpoint",
                 require_issuer_origin=True,
+                re_resolve_dns=False,
             )
             token_ep = self._validate_provider_url(
                 str(doc.get("token_endpoint") or ""),
                 field_name="token_endpoint",
                 require_issuer_origin=True,
+                re_resolve_dns=False,
             )
             jwks_uri = self._validate_provider_url(
                 str(doc.get("jwks_uri") or ""),
                 field_name="jwks_uri",
                 require_issuer_origin=True,
+                re_resolve_dns=False,
             )
             end_session_raw = doc.get("end_session_endpoint")
             end_session = (
@@ -441,6 +814,7 @@ class StandardOidcProviderAdapter:
                     str(end_session_raw),
                     field_name="end_session_endpoint",
                     require_issuer_origin=True,
+                    re_resolve_dns=False,
                 )
                 if end_session_raw
                 else None
@@ -464,7 +838,7 @@ class StandardOidcProviderAdapter:
         try:
             with self._new_client() as client:
                 resp = client.get(meta.jwks_uri)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
             logger.warning(
                 "OIDC JWKS fetch failed.",
                 extra=build_safe_log_extra(error_type=type(exc).__name__),
@@ -523,7 +897,7 @@ class StandardOidcProviderAdapter:
                     data=form_data,
                     headers={"Accept": "application/json"},
                 )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
             logger.warning(
                 "OIDC token exchange network failure.",
                 extra=build_safe_log_extra(error_type=type(exc).__name__),

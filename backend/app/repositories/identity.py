@@ -132,10 +132,19 @@ class IdentityAndSessionRepository:
 
     @staticmethod
     def get_external_identity_by_issuer_subject(
-        session: Session, *, issuer: str, subject: str
+        session: Session,
+        *,
+        issuer: str,
+        subject: str,
+        oidc_state_hash: str | None = None,
     ) -> tuple[ExternalIdentity, User] | None:
         """Resolve institutional user STRICTLY by (issuer, subject), never by email."""
-        apply_pg_identity_context(session, oidc_issuer=issuer, oidc_subject=subject)
+        apply_pg_identity_context(
+            session,
+            oidc_state_hash=oidc_state_hash,
+            oidc_issuer=issuer,
+            oidc_subject=subject,
+        )
         row = session.execute(
             select(ExternalIdentity, User)
             .join(User, User.id == ExternalIdentity.user_id)
@@ -191,20 +200,50 @@ class IdentityAndSessionRepository:
     ) -> OidcAuthState | None:
         """Atomically consume a non-expired, unconsumed OIDC state entry once."""
         apply_pg_identity_context(session, oidc_state_hash=state_hash)
+        row = session.scalar(
+            select(OidcAuthState).where(
+                OidcAuthState.state_hash == state_hash,
+                OidcAuthState.consumed_at.is_(None),
+                OidcAuthState.expires_at > now,
+            )
+        )
+        if row is None:
+            return None
         result = session.execute(
             update(OidcAuthState)
             .where(
+                OidcAuthState.id == row.id,
                 OidcAuthState.state_hash == state_hash,
                 OidcAuthState.consumed_at.is_(None),
                 OidcAuthState.expires_at > now,
             )
             .values(consumed_at=now)
+            .execution_options(synchronize_session=False)
         )
         if result.rowcount != 1:  # type: ignore[attr-defined]
             return None
-        return session.scalar(
-            select(OidcAuthState).where(OidcAuthState.state_hash == state_hash)
-        )
+        row.consumed_at = now
+        return row
+
+    @staticmethod
+    def finalize_oidc_auth_state(
+        session: Session, *, state_hash: str, now: datetime
+    ) -> None:
+        """Close a consumed OIDC state after callback finishes so it cannot be reused."""
+        apply_pg_identity_context(session, oidc_state_hash=state_hash)
+        bind = session.get_bind()
+        if bind is not None and bind.dialect.name == "postgresql":
+            session.execute(
+                text("SELECT public.jyxia_finalize_oidc_auth_state(:p_state_hash)"),
+                {"p_state_hash": state_hash},
+            )
+        else:
+            session.execute(
+                update(OidcAuthState)
+                .where(OidcAuthState.state_hash == state_hash)
+                .values(expires_at=now)
+                .execution_options(synchronize_session=False)
+            )
 
     @staticmethod
     def create_auth_session(
@@ -223,9 +262,16 @@ class IdentityAndSessionRepository:
         idle_expires_at: datetime,
         absolute_expires_at: datetime,
         now: datetime,
+        prev_session_token_hash: str | None = None,
+        oidc_state_hash: str | None = None,
     ) -> AuthSession:
         apply_pg_rls_context(session, organization_id=active_organization_id, user_id=user_id)
-        apply_pg_identity_context(session, session_token_hash=session_token_hash)
+        apply_pg_identity_context(
+            session,
+            session_token_hash=session_token_hash,
+            prev_session_token_hash=prev_session_token_hash,
+            oidc_state_hash=oidc_state_hash,
+        )
         row = AuthSession(
             user_id=user_id,
             external_identity_id=external_identity_id,
@@ -288,8 +334,15 @@ class IdentityAndSessionRepository:
 
     @staticmethod
     def revoke_session(
-        session: Session, *, session_id: str, now: datetime, reason: str
+        session: Session,
+        *,
+        session_id: str,
+        now: datetime,
+        reason: str,
+        session_token_hash: str | None = None,
     ) -> None:
+        if session_token_hash is not None:
+            apply_pg_identity_context(session, session_token_hash=session_token_hash)
         session.execute(
             update(AuthSession)
             .where(AuthSession.id == session_id, AuthSession.revoked_at.is_(None))
@@ -364,6 +417,8 @@ class SecurityAuditRepository:
         issuer: str | None = None,
         subject: str | None = None,
         session_id: str | None = None,
+        session_token_hash: str | None = None,
+        oidc_state_hash: str | None = None,
         correlation_id: str | None = None,
         created_at: datetime | None = None,
     ) -> SecurityAuditEvent:
@@ -382,6 +437,13 @@ class SecurityAuditRepository:
                 session,
                 organization_id=organization_id,
                 user_id=user_id,
+            )
+            apply_pg_identity_context(
+                session,
+                session_token_hash=session_token_hash,
+                oidc_state_hash=oidc_state_hash,
+                oidc_issuer=issuer,
+                oidc_subject=subject,
             )
             session.execute(text("SELECT pg_advisory_xact_lock(9021042)"))
             head_row = session.execute(
@@ -508,6 +570,8 @@ class SecurityAuditRepository:
         issuer: str | None = None,
         subject: str | None = None,
         session_id: str | None = None,
+        session_token_hash: str | None = None,
+        oidc_state_hash: str | None = None,
         correlation_id: str | None = None,
         max_attempts: int = 8,
     ) -> SecurityAuditEvent:
@@ -532,6 +596,8 @@ class SecurityAuditRepository:
                     issuer=issuer,
                     subject=subject,
                     session_id=session_id,
+                    session_token_hash=session_token_hash,
+                    oidc_state_hash=oidc_state_hash,
                     correlation_id=correlation_id,
                 )
                 session.commit()

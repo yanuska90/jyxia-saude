@@ -40,11 +40,11 @@ class RbacPermission(StrEnum):
 ROLE_DESCRIPTIONS: dict[OrganizationRole, str] = {
     OrganizationRole.ORG_ADMIN: "Organization Admin — manages organization settings, memberships and audit review.",
     OrganizationRole.ADMIN_OPERATOR: "Document Operator — prepares administrative cases and documents without audit/admin control.",
-    OrganizationRole.CLINICAL_REVIEWER: (
-        "Administrative Document Reviewer (compatibility role identifier 'clinical_reviewer'; "
-        "aliases 'document_reviewer' / 'administrative_reviewer') — performs administrative review "
-        "of extracted documentary fields and page evidence only, with zero clinical decision, "
-        "diagnosis, prescription or surgical approval authority."
+    OrganizationRole.DOCUMENT_REVIEWER: (
+        "Administrative Document Reviewer (canonical role identifier 'document_reviewer'; "
+        "backward-compatible input alias 'clinical_reviewer' / 'administrative_reviewer') — "
+        "performs administrative review of extracted documentary fields and page evidence only, "
+        "with zero clinical decision, diagnosis, prescription or surgical approval authority."
     ),
     OrganizationRole.AUDITOR_READONLY: "Auditor Read Only — read-only inspection of organization access context, memberships, cases and audit events.",
     OrganizationRole.READ_ONLY: "Read Only — strictly read-only organization and administrative case metadata access.",
@@ -73,7 +73,7 @@ ROLE_PERMISSIONS: dict[OrganizationRole, frozenset[RbacPermission]] = {
             RbacPermission.DOCUMENT_PREPARE,
         }
     ),
-    OrganizationRole.CLINICAL_REVIEWER: frozenset(
+    OrganizationRole.DOCUMENT_REVIEWER: frozenset(
         {
             RbacPermission.ORGANIZATION_READ,
             RbacPermission.CASE_READ,
@@ -118,6 +118,7 @@ class AuthenticatedSessionPrincipal:
     idle_expires_at: datetime | None = None
     absolute_expires_at: datetime | None = None
     csrf_token_hash: str | None = None
+    session_token_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

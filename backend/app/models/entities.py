@@ -35,7 +35,6 @@ from app.core.constants import (
     ExtractedFieldStatus,
     HumanReviewAction,
     MembershipStatus,
-    OrganizationRole,
     OrganizationStatus,
     ProcessingStatus,
     SecurityAuditOutcome,
@@ -122,7 +121,7 @@ class OrganizationMembership(Base):
         UniqueConstraint("organization_id", "user_id", name="uq_org_membership_org_user"),
         UniqueConstraint("organization_id", "user_id", "id", name="uq_org_membership_scoped"),
         CheckConstraint(
-            f"role IN ({_enum_values_sql(OrganizationRole)})",
+            "role IN ('org_admin', 'document_reviewer', 'clinical_reviewer', 'admin_operator', 'auditor_readonly', 'read_only')",
             name="role_valid",
         ),
         CheckConstraint(
