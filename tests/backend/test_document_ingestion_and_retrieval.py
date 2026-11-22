@@ -372,9 +372,14 @@ def test_document_upload_authentication_csrf_and_session_states(
             == 403
         )
 
-        # Suspend user -> 401
+        # Restore active membership and suspend user account -> 401
         db = factory()
         try:
+            from app.models.entities import OrganizationMembership
+
+            m_row = db.get(OrganizationMembership, ids["mem_admin_operator_id"])
+            assert m_row is not None
+            m_row.status = MembershipStatus.ACTIVE.value
             u_row = db.get(User, ids["user_admin_operator_id"])
             assert u_row is not None
             u_row.is_active = False
