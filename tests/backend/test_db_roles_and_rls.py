@@ -708,6 +708,38 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         )
         assert sec_ev.sequence_number >= 1
         app_db.commit()
+
+        # 8. Verify consume_oidc_auth_state_atomic, finalize_oidc_auth_state, and revoke_session as jyxia_app
+        consumed_state = IdentityAndSessionRepository.consume_oidc_auth_state_atomic(
+            app_db, state_hash="1" * 64, now=now_utc
+        )
+        assert consumed_state is not None
+        assert consumed_state.state_hash == "1" * 64
+        # Once consumed, direct SELECT by jyxia_app sees 0 rows and replay returns None
+        assert app_db.execute(text("SELECT count(*) FROM oidc_auth_states")).scalar() == 0
+        assert (
+            IdentityAndSessionRepository.consume_oidc_auth_state_atomic(
+                app_db, state_hash="1" * 64, now=now_utc
+            )
+            is None
+        )
+        IdentityAndSessionRepository.finalize_oidc_auth_state(
+            app_db, state_hash="1" * 64, now=now_utc
+        )
+        app_db.commit()
+
+        # Verify jyxia_app can revoke its own authenticated session via revoke_session, after which SELECT returns 0 rows
+        IdentityAndSessionRepository.revoke_session(
+            app_db,
+            session_id=sess_a_id,
+            now=now_utc,
+            reason="rls_self_revocation_test",
+            session_token_hash="a" * 64,
+        )
+        app_db.commit()
+        apply_pg_identity_context(app_db, session_token_hash="a" * 64)
+        assert app_db.execute(text("SELECT count(*) FROM auth_sessions")).scalar() == 0
+        app_db.rollback()
     finally:
         app_db.close()
 

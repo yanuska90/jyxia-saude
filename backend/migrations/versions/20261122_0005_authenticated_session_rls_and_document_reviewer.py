@@ -116,6 +116,41 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
     op.execute(
         sa.text(
             """
+            CREATE OR REPLACE FUNCTION public.jyxia_consume_oidc_auth_state(
+                p_state_hash varchar,
+                p_now timestamptz
+            )
+            RETURNS varchar
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog, public
+            AS $$
+            DECLARE
+                v_ctx_state varchar;
+                v_id varchar;
+            BEGIN
+                v_ctx_state := NULLIF(current_setting('app.current_oidc_state_hash', true), '');
+                IF p_state_hash IS NULL OR v_ctx_state IS NULL OR p_state_hash <> v_ctx_state THEN
+                    RAISE EXCEPTION 'OIDC state consume rejected: state_hash mismatch against active context';
+                END IF;
+
+                UPDATE public.oidc_auth_states
+                SET consumed_at = p_now
+                WHERE state_hash = p_state_hash
+                  AND consumed_at IS NULL
+                  AND expires_at > p_now
+                RETURNING id INTO v_id;
+
+                RETURN v_id;
+            END;
+            $$;
+            """
+        )
+    )
+
+    op.execute(
+        sa.text(
+            """
             CREATE OR REPLACE FUNCTION public.jyxia_finalize_oidc_auth_state(
                 p_state_hash varchar
             )
@@ -137,6 +172,51 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
                 WHERE state_hash = p_state_hash
                   AND consumed_at IS NOT NULL
                   AND expires_at > now();
+            END;
+            $$;
+            """
+        )
+    )
+
+    op.execute(
+        sa.text(
+            """
+            CREATE OR REPLACE FUNCTION public.jyxia_revoke_auth_session(
+                p_session_id varchar,
+                p_reason varchar,
+                p_now timestamptz
+            )
+            RETURNS integer
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog, public
+            AS $$
+            DECLARE
+                v_ctx_sess_hash varchar;
+                v_updated integer;
+            BEGIN
+                IF session_user = 'jyxia_app' THEN
+                    v_ctx_sess_hash := NULLIF(current_setting('app.current_session_token_hash', true), '');
+                    IF v_ctx_sess_hash IS NULL OR v_ctx_sess_hash !~ '^[0-9a-f]{64}$' THEN
+                        RAISE EXCEPTION 'Session revocation rejected: missing or invalid session_token_hash proof';
+                    END IF;
+
+                    UPDATE public.auth_sessions
+                    SET revoked_at = p_now,
+                        revocation_reason = left(COALESCE(p_reason, 'revoked'), 120)
+                    WHERE id = p_session_id
+                      AND session_token_hash = v_ctx_sess_hash
+                      AND revoked_at IS NULL;
+                ELSE
+                    UPDATE public.auth_sessions
+                    SET revoked_at = p_now,
+                        revocation_reason = left(COALESCE(p_reason, 'revoked'), 120)
+                    WHERE id = p_session_id
+                      AND revoked_at IS NULL;
+                END IF;
+
+                GET DIAGNOSTICS v_updated = ROW_COUNT;
+                RETURN v_updated;
             END;
             $$;
             """
@@ -719,7 +799,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_auth_sessions_select ON auth_sessions
             FOR SELECT
             USING (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_session_token_hash', true), '') IS NOT NULL
                     AND session_token_hash = NULLIF(current_setting('app.current_session_token_hash', true), '')
@@ -737,7 +817,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_auth_sessions_insert ON auth_sessions
             FOR INSERT
             WITH CHECK (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_session_token_hash', true), '') IS NOT NULL
                     AND session_token_hash = NULLIF(current_setting('app.current_session_token_hash', true), '')
@@ -780,7 +860,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_auth_sessions_update ON auth_sessions
             FOR UPDATE
             USING (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_session_token_hash', true), '') IS NOT NULL
                     AND session_token_hash = NULLIF(current_setting('app.current_session_token_hash', true), '')
@@ -790,7 +870,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
                 )
             )
             WITH CHECK (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_session_token_hash', true), '') IS NOT NULL
                     AND session_token_hash = NULLIF(current_setting('app.current_session_token_hash', true), '')
@@ -811,7 +891,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_external_identities_select ON external_identities
             FOR SELECT
             USING (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR public.jyxia_is_session_authorized_for_identity(external_identities.id)
                 OR public.jyxia_is_valid_oidc_callback_lookup(external_identities.issuer, external_identities.subject)
             );
@@ -824,7 +904,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_external_identities_insert ON external_identities
             FOR INSERT
             WITH CHECK (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
             );
             """
         )
@@ -835,12 +915,12 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_external_identities_update ON external_identities
             FOR UPDATE
             USING (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR public.jyxia_is_session_authorized_for_identity(external_identities.id)
                 OR public.jyxia_is_valid_oidc_callback_lookup(external_identities.issuer, external_identities.subject)
             )
             WITH CHECK (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR public.jyxia_is_session_authorized_for_identity(external_identities.id)
                 OR public.jyxia_is_valid_oidc_callback_lookup(external_identities.issuer, external_identities.subject)
             );
@@ -859,7 +939,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_oidc_auth_states_select ON oidc_auth_states
             FOR SELECT
             USING (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_oidc_state_hash', true), '') IS NOT NULL
                     AND state_hash = NULLIF(current_setting('app.current_oidc_state_hash', true), '')
@@ -876,7 +956,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_oidc_auth_states_insert ON oidc_auth_states
             FOR INSERT
             WITH CHECK (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_oidc_state_hash', true), '') IS NOT NULL
                     AND state_hash = NULLIF(current_setting('app.current_oidc_state_hash', true), '')
@@ -893,7 +973,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             CREATE POLICY p_oidc_auth_states_update ON oidc_auth_states
             FOR UPDATE
             USING (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_oidc_state_hash', true), '') IS NOT NULL
                     AND state_hash = NULLIF(current_setting('app.current_oidc_state_hash', true), '')
@@ -902,7 +982,7 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
                 )
             )
             WITH CHECK (
-                session_user <> 'jyxia_app'
+                current_user <> 'jyxia_app'
                 OR (
                     NULLIF(current_setting('app.current_oidc_state_hash', true), '') IS NOT NULL
                     AND state_hash = NULLIF(current_setting('app.current_oidc_state_hash', true), '')
@@ -922,7 +1002,9 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
             BEGIN
                 REVOKE ALL ON FUNCTION public.jyxia_is_session_authorized_for_identity(varchar) FROM PUBLIC;
                 REVOKE ALL ON FUNCTION public.jyxia_is_valid_oidc_callback_lookup(varchar, varchar) FROM PUBLIC;
+                REVOKE ALL ON FUNCTION public.jyxia_consume_oidc_auth_state(varchar, timestamptz) FROM PUBLIC;
                 REVOKE ALL ON FUNCTION public.jyxia_finalize_oidc_auth_state(varchar) FROM PUBLIC;
+                REVOKE ALL ON FUNCTION public.jyxia_revoke_auth_session(varchar, varchar, timestamptz) FROM PUBLIC;
                 REVOKE ALL ON FUNCTION public.jyxia_append_audit_event(
                     varchar, varchar, varchar, integer, varchar, varchar, varchar, varchar, text, varchar, varchar, timestamptz
                 ) FROM PUBLIC;
@@ -933,7 +1015,9 @@ def _upgrade_pg_authenticated_session_definer_and_rls() -> None:
                 IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'jyxia_app') THEN
                     GRANT EXECUTE ON FUNCTION public.jyxia_is_session_authorized_for_identity(varchar) TO jyxia_app;
                     GRANT EXECUTE ON FUNCTION public.jyxia_is_valid_oidc_callback_lookup(varchar, varchar) TO jyxia_app;
+                    GRANT EXECUTE ON FUNCTION public.jyxia_consume_oidc_auth_state(varchar, timestamptz) TO jyxia_app;
                     GRANT EXECUTE ON FUNCTION public.jyxia_finalize_oidc_auth_state(varchar) TO jyxia_app;
+                    GRANT EXECUTE ON FUNCTION public.jyxia_revoke_auth_session(varchar, varchar, timestamptz) TO jyxia_app;
                     GRANT EXECUTE ON FUNCTION public.jyxia_append_audit_event(
                         varchar, varchar, varchar, integer, varchar, varchar, varchar, varchar, text, varchar, varchar, timestamptz
                     ) TO jyxia_app;
@@ -1035,7 +1119,9 @@ def _downgrade_pg_authenticated_session_definer_and_rls() -> None:
         )
     )
 
+    op.execute(sa.text("DROP FUNCTION IF EXISTS public.jyxia_revoke_auth_session(varchar, varchar, timestamptz);"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS public.jyxia_finalize_oidc_auth_state(varchar);"))
+    op.execute(sa.text("DROP FUNCTION IF EXISTS public.jyxia_consume_oidc_auth_state(varchar, timestamptz);"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS public.jyxia_is_valid_oidc_callback_lookup(varchar, varchar);"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS public.jyxia_is_session_authorized_for_identity(varchar);"))
 

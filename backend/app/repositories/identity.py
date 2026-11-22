@@ -209,19 +209,28 @@ class IdentityAndSessionRepository:
         )
         if row is None:
             return None
-        result = session.execute(
-            update(OidcAuthState)
-            .where(
-                OidcAuthState.id == row.id,
-                OidcAuthState.state_hash == state_hash,
-                OidcAuthState.consumed_at.is_(None),
-                OidcAuthState.expires_at > now,
+        bind = session.get_bind()
+        if bind is not None and bind.dialect.name == "postgresql":
+            consumed_id = session.execute(
+                text("SELECT public.jyxia_consume_oidc_auth_state(:p_state_hash, :p_now)"),
+                {"p_state_hash": state_hash, "p_now": now},
+            ).scalar()
+            if consumed_id != row.id:
+                return None
+        else:
+            result = session.execute(
+                update(OidcAuthState)
+                .where(
+                    OidcAuthState.id == row.id,
+                    OidcAuthState.state_hash == state_hash,
+                    OidcAuthState.consumed_at.is_(None),
+                    OidcAuthState.expires_at > now,
+                )
+                .values(consumed_at=now)
+                .execution_options(synchronize_session=False)
             )
-            .values(consumed_at=now)
-            .execution_options(synchronize_session=False)
-        )
-        if result.rowcount != 1:  # type: ignore[attr-defined]
-            return None
+            if result.rowcount != 1:  # type: ignore[attr-defined]
+                return None
         row.consumed_at = now
         return row
 
@@ -343,11 +352,25 @@ class IdentityAndSessionRepository:
     ) -> None:
         if session_token_hash is not None:
             apply_pg_identity_context(session, session_token_hash=session_token_hash)
-        session.execute(
-            update(AuthSession)
-            .where(AuthSession.id == session_id, AuthSession.revoked_at.is_(None))
-            .values(revoked_at=now, revocation_reason=reason[:120])
-        )
+        bind = session.get_bind()
+        if bind is not None and bind.dialect.name == "postgresql":
+            session.execute(
+                text(
+                    "SELECT public.jyxia_revoke_auth_session(:p_session_id, :p_reason, :p_now)"
+                ),
+                {
+                    "p_session_id": session_id,
+                    "p_reason": reason[:120],
+                    "p_now": now,
+                },
+            )
+        else:
+            session.execute(
+                update(AuthSession)
+                .where(AuthSession.id == session_id, AuthSession.revoked_at.is_(None))
+                .values(revoked_at=now, revocation_reason=reason[:120])
+                .execution_options(synchronize_session=False)
+            )
 
     @staticmethod
     def revoke_all_user_sessions(
