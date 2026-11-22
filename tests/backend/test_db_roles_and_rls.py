@@ -728,6 +728,105 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         )
         app_db.commit()
 
+        # 9. Etapa 3.3.1: Verify document ingestion, version immutability trigger, RLS isolation,
+        #    and concurrent idempotency on real PostgreSQL 16 as jyxia_app
+        from concurrent.futures import ThreadPoolExecutor
+        from pathlib import Path
+        from app.core.constants import DocumentKind
+        from app.services.institutional_service import (
+            IdempotencyConflictError,
+            InstitutionalService,
+        )
+        from app.services.storage import LocalControlledSyntheticStorage
+
+        pg_storage_root = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "jyxia_pg16_ingest_test"
+        pg_storage = LocalControlledSyntheticStorage(pg_storage_root, enabled=True, max_bytes=1024 * 1024)
+        valid_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
+
+        def _concurrent_ingest(worker_idx: int) -> tuple[str, str, bool]:
+            w_db = app_factory()
+            try:
+                w_ctx = TenantContext(
+                    organization_id=org_a_id,
+                    actor_user_id=user_a_id,
+                    session_token_hash="a" * 64,
+                    source="authenticated_request",
+                )
+                res = InstitutionalService.ingest_case_document(
+                    w_db,
+                    w_ctx,
+                    storage=pg_storage,
+                    case_id=case_a_id,
+                    content=valid_pdf,
+                    mime_type="application/pdf",
+                    original_filename=f"laudo-pg16-{worker_idx}.pdf",
+                    document_kind=DocumentKind.LAUDO,
+                    source_label="pg16_concurrent_ingest",
+                    idempotency_key="pg16-concurrent-idem-001",
+                )
+                return res.document.id, res.version.id, res.idempotent_replay
+            finally:
+                w_db.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_concurrent_ingest, 1)
+            f2 = pool.submit(_concurrent_ingest, 2)
+            r1 = f1.result()
+            r2 = f2.result()
+
+        assert r1[0] == r2[0], "Concurrent uploads with same Idempotency-Key must resolve to single Document"
+        assert r1[1] == r2[1], "Concurrent uploads with same Idempotency-Key must resolve to single DocumentVersion"
+        assert {r1[2], r2[2]} == {False, True}
+
+        # Reusing same Idempotency-Key with different PDF payload on PG16 MUST raise IdempotencyConflictError
+        with pytest.raises(IdempotencyConflictError):
+            InstitutionalService.ingest_case_document(
+                app_db,
+                TenantContext(
+                    organization_id=org_a_id,
+                    actor_user_id=user_a_id,
+                    session_token_hash="a" * 64,
+                    source="authenticated_request",
+                ),
+                storage=pg_storage,
+                case_id=case_a_id,
+                content=b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n%%EOF\n",
+                mime_type="application/pdf",
+                original_filename="laudo-conflict.pdf",
+                document_kind=DocumentKind.LAUDO,
+                source_label="pg16_concurrent_ingest",
+                idempotency_key="pg16-concurrent-idem-001",
+            )
+        app_db.rollback()
+
+        # PostgreSQL trigger trg_document_versions_immutable_core MUST block direct SQL mutation of sha256_hex / storage_key / DELETE
+        apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_a_id)
+        apply_pg_identity_context(app_db, session_token_hash="a" * 64)
+        with pytest.raises(Exception):
+            app_db.execute(
+                text("UPDATE document_versions SET sha256_hex = repeat('f', 64) WHERE id = :vid"),
+                {"vid": r1[1]},
+            )
+        app_db.rollback()
+
+        # Tenant B (Org B session "b" * 64) CANNOT see or retrieve Tenant A's ingested document or version under PG16 RLS
+        clear_pg_rls_context(app_db)
+        apply_pg_rls_context(app_db, organization_id=org_b_id, user_id=user_b_id)
+        apply_pg_identity_context(app_db, session_token_hash="b" * 64)
+        assert (
+            app_db.execute(
+                text("SELECT count(*) FROM documents WHERE id = :did"), {"did": r1[0]}
+            ).scalar()
+            == 0
+        )
+        assert (
+            app_db.execute(
+                text("SELECT count(*) FROM document_versions WHERE id = :vid"), {"vid": r1[1]}
+            ).scalar()
+            == 0
+        )
+        app_db.rollback()
+
         # Verify jyxia_app can revoke its own authenticated session via revoke_session, after which SELECT returns 0 rows
         IdentityAndSessionRepository.revoke_session(
             app_db,

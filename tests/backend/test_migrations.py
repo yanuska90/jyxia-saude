@@ -71,6 +71,12 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
 
+        # Incremental downgrade 0006 -> 0005
+        command.downgrade(cfg, "20261122_0005")
+        with engine.connect() as conn:
+            ver_0005 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert ver_0005 == "20261122_0005"
+
         # Incremental downgrade 0005 -> 0004
         command.downgrade(cfg, "20261121_0004")
         with engine.connect() as conn:
