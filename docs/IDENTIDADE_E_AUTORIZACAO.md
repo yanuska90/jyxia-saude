@@ -45,13 +45,13 @@ Documento técnico canônico da arquitetura de identidade e autorização da **M
 - **Derivação confiável de `TenantContext`:** `X-Organization-ID` conflitante é explicitamente recusado (`403` + auditoria `TENANT_HEADER_SPOOF_REJECTED`). Usuários com uma organização iniciam com ela ativa; usuários multi-tenant selecionam explicitamente a organização via `POST /api/v1/auth/select-organization`, validado contra associação `active` em `organization_memberships`.
 - **Autoridade estritamente administrativa:** `AccessContext` retorna sempre `administrative_only: true` e `clinical_approval: false`. O identificador externo canônico na API JSON e no schema OpenAPI é **`document_reviewer`** (com leitura transparente de registros históricos `'clinical_reviewer'` no banco e aceitação dos aliases `'clinical_reviewer'` / `'administrative_reviewer'` na entrada), representando exclusivamente revisor documental administrativo de campos extraídos e evidências (zero decisão clínica).
 
-| Papel (`OrganizationRole`) | Escopo principal | `/access-context` (`organization:read`) | `/cases` (`case:read`) | `/members` (`membership:read`) | `/audit-events` (`audit:read`) | Escrita / Gestão (`case:write`, `field:review`, `membership:manage`) |
-| --- | --- | --- | --- | --- | --- | --- |
-| `org_admin` | Administração institucional da organização | `200` | `200` | `200` | `200` | Conforme permissões administrativas da org |
-| `admin_operator` | Preparação operacional e de dossiês administrativos | `200` | `200` | `200` | `403` | `case:write`, `document:prepare` |
-| `document_reviewer` (alias legado `clinical_reviewer` / `administrative_reviewer`) | Revisão administrativa de campos/evidências (zero aprovação ou decisão clínica) | `200` | `200` | `403` | `403` | `case:write`, `field:review` |
-| `auditor_readonly` | Auditoria e conferência exclusivamente leitura | `200` | `200` | `200` | `200` | Nenhuma (somente leitura) |
-| `read_only` | Consulta básica de contexto e lista administrativa | `200` | `200` | `403` | `403` | Nenhuma (somente leitura) |
+| Papel (`OrganizationRole`) | Escopo principal | `/access-context` (`organization:read`) | `/cases` (`case:read`) | `/members` (`membership:read`) | `/audit-events` (`audit:read`) | Upload Documental (`document:upload`) | Consulta / Download (`document:read`) | Escrita / Gestão (`case:write`, `field:review`, `membership:manage`) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `org_admin` | Administração institucional da organização | `200` | `200` | `200` | `200` | `201` / `200` | `200` | Conforme permissões administrativas da org |
+| `admin_operator` | Preparação operacional e de dossiês administrativos | `200` | `200` | `200` | `403` | `201` / `200` | `200` | `case:write`, `document:prepare`, `document:upload` |
+| `document_reviewer` (alias legado `clinical_reviewer` / `administrative_reviewer`) | Revisão administrativa de campos/evidências (zero aprovação ou decisão clínica) | `200` | `200` | `403` | `403` | `403` | `200` | `case:write`, `field:review` |
+| `auditor_readonly` | Auditoria e conferência exclusivamente leitura | `200` | `200` | `200` | `200` | `403` | `200` | Nenhuma (somente leitura) |
+| `read_only` | Consulta básica de contexto e lista administrativa | `200` | `200` | `403` | `403` | `403` | `200` | Nenhuma (somente leitura) |
 
 ## 7. Endurecimento PostgreSQL 16 (`migrations 0003`, `0004` e `0005`): separação de roles, FORCE RLS e trilha imutável
 

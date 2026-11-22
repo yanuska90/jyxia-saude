@@ -24,17 +24,22 @@ Documento técnico atualizado na **Etapa 3.2** (`backend/` `0.2.0`), evoluindo a
 
 ## 2. Separação de privilégios no PostgreSQL 16, FORCE RLS e trilha append-only
 
-- **Migrations `20261120_0003`, `20261121_0004` e `20261122_0005` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
+- **Migrations `20261120_0003`, `20261121_0004`, `20261122_0005` e `20261122_0006` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
   - Separa `migration_owner` (dona do schema/DDL/funções `SECURITY DEFINER`) da role restrita de runtime `jyxia_app` (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION`, sem `DDL`, sem `DELETE`/`TRUNCATE` e sem `INSERT` direto nas tabelas de auditoria);
   - Habilita **Row-Level Security com `FORCE ROW LEVEL SECURITY`** nas 9 tabelas organizacionais/auditoria (`organization_memberships`, `document_cases`, `documents`, `document_versions`, `processing_runs`, `extracted_fields`, `evidence_references`, `human_reviews`, `audit_events`) e nas 3 tabelas sensíveis de sessão/identidade (`auth_sessions`, `external_identities`, `oidc_auth_states`, protegidas por hash não enumerável de sessão ativa ou transação OIDC, sem aceitar `app.current_user_id` isolado), além de RLS em `security_auth_events`;
   - Instala triggers **`BEFORE TRUNCATE`** em `audit_events` e triggers `BEFORE UPDATE / DELETE / TRUNCATE` em `security_auth_events`;
   - Em PostgreSQL, `AuditEventRepository` e `SecurityAuditRepository` gravam via funções **`SECURITY DEFINER SET search_path = pg_catalog, public`** (`jyxia_append_audit_event`, `jyxia_append_security_event`, `jyxia_get_security_audit_head`) que exigem de `jyxia_app` a comprovação de sessão ativa (`app.current_session_token_hash` não revogada e não expirada em `auth_sessions`, ou transação OIDC ativa para eventos pré-sessão), correspondência de ator e organização selecionada na sessão, usuário ativo e membership ativa (`status='active'`).
 
-## 3. Endpoints HTTP (`backend/` `0.2.0`)
+## 3. Endpoints HTTP (`backend/` `0.2.0` · Etapa 3.3.1)
 
 - **Públicos / infraestrutura:** `/api/v1/health/live`, `/api/v1/health/ready`, `/api/v1/auth/login`, `/api/v1/auth/callback`;
 - **Sessão autenticada (com CSRF + `Origin` em mutações):** `POST /api/v1/auth/logout`, `GET /api/v1/auth/session`, `POST /api/v1/auth/select-organization`, `GET /api/v1/me`, `GET /api/v1/me/organizations`;
-- **Organizacionais protegidos por RBAC + vínculo ativo + RLS:** `/api/v1/organizations/{organization_id}/access-context`, `/cases`, `/members` e `/audit-events`.
+- **Organizacionais e ingestão documental protegidos por RBAC + vínculo ativo + RLS:**
+  - `GET /api/v1/organizations/{organization_id}/access-context`, `/cases`, `/members` e `/audit-events`;
+  - `POST /api/v1/organizations/{organization_id}/cases/{case_id}/documents` (upload `multipart/form-data` em streaming com CSRF, RBAC `document:upload` restrito a `org_admin` e `admin_operator`, validação estrutural PDF/PNG, limite de tamanho durante leitura, SHA-256, `Idempotency-Key` transacional, versão inicial `version_number=1`, compensação contra órfãos e auditoria `document.ingested`);
+  - `GET /api/v1/organizations/{organization_id}/cases/{case_id}/documents` (listagem paginada por caso com `document:read`);
+  - `GET /api/v1/organizations/{organization_id}/documents/{document_id}` (metadados administrativos e versões com `document:read`, sem expor caminhos físicos ou `storage_key`);
+  - `GET /api/v1/organizations/{organization_id}/documents/{document_id}/versions/{version_id}/content` (recuperação binária controlada com verificação de SHA-256, `Content-Disposition: attachment` e `X-Content-Type-Options: nosniff`).
 
 ## 4. Storage sintético local e validação PostgreSQL 16 + Keycloak 26.8.2
 
