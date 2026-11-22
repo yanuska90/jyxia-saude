@@ -169,3 +169,103 @@ class OrganizationAuditEventsResponse(BaseModel):
     organization_id: str
     audit_events: list[AuditEventSummaryResponse]
     security_events: list[SecurityAuditEventSummaryResponse]
+
+
+class DocumentVersionSummaryResponse(BaseModel):
+    """Public metadata for a document version without exposing storage keys or filesystem paths."""
+
+    model_config = ConfigDict(frozen=True)
+
+    version_id: str
+    document_id: str
+    organization_id: str
+    version_number: int
+    sha256_hex: str
+    mime_type: str
+    byte_size: int
+    page_count: int | None = None
+    original_filename: str | None = None
+    created_by_user_id: str | None = None
+    is_current: bool
+    created_at: datetime
+
+
+class DocumentSummaryResponse(BaseModel):
+    """Administrative summary of a case document and its current version."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    organization_id: str
+    case_id: str | None
+    document_kind: str
+    document_subfamily: str | None = None
+    source_label: str
+    external_reference: str | None = None
+    description: str | None = None
+    created_by_user_id: str | None = None
+    quarantined: bool
+    administrative_only: bool = True
+    clinical_approval: bool = False
+    created_at: datetime
+    updated_at: datetime
+    current_version: DocumentVersionSummaryResponse | None = None
+
+
+class DocumentIngestionResponse(BaseModel):
+    """Response returned upon authenticated document upload and initial version registration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    organization_id: str
+    case_id: str
+    document_kind: str
+    document_subfamily: str | None = None
+    source_label: str
+    external_reference: str | None = None
+    description: str | None = None
+    created_by_user_id: str | None = None
+    quarantined: bool
+    idempotent_replay: bool = False
+    administrative_only: bool = True
+    clinical_approval: bool = False
+    created_at: datetime
+    current_version: DocumentVersionSummaryResponse
+
+
+class CaseDocumentsListResponse(BaseModel):
+    """Paginated list of documents belonging to an organization's document case."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    case_id: str
+    total: int
+    limit: int
+    offset: int
+    documents: list[DocumentSummaryResponse]
+
+
+class DocumentDetailResponse(BaseModel):
+    """Full administrative metadata and version history for an organization document."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    organization_id: str
+    case_id: str | None
+    document_kind: str
+    document_subfamily: str | None = None
+    source_label: str
+    external_reference: str | None = None
+    description: str | None = None
+    created_by_user_id: str | None = None
+    quarantined: bool
+    quarantine_reason: str | None = None
+    administrative_only: bool = True
+    clinical_approval: bool = False
+    created_at: datetime
+    updated_at: datetime
+    current_version: DocumentVersionSummaryResponse | None = None
+    versions: list[DocumentVersionSummaryResponse]

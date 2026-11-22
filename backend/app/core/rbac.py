@@ -30,8 +30,9 @@ class RbacPermission(StrEnum):
     MEMBERSHIP_MANAGE = "membership:manage"
     CASE_READ = "case:read"
     CASE_WRITE = "case:write"
+    DOCUMENT_READ = "document:read"
     DOCUMENT_PREPARE = "document:prepare"
-    DOCUMENT_UPLOAD = "document:prepare"
+    DOCUMENT_UPLOAD = "document:upload"
     FIELD_REVIEW = "field:review"
     HUMAN_REVIEW_WRITE = "field:review"
     AUDIT_READ = "audit:read"
@@ -59,7 +60,9 @@ ROLE_PERMISSIONS: dict[OrganizationRole, frozenset[RbacPermission]] = {
             RbacPermission.MEMBERSHIP_MANAGE,
             RbacPermission.CASE_READ,
             RbacPermission.CASE_WRITE,
+            RbacPermission.DOCUMENT_READ,
             RbacPermission.DOCUMENT_PREPARE,
+            RbacPermission.DOCUMENT_UPLOAD,
             RbacPermission.FIELD_REVIEW,
             RbacPermission.AUDIT_READ,
         }
@@ -70,7 +73,9 @@ ROLE_PERMISSIONS: dict[OrganizationRole, frozenset[RbacPermission]] = {
             RbacPermission.MEMBERSHIP_READ,
             RbacPermission.CASE_READ,
             RbacPermission.CASE_WRITE,
+            RbacPermission.DOCUMENT_READ,
             RbacPermission.DOCUMENT_PREPARE,
+            RbacPermission.DOCUMENT_UPLOAD,
         }
     ),
     OrganizationRole.DOCUMENT_REVIEWER: frozenset(
@@ -78,6 +83,7 @@ ROLE_PERMISSIONS: dict[OrganizationRole, frozenset[RbacPermission]] = {
             RbacPermission.ORGANIZATION_READ,
             RbacPermission.CASE_READ,
             RbacPermission.CASE_WRITE,
+            RbacPermission.DOCUMENT_READ,
             RbacPermission.FIELD_REVIEW,
         }
     ),
@@ -86,6 +92,7 @@ ROLE_PERMISSIONS: dict[OrganizationRole, frozenset[RbacPermission]] = {
             RbacPermission.ORGANIZATION_READ,
             RbacPermission.MEMBERSHIP_READ,
             RbacPermission.CASE_READ,
+            RbacPermission.DOCUMENT_READ,
             RbacPermission.AUDIT_READ,
         }
     ),
@@ -93,6 +100,7 @@ ROLE_PERMISSIONS: dict[OrganizationRole, frozenset[RbacPermission]] = {
         {
             RbacPermission.ORGANIZATION_READ,
             RbacPermission.CASE_READ,
+            RbacPermission.DOCUMENT_READ,
         }
     ),
 }

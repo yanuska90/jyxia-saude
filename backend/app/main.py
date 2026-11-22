@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +13,7 @@ from sqlalchemy import Engine
 
 from app.api.router import api_router
 from app.core.config import Settings, load_settings
-from app.core.constants import CSRF_HEADER_NAME
+from app.core.constants import CSRF_HEADER_NAME, IDEMPOTENCY_KEY_HEADER_NAME
 from app.core.logging import configure_logging, redact_sensitive_text
 from app.core.oidc import (
     OidcNotConfiguredError,
@@ -22,6 +23,23 @@ from app.core.oidc import (
 )
 from app.core.rbac import AuthenticationRequiredError, AuthorizationDeniedError
 from app.db.session import create_db_engine, create_session_factory
+from app.services.storage import DocumentStoragePort, LocalControlledSyntheticStorage
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _build_default_storage(settings: Settings) -> LocalControlledSyntheticStorage:
+    raw_root = Path(settings.storage_root)
+    resolved_root = raw_root if raw_root.is_absolute() else (_REPO_ROOT / raw_root)
+    storage_enabled = bool(
+        settings.allow_local_synthetic_storage and settings.env in {"development", "test"}
+    )
+    return LocalControlledSyntheticStorage(
+        resolved_root,
+        enabled=storage_enabled,
+        max_bytes=settings.max_document_bytes,
+        forbidden_parent_dir=_REPO_ROOT,
+    )
 
 
 def create_app(
@@ -29,6 +47,7 @@ def create_app(
     *,
     engine: Engine | None = None,
     oidc_adapter: OidcProviderAdapter | None = None,
+    storage: DocumentStoragePort | None = None,
 ) -> FastAPI:
     """Instantiate configured FastAPI app with OIDC/RBAC security and sanitized errors."""
     resolved_settings = settings if settings is not None else load_settings(strict_database=False)
@@ -69,6 +88,9 @@ def create_app(
     application.state.settings = resolved_settings
     application.state.engine = resolved_engine
     application.state.oidc_adapter = resolved_oidc
+    application.state.storage = (
+        storage if storage is not None else _build_default_storage(resolved_settings)
+    )
     application.state.session_factory = (
         create_session_factory(resolved_engine) if resolved_engine is not None else None
     )
@@ -79,7 +101,12 @@ def create_app(
             allow_origins=list(resolved_settings.cors_allowed_origins),
             allow_credentials=True,
             allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Content-Type", CSRF_HEADER_NAME, "X-Request-ID"],
+            allow_headers=[
+                "Content-Type",
+                CSRF_HEADER_NAME,
+                "X-Request-ID",
+                IDEMPOTENCY_KEY_HEADER_NAME,
+            ],
         )
 
     @application.exception_handler(AuthenticationRequiredError)

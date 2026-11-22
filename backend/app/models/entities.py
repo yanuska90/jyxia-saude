@@ -217,10 +217,19 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         UniqueConstraint("organization_id", "id", name="uq_documents_org_id"),
+        UniqueConstraint(
+            "organization_id", "case_id", "idempotency_key", name="uq_documents_org_case_idemp"
+        ),
         ForeignKeyConstraint(
             ["organization_id", "case_id"],
             ["document_cases.organization_id", "document_cases.id"],
             name="fk_documents_org_case",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "created_by_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_documents_org_creator",
             ondelete="RESTRICT",
         ),
         CheckConstraint(
@@ -228,6 +237,21 @@ class Document(Base):
             name="document_kind_valid",
         ),
         CheckConstraint("length(trim(source_label)) >= 1", name="source_label_nonempty"),
+        CheckConstraint(
+            "external_reference IS NULL OR length(trim(external_reference)) >= 2",
+            name="external_ref_min_len",
+        ),
+        CheckConstraint(
+            "description IS NULL OR length(trim(description)) >= 1",
+            name="description_nonempty",
+        ),
+        CheckConstraint(
+            "idempotency_key IS NULL OR (length(trim(idempotency_key)) >= 4 "
+            "AND idempotency_fingerprint IS NOT NULL "
+            "AND length(trim(idempotency_fingerprint)) = 64 "
+            "AND idempotency_fingerprint = lower(idempotency_fingerprint))",
+            name="idempotency_coherent",
+        ),
         CheckConstraint(
             "discarded_at IS NULL OR (discard_reason IS NOT NULL AND length(trim(discard_reason)) >= 3)",
             name="discard_requires_reason",
@@ -245,6 +269,13 @@ class Document(Base):
     )
     document_subfamily: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source_label: Mapped[str] = mapped_column(String(160), nullable=False)
+    external_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     quarantined: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     discarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -300,6 +331,12 @@ class DocumentVersion(Base):
             name="fk_doc_versions_org_doc_supersede",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["organization_id", "created_by_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_doc_versions_org_creator",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint("version_number >= 1", name="version_number_positive"),
         CheckConstraint(
             "length(trim(sha256_hex)) = 64 AND sha256_hex = lower(sha256_hex)",
@@ -343,6 +380,9 @@ class DocumentVersion(Base):
         String(64), nullable=False, default=StorageDriver.LOCAL_CONTROLLED_SYNTHETIC.value
     )
     storage_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     superseded_by_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -357,6 +397,37 @@ class DocumentVersion(Base):
             "Document.id == DocumentVersion.document_id)"
         ),
     )
+
+
+_IMMUTABLE_DOC_VERSION_ATTRS: tuple[str, ...] = (
+    "id",
+    "organization_id",
+    "document_id",
+    "version_number",
+    "sha256_hex",
+    "mime_type",
+    "byte_size",
+    "storage_driver",
+    "storage_key",
+)
+
+
+@event.listens_for(DocumentVersion, "before_update")
+def _forbid_doc_version_core_mutation(_mapper: Any, _connection: Any, target: DocumentVersion) -> None:
+    from sqlalchemy import inspect as sa_inspect
+
+    state = sa_inspect(target)
+    for attr_name in _IMMUTABLE_DOC_VERSION_ATTRS:
+        hist = state.attrs[attr_name].history
+        if hist.has_changes():
+            raise ValueError(
+                f"DocumentVersion.{attr_name} is immutable once registered and cannot be overwritten."
+            )
+
+
+@event.listens_for(DocumentVersion, "before_delete")
+def _forbid_doc_version_delete(_mapper: Any, _connection: Any, _target: DocumentVersion) -> None:
+    raise ValueError("DocumentVersion is immutable once registered and cannot be deleted.")
 
 
 class ProcessingRun(Base):

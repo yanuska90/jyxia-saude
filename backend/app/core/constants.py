@@ -11,7 +11,7 @@ from pydantic_core import CoreSchema
 APP_NAME = "JYXIA Institutional Foundation"
 APP_VERSION = "0.2.0"
 DEFAULT_POLICY_VERSION = "3.2.0"
-DEFAULT_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024  # 10 MiB ceiling for controlled synthetic binaries
+DEFAULT_MAX_DOCUMENT_BYTES = 20 * 1024 * 1024  # 20 MiB ceiling for controlled synthetic binaries
 
 ALLOWED_MIME_TYPES: frozenset[str] = frozenset({"application/pdf", "image/png"})
 ALLOWED_ENVIRONMENTS: frozenset[str] = frozenset({"development", "test", "staging", "production"})
@@ -20,6 +20,7 @@ SESSION_COOKIE_NAME = "jyxia_session"
 CSRF_COOKIE_NAME = "jyxia_csrf"
 OIDC_TX_COOKIE_NAME = "jyxia_oidc_tx"
 CSRF_HEADER_NAME = "X-CSRF-Token"
+IDEMPOTENCY_KEY_HEADER_NAME = "Idempotency-Key"
 
 
 class OrganizationStatus(StrEnum):

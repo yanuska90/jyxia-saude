@@ -23,6 +23,7 @@ from app.services.auth_service import (
     resolve_authorized_tenant_principal,
     verify_csrf_and_origin,
 )
+from app.services.storage import DocumentStoragePort
 
 
 def get_settings(request: Request) -> Settings:
@@ -58,6 +59,16 @@ def get_oidc_adapter(request: Request) -> OidcProviderAdapter:
     if adapter is None:
         raise HTTPException(status_code=503, detail="OIDC adapter is unavailable.")
     return adapter
+
+
+def get_document_storage(request: Request) -> DocumentStoragePort:
+    storage: DocumentStoragePort | None = getattr(request.app.state, "storage", None)
+    if storage is None or not storage.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Controlled synthetic document storage is unavailable in this environment.",
+        )
+    return storage
 
 
 def get_correlation_id(

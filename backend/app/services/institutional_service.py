@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+import hashlib
+import json
+import logging
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.constants import DocumentKind, OrganizationRole
 from app.core.logging import LOGGER_NAME, build_safe_log_extra
+from app.core.rbac import AuthorizationDeniedError, RbacPermission, permissions_for_role
 from app.models.entities import (
     AuditEvent,
     Document,
@@ -41,9 +47,48 @@ from app.schemas.tenant import (
     TenantContext,
     UserCreateInput,
 )
-from app.services.storage import DocumentStoragePort
+from app.services.storage import DocumentStoragePort, StoredObjectMetadata
 
 logger = logging.getLogger(LOGGER_NAME)
+
+
+class IdempotencyConflictError(ValueError):
+    """Raised when an Idempotency-Key is reused with different file content or metadata."""
+
+
+class DocumentNotFoundError(LookupError):
+    """Raised when a target case, document, or version does not exist in the active organization."""
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentIngestionResult:
+    document: Document
+    version: DocumentVersion
+    idempotent_replay: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentWithVersionsResult:
+    document: Document
+    current_version: DocumentVersion | None
+    versions: list[DocumentVersion]
+
+
+@dataclass(frozen=True, slots=True)
+class CaseDocumentsPageResult:
+    case: DocumentCase
+    total: int
+    limit: int
+    offset: int
+    items: list[tuple[Document, DocumentVersion | None]]
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentVersionContentResult:
+    document: Document
+    version: DocumentVersion
+    content: bytes
+    download_filename: str
 
 
 def _verify_actor_membership(session: Session, ctx: TenantContext) -> None:
@@ -56,6 +101,59 @@ def _verify_actor_membership(session: Session, ctx: TenantContext) -> None:
         raise TenantScopeError(
             f"Actor '{ctx.actor_user_id}' has no active membership in organization '{ctx.organization_id}'."
         )
+
+
+def _require_actor_permission(
+    session: Session, ctx: TenantContext, required_permission: RbacPermission
+) -> OrganizationRole:
+    if not ctx.actor_user_id:
+        raise AuthorizationDeniedError("Authenticated actor user context is required.")
+    membership = OrganizationRepository.get_active_membership(
+        session, ctx, user_id=ctx.actor_user_id
+    )
+    if membership is None:
+        raise AuthorizationDeniedError(
+            "Actor lacks an active membership in target organization."
+        )
+    role = OrganizationRole(membership.role)
+    if required_permission not in permissions_for_role(role):
+        raise AuthorizationDeniedError(
+            f"Role '{role.value}' lacks required permission '{required_permission.value}'."
+        )
+    return role
+
+
+def compute_upload_idempotency_fingerprint(
+    *,
+    organization_id: str,
+    case_id: str,
+    sha256_hex: str,
+    mime_type: str,
+    byte_size: int,
+    document_kind: str,
+    document_subfamily: str | None,
+    source_label: str,
+    external_reference: str | None,
+    description: str | None,
+) -> str:
+    canonical = json.dumps(
+        {
+            "organization_id": organization_id,
+            "case_id": case_id,
+            "sha256_hex": sha256_hex,
+            "mime_type": mime_type,
+            "byte_size": byte_size,
+            "document_kind": document_kind,
+            "document_subfamily": document_subfamily,
+            "source_label": source_label,
+            "external_reference": external_reference,
+            "description": description,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class InstitutionalService:
@@ -148,6 +246,10 @@ class InstitutionalService:
             document_kind=payload.document_kind.value,
             document_subfamily=payload.document_subfamily,
             source_label=payload.source_label,
+            external_reference=payload.external_reference,
+            description=payload.description,
+            idempotency_key=payload.idempotency_key,
+            idempotency_fingerprint=payload.idempotency_fingerprint,
             quarantined=payload.quarantined,
             quarantine_reason=payload.quarantine_reason,
         )
@@ -168,6 +270,302 @@ class InstitutionalService:
     @staticmethod
     def get_document(session: Session, ctx: TenantContext, document_id: str) -> Document | None:
         return CaseAndDocumentRepository.get_document(session, ctx, document_id)
+
+    @staticmethod
+    def ingest_case_document(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        storage: DocumentStoragePort,
+        case_id: str,
+        stored_object: StoredObjectMetadata | None = None,
+        content: bytes | None = None,
+        mime_type: str | None = None,
+        original_filename: str | None = None,
+        document_kind: DocumentKind = DocumentKind.DESCONHECIDO,
+        document_subfamily: str | None = None,
+        source_label: str = "institutional_upload",
+        external_reference: str | None = None,
+        description: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> DocumentIngestionResult:
+        """Ingest a validated binary document into an organization's case with transactional compensating cleanup."""
+        stored = stored_object
+        try:
+            _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_UPLOAD)
+            case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+            if case is None:
+                raise DocumentNotFoundError(
+                    f"DocumentCase '{case_id}' was not found inside active organization."
+                )
+
+            if stored is None:
+                if content is None or mime_type is None:
+                    raise ValueError("Either stored_object or (content, mime_type) must be provided.")
+                stored = storage.store_synthetic_bytes(
+                    organization_id=ctx.organization_id,
+                    mime_type=mime_type,
+                    content=content,
+                    original_filename=original_filename,
+                )
+
+            fingerprint: str | None = None
+            if idempotency_key is not None:
+                fingerprint = compute_upload_idempotency_fingerprint(
+                    organization_id=ctx.organization_id,
+                    case_id=case.id,
+                    sha256_hex=stored.sha256_hex,
+                    mime_type=stored.mime_type,
+                    byte_size=stored.byte_size,
+                    document_kind=document_kind.value,
+                    document_subfamily=document_subfamily,
+                    source_label=source_label,
+                    external_reference=external_reference,
+                    description=description,
+                )
+
+            validated_doc_input = DocumentCreateInput(
+                case_id=case.id,
+                document_kind=document_kind,
+                document_subfamily=document_subfamily,
+                source_label=source_label,
+                external_reference=external_reference,
+                description=description,
+                idempotency_key=idempotency_key,
+                idempotency_fingerprint=fingerprint,
+            )
+
+            if validated_doc_input.idempotency_key is not None:
+                existing_doc = CaseAndDocumentRepository.get_document_by_idempotency_key(
+                    session,
+                    ctx,
+                    case_id=case.id,
+                    idempotency_key=validated_doc_input.idempotency_key,
+                )
+                if existing_doc is not None:
+                    storage.delete_uncommitted_object(
+                        organization_id=ctx.organization_id,
+                        storage_key=stored.storage_key,
+                    )
+                    stored = None
+                    if existing_doc.idempotency_fingerprint != fingerprint:
+                        raise IdempotencyConflictError(
+                            "Idempotency-Key was already used with different document content or metadata."
+                        )
+                    existing_versions = CaseAndDocumentRepository.list_document_versions(
+                        session, ctx, document_id=existing_doc.id
+                    )
+                    if not existing_versions:
+                        raise DocumentNotFoundError("Idempotent document lacks registered version.")
+                    return DocumentIngestionResult(
+                        document=existing_doc,
+                        version=existing_versions[0],
+                        idempotent_replay=True,
+                    )
+
+            doc = CaseAndDocumentRepository.create_document(
+                session,
+                ctx,
+                case_id=case.id,
+                document_kind=validated_doc_input.document_kind.value,
+                document_subfamily=validated_doc_input.document_subfamily,
+                source_label=validated_doc_input.source_label,
+                external_reference=validated_doc_input.external_reference,
+                description=validated_doc_input.description,
+                idempotency_key=validated_doc_input.idempotency_key,
+                idempotency_fingerprint=validated_doc_input.idempotency_fingerprint,
+                quarantined=False,
+                quarantine_reason=None,
+            )
+            version_input = DocumentVersionCreateInput(
+                document_id=doc.id,
+                version_number=1,
+                sha256_hex=stored.sha256_hex,
+                mime_type=stored.mime_type,  # type: ignore[arg-type]
+                byte_size=stored.byte_size,
+                page_count=None,
+                original_filename=stored.original_filename,
+                storage_key=stored.storage_key,
+            )
+            version = CaseAndDocumentRepository.create_document_version(
+                session,
+                ctx,
+                document_id=doc.id,
+                version_number=version_input.version_number,
+                sha256_hex=version_input.sha256_hex,
+                mime_type=version_input.mime_type,
+                byte_size=version_input.byte_size,
+                page_count=version_input.page_count,
+                original_filename=version_input.original_filename,
+                storage_driver=version_input.storage_driver.value,
+                storage_key=version_input.storage_key,
+            )
+            AuditEventRepository.append_event(
+                session,
+                ctx,
+                event_type="document.ingested",
+                target_entity_type="document",
+                target_entity_id=doc.id,
+                payload_json={
+                    "operation": "document_upload_ingested",
+                    "case_id": case.id,
+                    "document_id": doc.id,
+                    "document_version_id": version.id,
+                    "version_number": version.version_number,
+                    "document_kind": doc.document_kind,
+                    "sha256_hex": version.sha256_hex,
+                    "byte_size": version.byte_size,
+                    "mime_type": version.mime_type,
+                    "storage_driver": version.storage_driver,
+                },
+            )
+            session.commit()
+            return DocumentIngestionResult(
+                document=doc,
+                version=version,
+                idempotent_replay=False,
+            )
+        except IntegrityError:
+            session.rollback()
+            if stored is not None:
+                storage.delete_uncommitted_object(
+                    organization_id=ctx.organization_id,
+                    storage_key=stored.storage_key,
+                )
+                stored = None
+            if idempotency_key is not None and fingerprint is not None:
+                winner = CaseAndDocumentRepository.get_document_by_idempotency_key(
+                    session,
+                    ctx,
+                    case_id=case_id,
+                    idempotency_key=idempotency_key.strip(),
+                )
+                if winner is not None:
+                    if winner.idempotency_fingerprint == fingerprint:
+                        winner_versions = CaseAndDocumentRepository.list_document_versions(
+                            session, ctx, document_id=winner.id
+                        )
+                        if winner_versions:
+                            return DocumentIngestionResult(
+                                document=winner,
+                                version=winner_versions[0],
+                                idempotent_replay=True,
+                            )
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was concurrently used with different document content or metadata."
+                    )
+            raise
+        except Exception:
+            session.rollback()
+            if stored is not None:
+                storage.delete_uncommitted_object(
+                    organization_id=ctx.organization_id,
+                    storage_key=stored.storage_key,
+                )
+            raise
+
+    @staticmethod
+    def list_case_documents_with_versions(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> CaseDocumentsPageResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+        if case is None:
+            raise DocumentNotFoundError(
+                f"DocumentCase '{case_id}' was not found inside active organization."
+            )
+        docs, total = CaseAndDocumentRepository.list_case_documents(
+            session, ctx, case_id=case.id, limit=limit, offset=offset
+        )
+        items: list[tuple[Document, DocumentVersion | None]] = []
+        for doc in docs:
+            versions = CaseAndDocumentRepository.list_document_versions(
+                session, ctx, document_id=doc.id
+            )
+            current_ver = next((v for v in reversed(versions) if v.is_current), None)
+            if current_ver is None and versions:
+                current_ver = versions[-1]
+            items.append((doc, current_ver))
+        return CaseDocumentsPageResult(
+            case=case,
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=items,
+        )
+
+    @staticmethod
+    def get_document_with_versions(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+    ) -> DocumentWithVersionsResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        doc = CaseAndDocumentRepository.get_document(session, ctx, document_id)
+        if doc is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' was not found inside active organization."
+            )
+        versions = CaseAndDocumentRepository.list_document_versions(
+            session, ctx, document_id=doc.id
+        )
+        current_ver = next((v for v in reversed(versions) if v.is_current), None)
+        if current_ver is None and versions:
+            current_ver = versions[-1]
+        return DocumentWithVersionsResult(
+            document=doc,
+            current_version=current_ver,
+            versions=versions,
+        )
+
+    @staticmethod
+    def retrieve_document_version_content(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        storage: DocumentStoragePort,
+        document_id: str,
+        version_id: str,
+    ) -> DocumentVersionContentResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        doc = CaseAndDocumentRepository.get_document(session, ctx, document_id)
+        if doc is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' was not found inside active organization."
+            )
+        version = CaseAndDocumentRepository.get_document_version_for_document(
+            session,
+            ctx,
+            document_id=doc.id,
+            version_id=version_id,
+        )
+        if version is None:
+            raise DocumentNotFoundError(
+                f"DocumentVersion '{version_id}' was not found for document '{document_id}'."
+            )
+        content = storage.read_synthetic_bytes(
+            organization_id=ctx.organization_id,
+            storage_key=version.storage_key,
+            expected_sha256_hex=version.sha256_hex,
+        )
+        ext = "pdf" if version.mime_type == "application/pdf" else "png"
+        download_filename = (
+            version.original_filename
+            if version.original_filename
+            else f"document-{doc.id[:8]}-v{version.version_number}.{ext}"
+        )
+        return DocumentVersionContentResult(
+            document=doc,
+            version=version,
+            content=content,
+            download_filename=download_filename,
+        )
 
     @staticmethod
     def register_document_version(

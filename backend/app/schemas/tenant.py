@@ -22,18 +22,35 @@ def validate_safe_original_filename(filename: str | None) -> str | None:
     """Validate optional descriptive basename without path traversal or control chars."""
     if filename is None:
         return None
+    if (
+        "/" in filename
+        or "\\" in filename
+        or ".." in filename
+        or "\x00" in filename
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in filename)
+    ):
+        raise ValueError("Invalid original_filename metadata.")
     cleaned = filename.strip()
     if not cleaned:
         return None
-    if (
-        len(cleaned) > 255
-        or "/" in cleaned
-        or "\\" in cleaned
-        or ".." in cleaned
-        or "\x00" in cleaned
-        or any(ord(ch) < 32 for ch in cleaned)
-    ):
+    if len(cleaned) > 255 or cleaned in {".", ".."}:
         raise ValueError("Invalid original_filename metadata.")
+    return cleaned
+
+
+def validate_safe_metadata_text(
+    value: str | None, *, field_name: str, min_len: int = 1, max_len: int = 500
+) -> str | None:
+    """Validate optional metadata string rejecting control characters and out-of-bounds lengths."""
+    if value is None:
+        return None
+    if "\x00" in value or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"Invalid control character in {field_name}.")
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) < min_len or len(cleaned) > max_len:
+        raise ValueError(f"{field_name} length must be between {min_len} and {max_len} characters.")
     return cleaned
 
 
@@ -100,8 +117,52 @@ class DocumentCreateInput(BaseModel):
     document_kind: DocumentKind = DocumentKind.DESCONHECIDO
     document_subfamily: str | None = Field(default=None, max_length=80)
     source_label: str = Field(min_length=1, max_length=160)
+    external_reference: str | None = Field(default=None, min_length=2, max_length=128)
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    idempotency_key: str | None = Field(default=None, min_length=4, max_length=128)
+    idempotency_fingerprint: str | None = Field(
+        default=None, min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"
+    )
     quarantined: bool = False
     quarantine_reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("source_label")
+    @classmethod
+    def _validate_source_label(cls, value: str) -> str:
+        validated = validate_safe_metadata_text(
+            value, field_name="source_label", min_len=1, max_len=160
+        )
+        if validated is None:
+            raise ValueError("source_label cannot be empty.")
+        return validated
+
+    @field_validator("document_subfamily")
+    @classmethod
+    def _validate_subfamily(cls, value: str | None) -> str | None:
+        return validate_safe_metadata_text(
+            value, field_name="document_subfamily", min_len=1, max_len=80
+        )
+
+    @field_validator("external_reference")
+    @classmethod
+    def _validate_external_ref(cls, value: str | None) -> str | None:
+        return validate_safe_metadata_text(
+            value, field_name="external_reference", min_len=2, max_len=128
+        )
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str | None) -> str | None:
+        return validate_safe_metadata_text(
+            value, field_name="description", min_len=1, max_len=500
+        )
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _validate_idemp_key(cls, value: str | None) -> str | None:
+        return validate_safe_metadata_text(
+            value, field_name="idempotency_key", min_len=4, max_len=128
+        )
 
 
 class DocumentVersionCreateInput(BaseModel):

@@ -419,6 +419,10 @@ class CaseAndDocumentRepository:
         source_label: str,
         quarantined: bool,
         quarantine_reason: str | None,
+        external_reference: str | None = None,
+        description: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_fingerprint: str | None = None,
     ) -> Document:
         apply_pg_rls_context(
             session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
@@ -431,6 +435,11 @@ class CaseAndDocumentRepository:
             document_kind=document_kind,
             document_subfamily=document_subfamily,
             source_label=source_label,
+            external_reference=external_reference,
+            description=description,
+            created_by_user_id=ctx.actor_user_id,
+            idempotency_key=idempotency_key,
+            idempotency_fingerprint=idempotency_fingerprint,
             quarantined=quarantined,
             quarantine_reason=quarantine_reason,
         )
@@ -447,8 +456,67 @@ class CaseAndDocumentRepository:
             select(Document).where(
                 Document.id == document_id,
                 Document.organization_id == ctx.organization_id,
+                Document.discarded_at.is_(None),
             )
         )
+
+    @staticmethod
+    def get_document_by_idempotency_key(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        idempotency_key: str,
+    ) -> Document | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        return session.scalar(
+            select(Document).where(
+                Document.organization_id == ctx.organization_id,
+                Document.case_id == case_id,
+                Document.idempotency_key == idempotency_key,
+                Document.discarded_at.is_(None),
+            )
+        )
+
+    @staticmethod
+    def list_case_documents(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Document], int]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        _require_tenant_row(session, DocumentCase, ctx, case_id, "DocumentCase")
+        total = int(
+            session.scalar(
+                select(func.count(Document.id)).where(
+                    Document.organization_id == ctx.organization_id,
+                    Document.case_id == case_id,
+                    Document.discarded_at.is_(None),
+                )
+            )
+            or 0
+        )
+        rows = list(
+            session.scalars(
+                select(Document)
+                .where(
+                    Document.organization_id == ctx.organization_id,
+                    Document.case_id == case_id,
+                    Document.discarded_at.is_(None),
+                )
+                .order_by(Document.created_at.asc(), Document.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        return rows, total
 
     @staticmethod
     def create_document_version(
@@ -477,6 +545,7 @@ class CaseAndDocumentRepository:
             original_filename=original_filename,
             storage_driver=storage_driver,
             storage_key=storage_key,
+            created_by_user_id=ctx.actor_user_id,
         )
         session.add(version)
         session.flush()
@@ -493,6 +562,46 @@ class CaseAndDocumentRepository:
             select(DocumentVersion).where(
                 DocumentVersion.id == version_id,
                 DocumentVersion.organization_id == ctx.organization_id,
+            )
+        )
+
+    @staticmethod
+    def get_document_version_for_document(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+        version_id: str,
+    ) -> DocumentVersion | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        return session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.organization_id == ctx.organization_id,
+            )
+        )
+
+    @staticmethod
+    def list_document_versions(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+    ) -> list[DocumentVersion]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        return list(
+            session.scalars(
+                select(DocumentVersion)
+                .where(
+                    DocumentVersion.organization_id == ctx.organization_id,
+                    DocumentVersion.document_id == document_id,
+                )
+                .order_by(DocumentVersion.version_number.asc())
             )
         )
 
