@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.constants import (
     ExternalIdentityStatus,
@@ -231,7 +232,7 @@ class IdentityAndSessionRepository:
             )
             if result.rowcount != 1:  # type: ignore[attr-defined]
                 return None
-        row.consumed_at = now
+        set_committed_value(row, "consumed_at", now)
         return row
 
     @staticmethod
