@@ -71,6 +71,12 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
 
+        # Incremental downgrade 0005 -> 0004
+        command.downgrade(cfg, "20261121_0004")
+        with engine.connect() as conn:
+            ver_0004 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert ver_0004 == "20261121_0004"
+
         # Incremental downgrade 0004 -> 0003
         command.downgrade(cfg, "20261120_0003")
         with engine.connect() as conn:
@@ -144,12 +150,16 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
             u_susp = OrganizationRepository.create_user(
                 session, email="susp.mig@jyxia.local", display_name="Susp Mig", mfa_enrolled=True
             )
-            OrganizationRepository.assign_membership(
-                session,
-                TenantContext(organization_id=org.id),
+            from app.models.entities import OrganizationMembership as OrgMembershipModel
+
+            m_active = OrgMembershipModel(
+                organization_id=org.id,
                 user_id=u_active.id,
-                role=OrganizationRole.CLINICAL_REVIEWER.value,
+                role="clinical_reviewer",
+                status=MembershipStatus.ACTIVE.value,
             )
+            session.add(m_active)
+            session.flush()
             m_susp = OrganizationRepository.assign_membership(
                 session,
                 TenantContext(organization_id=org.id),
@@ -180,18 +190,20 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
             )
             session.commit()
             ext_active_id, ext_susp_id, ext_rev_id = ext_active.id, ext_susp.id, ext_rev.id
+            m_active_id = m_active.id
         finally:
             session.close()
 
-        # Upgrade populated DB from 0003 -> 0004 (head) and verify zero data loss
+        # Upgrade populated DB from 0003 -> 0004 -> 0005 (head) and verify zero data loss & role migration
         command.upgrade(cfg, "head")
         session_verify = factory()
         try:
-            from app.models.entities import ExternalIdentity
+            from app.models.entities import ExternalIdentity, OrganizationMembership
 
             assert session_verify.get(ExternalIdentity, ext_active_id).status == "active"  # type: ignore[union-attr]
             assert session_verify.get(ExternalIdentity, ext_susp_id).status == "suspended"  # type: ignore[union-attr]
             assert session_verify.get(ExternalIdentity, ext_rev_id).status == "revoked"  # type: ignore[union-attr]
+            assert session_verify.get(OrganizationMembership, m_active_id).role == "document_reviewer"  # type: ignore[union-attr]
 
             # Invalid ExternalIdentity status must be rejected by DB CheckConstraint
             with pytest.raises(IntegrityError):
@@ -206,7 +218,8 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
         finally:
             session_verify.close()
 
-        # Downgrade 0004 -> 0003 on populated DB preserves all records, then re-upgrade to head
+        # Downgrade 0005 -> 0004 -> 0003 on populated DB preserves all records, then re-upgrade to head
+        command.downgrade(cfg, "20261121_0004")
         command.downgrade(cfg, "20261120_0003")
         command.upgrade(cfg, "head")
 

@@ -66,6 +66,9 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         user_a = OrganizationRepository.create_user(
             owner_db, email="rls.a@jyxia.local", display_name="RLS User A", mfa_enrolled=True
         )
+        user_a2 = OrganizationRepository.create_user(
+            owner_db, email="rls.a2@jyxia.local", display_name="RLS User A2", mfa_enrolled=True
+        )
         user_b = OrganizationRepository.create_user(
             owner_db, email="rls.b@jyxia.local", display_name="RLS User B", mfa_enrolled=True
         )
@@ -77,6 +80,19 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             TenantContext(organization_id=org_a.id),
             user_id=user_a.id,
             role=OrganizationRole.ORG_ADMIN.value,
+        )
+        # User A also holds an active membership in Org B to test Teste 8 (organization switch spoofing)
+        OrganizationRepository.assign_membership(
+            owner_db,
+            TenantContext(organization_id=org_b.id),
+            user_id=user_a.id,
+            role=OrganizationRole.READ_ONLY.value,
+        )
+        OrganizationRepository.assign_membership(
+            owner_db,
+            TenantContext(organization_id=org_a.id),
+            user_id=user_a2.id,
+            role=OrganizationRole.DOCUMENT_REVIEWER.value,
         )
         OrganizationRepository.assign_membership(
             owner_db,
@@ -100,6 +116,13 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             subject="sub-rls-a",
             email_at_binding=user_a.email,
         )
+        ext_a2 = IdentityAndSessionRepository.bind_external_identity(
+            owner_db,
+            user_id=user_a2.id,
+            issuer="https://idp.jyxia.local/realms/rls",
+            subject="sub-rls-a2",
+            email_at_binding=user_a2.email,
+        )
         ext_b = IdentityAndSessionRepository.bind_external_identity(
             owner_db,
             user_id=user_b.id,
@@ -107,13 +130,36 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             subject="sub-rls-b",
             email_at_binding=user_b.email,
         )
-        IdentityAndSessionRepository.create_auth_session(
+        ext_susp = IdentityAndSessionRepository.bind_external_identity(
+            owner_db,
+            user_id=user_susp.id,
+            issuer="https://idp.jyxia.local/realms/rls",
+            subject="sub-rls-susp",
+            email_at_binding=user_susp.email,
+        )
+        sess_a = IdentityAndSessionRepository.create_auth_session(
             owner_db,
             user_id=user_a.id,
             external_identity_id=ext_a.id,
             active_organization_id=org_a.id,
             session_token_hash="a" * 64,
             csrf_token_hash="c" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
+        IdentityAndSessionRepository.create_auth_session(
+            owner_db,
+            user_id=user_a2.id,
+            external_identity_id=ext_a2.id,
+            active_organization_id=org_a.id,
+            session_token_hash="2" * 64,
+            csrf_token_hash="e" * 64,
             auth_method="oidc_pkce_mfa",
             acr="urn:jyxia:loa:mfa",
             amr_json=["pwd", "otp"],
@@ -139,6 +185,62 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             absolute_expires_at=now_utc + timedelta(hours=8),
             now=now_utc,
         )
+        # Revoked session for User A (Teste 7 & Bloco B)
+        sess_revoked = IdentityAndSessionRepository.create_auth_session(
+            owner_db,
+            user_id=user_a.id,
+            external_identity_id=ext_a.id,
+            active_organization_id=org_a.id,
+            session_token_hash="9" * 64,
+            csrf_token_hash="9" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
+        sess_revoked.revoked_at = now_utc
+        sess_revoked.revocation_reason = "revoked_for_test"
+
+        # Expired session for User A (Teste 6 & Bloco B)
+        IdentityAndSessionRepository.create_auth_session(
+            owner_db,
+            user_id=user_a.id,
+            external_identity_id=ext_a.id,
+            active_organization_id=org_a.id,
+            session_token_hash="8" * 64,
+            csrf_token_hash="8" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc - timedelta(minutes=40),
+            oidc_auth_time=now_utc - timedelta(minutes=40),
+            idle_expires_at=now_utc - timedelta(minutes=5),
+            absolute_expires_at=now_utc + timedelta(hours=4),
+            now=now_utc - timedelta(minutes=40),
+        )
+        # Active session for User with SUSPENDED membership in Org A (Teste 9)
+        sess_susp = IdentityAndSessionRepository.create_auth_session(
+            owner_db,
+            user_id=user_susp.id,
+            external_identity_id=ext_susp.id,
+            active_organization_id=org_a.id,
+            session_token_hash="7" * 64,
+            csrf_token_hash="7" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
+
+        # Active, consumed, and expired OIDC auth states (Bloco B)
         IdentityAndSessionRepository.create_oidc_auth_state(
             owner_db,
             state_hash="1" * 64,
@@ -149,7 +251,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             next_path="/",
             expires_at=now_utc + timedelta(minutes=10),
         )
-        IdentityAndSessionRepository.create_oidc_auth_state(
+        state_consumed = IdentityAndSessionRepository.create_oidc_auth_state(
             owner_db,
             state_hash="3" * 64,
             nonce_hash="4" * 64,
@@ -158,6 +260,17 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             redirect_uri="http://127.0.0.1:8000/api/v1/auth/callback",
             next_path="/",
             expires_at=now_utc + timedelta(minutes=10),
+        )
+        state_consumed.consumed_at = now_utc
+        IdentityAndSessionRepository.create_oidc_auth_state(
+            owner_db,
+            state_hash="5" * 64,
+            nonce_hash="6" * 64,
+            code_verifier_ciphertext="cipher_rls_state_expired_0000",
+            issuer="https://idp.jyxia.local/realms/rls",
+            redirect_uri="http://127.0.0.1:8000/api/v1/auth/callback",
+            next_path="/",
+            expires_at=now_utc - timedelta(minutes=5),
         )
 
         case_a = CaseAndDocumentRepository.create_case(
@@ -198,8 +311,12 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         org_a_id = str(org_a.id)
         org_b_id = str(org_b.id)
         user_a_id = str(user_a.id)
+        user_a2_id = str(user_a2.id)
         user_b_id = str(user_b.id)
         user_susp_id = str(user_susp.id)
+        ext_b_id = str(ext_b.id)
+        sess_a_id = str(sess_a.id)
+        sess_susp_id = str(sess_susp.id)
         case_a_id = str(case_a.id)
         case_b_id = str(case_b.id)
         seed_ev_a_hash = str(seed_ev_a.event_hash)
@@ -266,15 +383,92 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         ):
             assert app_db.execute(text(f"SELECT count(*) FROM {protected_tbl}")).scalar() == 0
 
-        # 2. With Org A + User A RLS context, runtime sees ONLY Org A and ONLY User A's session/identity
-        apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_a_id)
-        apply_pg_identity_context(app_db, oidc_state_hash="1" * 64)
+        # 2. Bloco B (ACH-09): Setting ONLY app.current_user_id and app.current_organization_id
+        #    (even for User A or fabricated User B / User A2) MUST NOT expose auth_sessions or external_identities!
+        for forged_org, forged_user in (
+            (org_a_id, user_a_id),
+            (org_a_id, user_a2_id),
+            (org_b_id, user_b_id),
+        ):
+            clear_pg_rls_context(app_db)
+            apply_pg_rls_context(app_db, organization_id=forged_org, user_id=forged_user)
+            assert app_db.execute(text("SELECT count(*) FROM auth_sessions")).scalar() == 0
+            assert app_db.execute(text("SELECT count(*) FROM external_identities")).scalar() == 0
+            assert (
+                app_db.execute(
+                    text("UPDATE auth_sessions SET revocation_reason = 'guc-spoof'")
+                ).rowcount
+                == 0
+            )
+            assert (
+                app_db.execute(
+                    text("UPDATE external_identities SET updated_at = now()")
+                ).rowcount
+                == 0
+            )
+
+        # Random, revoked, or expired session_token_hash MUST see 0 auth_sessions and 0 external_identities
+        for bad_sess_hash in ("f" * 64, "9" * 64, "8" * 64):
+            clear_pg_rls_context(app_db)
+            apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_a_id)
+            apply_pg_identity_context(app_db, session_token_hash=bad_sess_hash)
+            assert app_db.execute(text("SELECT count(*) FROM auth_sessions")).scalar() == 0
+            assert app_db.execute(text("SELECT count(*) FROM external_identities")).scalar() == 0
+            assert (
+                app_db.execute(
+                    text("UPDATE auth_sessions SET last_seen_at = now() WHERE session_token_hash = :h"),
+                    {"h": bad_sess_hash},
+                ).rowcount
+                == 0
+            )
+
+        # Unknown, consumed, or expired OIDC state_hash MUST see 0 oidc_auth_states and cannot be updated
+        for bad_state_hash in ("f" * 64, "3" * 64, "5" * 64):
+            clear_pg_rls_context(app_db)
+            apply_pg_identity_context(app_db, oidc_state_hash=bad_state_hash)
+            assert app_db.execute(text("SELECT count(*) FROM oidc_auth_states")).scalar() == 0
+            assert (
+                app_db.execute(
+                    text("UPDATE oidc_auth_states SET consumed_at = now() WHERE state_hash = :h"),
+                    {"h": bad_state_hash},
+                ).rowcount
+                == 0
+            )
+
+        # Attempting to forge an INSERT into auth_sessions for another user (User B) as jyxia_app MUST fail
+        clear_pg_rls_context(app_db)
+        apply_pg_rls_context(app_db, organization_id=org_b_id, user_id=user_b_id)
+        apply_pg_identity_context(app_db, session_token_hash="f" * 64)
+        with pytest.raises(Exception):
+            app_db.execute(
+                text(
+                    "INSERT INTO auth_sessions "
+                    "(id, user_id, external_identity_id, active_organization_id, session_token_hash, csrf_token_hash, "
+                    "auth_method, acr, amr_json, mfa_verified_at, oidc_auth_time, idle_expires_at, absolute_expires_at, "
+                    "last_seen_at, created_at) "
+                    "VALUES ('forged-sess', :ub, :ext_b, :org_b, repeat('f', 64), repeat('f', 64), "
+                    "'oidc_pkce_mfa', 'urn:jyxia:loa:mfa', '[\"pwd\",\"otp\"]'::jsonb, now(), now(), "
+                    "now() + interval '30 minutes', now() + interval '8 hours', now(), now())"
+                ),
+                {"ub": user_b_id, "ext_b": ext_b_id, "org_b": org_b_id},
+            )
+        app_db.rollback()
+
+        # With valid active session_token_hash ("a" * 64) + active OIDC state_hash ("1" * 64),
+        # runtime sees ONLY User A's active session, ONLY User A's external identity, and ONLY state "1"*64
+        # even if app.current_user_id is maliciously pointed to User B!
+        apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_b_id)
+        apply_pg_identity_context(
+            app_db,
+            session_token_hash="a" * 64,
+            oidc_state_hash="1" * 64,
+        )
         visible_cases = app_db.execute(text("SELECT case_code FROM document_cases")).scalars().all()
         assert visible_cases == ["RLS-A-1"]
         visible_audits = app_db.execute(text("SELECT event_type FROM audit_events")).scalars().all()
         assert visible_audits == ["RLS_SEED_A"]
-        visible_sessions = app_db.execute(text("SELECT user_id FROM auth_sessions")).scalars().all()
-        assert visible_sessions == [user_a_id]
+        visible_sessions = app_db.execute(text("SELECT id, user_id FROM auth_sessions")).all()
+        assert visible_sessions == [(sess_a_id, user_a_id)]
         assert (
             app_db.execute(
                 text("SELECT count(*) FROM auth_sessions WHERE user_id = :ub"), {"ub": user_b_id}
@@ -291,6 +485,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         )
         visible_states = app_db.execute(text("SELECT state_hash FROM oidc_auth_states")).scalars().all()
         assert visible_states == ["1" * 64]
+        apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_a_id)
 
         # 3. Cross-tenant INSERT, UPDATE, and DELETE protections under RLS
         with pytest.raises(Exception):
@@ -343,6 +538,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         pid_tx3 = app_db.execute(text("SELECT pg_backend_pid()")).scalar()
         assert pid_tx3 == pid_tx1
         apply_pg_rls_context(app_db, organization_id=org_b_id, user_id=user_b_id)
+        apply_pg_identity_context(app_db, session_token_hash="b" * 64)
         assert app_db.execute(text("SELECT case_code FROM document_cases")).scalars().all() == ["RLS-B-1"]
         assert app_db.execute(text("SELECT user_id FROM auth_sessions")).scalars().all() == [user_b_id]
         assert app_db.execute(text("SELECT subject FROM external_identities")).scalars().all() == ["sub-rls-b"]
@@ -365,11 +561,12 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             app_db.rollback()
             apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_a_id)
 
-        # 6. SECURITY DEFINER negative checks (ACH-03): reject missing context, wrong org, wrong/null/non-member/inactive actor
+        # 6. Bloco A (ACH-03): All 11 mandatory SECURITY DEFINER spoofing and session-proof tests as jyxia_app
         def _try_raw_audit_definer(
             *,
             ctx_org: str | None,
             ctx_user: str | None,
+            ctx_sess_hash: str | None,
             p_org: str,
             p_actor: str | None,
             p_schema: str = "jyxia.audit.v1",
@@ -377,7 +574,10 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             p_prev_hash: str = seed_ev_a_hash,
             p_ev_hash: str = "e" * 64,
         ) -> None:
+            clear_pg_rls_context(app_db)
             apply_pg_rls_context(app_db, organization_id=ctx_org, user_id=ctx_user)
+            if ctx_sess_hash is not None:
+                apply_pg_identity_context(app_db, session_token_hash=ctx_sess_hash)
             app_db.execute(
                 text(
                     "SELECT public.jyxia_append_audit_event("
@@ -394,54 +594,101 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
                 },
             )
 
+        def _try_raw_security_definer(
+            *,
+            ctx_org: str | None,
+            ctx_user: str | None,
+            ctx_sess_hash: str | None,
+            p_org: str | None,
+            p_user: str | None,
+            p_session_id: str | None = sess_a_id,
+            p_event_type: str = "FORGED_SEC",
+        ) -> None:
+            clear_pg_rls_context(app_db)
+            apply_pg_rls_context(app_db, organization_id=ctx_org, user_id=ctx_user)
+            if ctx_sess_hash is not None:
+                apply_pg_identity_context(app_db, session_token_hash=ctx_sess_hash)
+            app_db.execute(
+                text(
+                    "SELECT public.jyxia_append_security_event("
+                    "'bad-sec-id', 'jyxia.sec_audit.v1', 1, :p_ev_type, 'denied', "
+                    ":p_u, :p_o, NULL, NULL, :p_sid, NULL, 'forged_reason', '{}', "
+                    "repeat('0', 64), repeat('a', 64), now())"
+                ),
+                {"p_ev_type": p_event_type, "p_u": p_user, "p_o": p_org, "p_sid": p_session_id},
+            )
+
         for bad_audit_kwargs in (
-            # Missing organization context
-            {"ctx_org": None, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": user_a_id},
-            # Organization mismatch against active context (trying to write into Org B while in Org A)
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_b_id, "p_actor": user_a_id},
-            # Missing user context or NULL actor as jyxia_app
-            {"ctx_org": org_a_id, "ctx_user": None, "p_org": org_a_id, "p_actor": user_a_id},
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": None},
-            # Actor mismatch against active user context
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": user_b_id},
-            # Actor belongs to Org B and has NO membership in Org A
-            {"ctx_org": org_a_id, "ctx_user": user_b_id, "p_org": org_a_id, "p_actor": user_b_id},
-            # Actor has SUSPENDED (inactive) membership in Org A
-            {"ctx_org": org_a_id, "ctx_user": user_susp_id, "p_org": org_a_id, "p_actor": user_susp_id},
-            # Manipulated schema_version, sequence_number, prev_event_hash, event_hash
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": user_a_id, "p_schema": "bad.v0"},
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": user_a_id, "p_seq": 99},
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": user_a_id, "p_prev_hash": "f" * 64},
-            {"ctx_org": org_a_id, "ctx_user": user_a_id, "p_org": org_a_id, "p_actor": user_a_id, "p_ev_hash": "NOT_HEX"},
+            # Teste 2 — Falsificação de usuário (session belongs to User A, GUC & param point to User A2 in same Org A)
+            {"ctx_org": org_a_id, "ctx_user": user_a2_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a2_id},
+            # Teste 3 — Falsificação de organização (session belongs to Org A, GUC or param points to Org B)
+            {"ctx_org": org_b_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_actor": user_a_id},
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_actor": user_a_id},
+            # Teste 4 — Sessão arbitrária (random/chosen session hash)
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "f" * 64, "p_org": org_a_id, "p_actor": user_a_id},
+            # Teste 5 — Sessão de outra pessoa sem possuir o token (coherent GUCs for User A2 in Org A, missing or wrong session hash)
+            {"ctx_org": org_a_id, "ctx_user": user_a2_id, "ctx_sess_hash": None, "p_org": org_a_id, "p_actor": user_a2_id},
+            # Teste 6 — Sessão expirada (User A's expired session "8"*64)
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "8" * 64, "p_org": org_a_id, "p_actor": user_a_id},
+            # Teste 7 — Sessão revogada (User A's revoked session "9"*64)
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "9" * 64, "p_org": org_a_id, "p_actor": user_a_id},
+            # Teste 8 — Troca de organização (User A is active member of Org B too, but session "a"*64 is bound to Org A)
+            {"ctx_org": org_b_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_actor": user_a_id},
+            # Teste 9 — Membership suspensa (User Susp has active session "7"*64 in Org A, but membership in Org A is 'suspended')
+            {"ctx_org": org_a_id, "ctx_user": user_susp_id, "ctx_sess_hash": "7" * 64, "p_org": org_a_id, "p_actor": user_susp_id},
+            # Teste 11 — Usuário ativo de outra organização (coherent GUCs & params for User B in Org B, without User B's session token)
+            {"ctx_org": org_b_id, "ctx_user": user_b_id, "ctx_sess_hash": None, "p_org": org_b_id, "p_actor": user_b_id},
+            {"ctx_org": org_b_id, "ctx_user": user_b_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_actor": user_b_id},
+            # Missing org/user contexts or manipulated schema/sequence/hash
+            {"ctx_org": None, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a_id},
+            {"ctx_org": org_a_id, "ctx_user": None, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a_id},
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": None},
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a_id, "p_schema": "bad.v0"},
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a_id, "p_seq": 99},
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a_id, "p_prev_hash": "f" * 64},
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_actor": user_a_id, "p_ev_hash": "NOT_HEX"},
         ):
             with pytest.raises(Exception):
                 _try_raw_audit_definer(**bad_audit_kwargs)
             app_db.rollback()
 
-        # Negative checks on jyxia_append_security_event (mismatched org, mismatched user, non-member user+org)
-        for ctx_o, ctx_u, p_o, p_u in (
-            (org_a_id, user_a_id, org_b_id, user_a_id),
-            (org_a_id, user_a_id, org_a_id, user_b_id),
-            (org_a_id, user_b_id, org_a_id, user_b_id),
+        for bad_sec_kwargs in (
+            # Teste 2 — Falsificação de usuário
+            {"ctx_org": org_a_id, "ctx_user": user_a2_id, "ctx_sess_hash": "a" * 64, "p_org": org_a_id, "p_user": user_a2_id},
+            # Teste 3 — Falsificação de organização
+            {"ctx_org": org_b_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_user": user_a_id},
+            # Teste 4 — Sessão arbitrária
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "f" * 64, "p_org": org_a_id, "p_user": user_a_id},
+            # Teste 5 — Sessão de outra pessoa (coherent GUCs for User A2 without User A2's session token)
+            {"ctx_org": org_a_id, "ctx_user": user_a2_id, "ctx_sess_hash": None, "p_org": org_a_id, "p_user": user_a2_id},
+            # Teste 6 — Sessão expirada
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "8" * 64, "p_org": org_a_id, "p_user": user_a_id},
+            # Teste 7 — Sessão revogada
+            {"ctx_org": org_a_id, "ctx_user": user_a_id, "ctx_sess_hash": "9" * 64, "p_org": org_a_id, "p_user": user_a_id},
+            # Teste 8 — Troca de organização
+            {"ctx_org": org_b_id, "ctx_user": user_a_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_user": user_a_id},
+            # Teste 9 — Membership suspensa (even with User Susp's active session "7"*64)
+            {"ctx_org": org_a_id, "ctx_user": user_susp_id, "ctx_sess_hash": "7" * 64, "p_org": org_a_id, "p_user": user_susp_id, "p_session_id": sess_susp_id},
+            # Teste 10 — Função de evento global (NULL org and NULL user as jyxia_app without authorized OIDC state)
+            {"ctx_org": None, "ctx_user": None, "ctx_sess_hash": None, "p_org": None, "p_user": None, "p_session_id": None},
+            # Teste 11 — Usuário ativo de outra organização (coherent GUCs for User B in Org B without User B's session token)
+            {"ctx_org": org_b_id, "ctx_user": user_b_id, "ctx_sess_hash": None, "p_org": org_b_id, "p_user": user_b_id},
+            {"ctx_org": org_b_id, "ctx_user": user_b_id, "ctx_sess_hash": "a" * 64, "p_org": org_b_id, "p_user": user_b_id},
         ):
-            apply_pg_rls_context(app_db, organization_id=ctx_o, user_id=ctx_u)
             with pytest.raises(Exception):
-                app_db.execute(
-                    text(
-                        "SELECT public.jyxia_append_security_event("
-                        "'bad-sec-id', 'jyxia.sec_audit.v1', 1, 'FORGED_SEC', 'denied', "
-                        ":p_u, :p_o, NULL, NULL, NULL, NULL, 'forged_reason', '{}', "
-                        "repeat('0', 64), repeat('a', 64), now())"
-                    ),
-                    {"p_u": p_u, "p_o": p_o},
-                )
+                _try_raw_security_definer(**bad_sec_kwargs)
             app_db.rollback()
 
-        # 7. Runtime CAN append valid events via SECURITY DEFINER functions when context & active membership match
+        # 7. Teste 1 — Sessão legítima: Runtime CAN append valid events via SECURITY DEFINER when authenticated session & active membership match
         apply_pg_rls_context(app_db, organization_id=org_a_id, user_id=user_a_id)
+        apply_pg_identity_context(app_db, session_token_hash="a" * 64)
         appended = AuditEventRepository.append_event(
             app_db,
-            TenantContext(organization_id=org_a_id, actor_user_id=user_a_id),
+            TenantContext(
+                organization_id=org_a_id,
+                actor_user_id=user_a_id,
+                session_token_hash="a" * 64,
+            ),
             event_type="RUNTIME_SECURITY_DEFINER_OK",
             target_entity_type="organization",
             target_entity_id=org_a_id,
@@ -456,6 +703,8 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             payload_json={"role": "jyxia_app"},
             organization_id=org_a_id,
             user_id=user_a_id,
+            session_id=sess_a_id,
+            session_token_hash="a" * 64,
         )
         assert sec_ev.sequence_number >= 1
         app_db.commit()

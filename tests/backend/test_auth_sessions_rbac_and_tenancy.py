@@ -469,21 +469,53 @@ def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engi
 
     app = create_app(settings, engine=migrated_engine, oidc_adapter=adapter)
 
-    # 1. Verify full 5-role RBAC permission matrix and zero cross-tenant access to org_b
+    # 1. Verify full 5-role RBAC permission matrix, zero cross-tenant access to org_b,
+    #    and canonical external serialization of 'document_reviewer' in JSON and OpenAPI (ACH-10)
+    openapi_doc = app.openapi()
+    openapi_role_enum = (
+        openapi_doc.get("components", {})
+        .get("schemas", {})
+        .get("OrganizationRole", {})
+        .get("enum", [])
+    )
+    assert openapi_role_enum == [
+        "org_admin",
+        "document_reviewer",
+        "admin_operator",
+        "auditor_readonly",
+        "read_only",
+    ]
+    assert "clinical_reviewer" not in openapi_role_enum
+
     for idx, role in enumerate(OrganizationRole):
         with TestClient(app, base_url="http://127.0.0.1:8000") as client:
             _login_user_via_bff(
                 client, idp, sub=f"sub-{role.value}", email=f"{role.value}@jyxia.local", code=f"c-r-{idx}"
             )
+            my_orgs = client.get("/api/v1/me/organizations")
+            assert my_orgs.status_code == 200
+            assert my_orgs.json()["organizations"][0]["role"] == role.value
+            if role == OrganizationRole.DOCUMENT_REVIEWER:
+                assert my_orgs.json()["organizations"][0]["role"] == "document_reviewer"
+
             for ep, expected_code in role_expectations[role].items():
                 res = client.get(f"/api/v1/organizations/{org_a.id}/{ep}")
                 assert res.status_code == expected_code, f"Role {role.value} endpoint {ep} expected {expected_code}, got {res.status_code}"
+                if ep == "access-context" and res.status_code == 200:
+                    assert res.json()["role"] == role.value
+                    if role == OrganizationRole.DOCUMENT_REVIEWER:
+                        assert res.json()["role"] == "document_reviewer"
                 if ep == "cases" and res.status_code == 200:
+                    assert res.json()["role"] == role.value
                     cases = res.json()["cases"]
                     assert len(cases) == 1
                     assert cases[0]["case_code"] == "CASE-A-001"
                     assert cases[0]["administrative_only"] is True
                     assert cases[0]["clinical_approval"] is False
+                if ep == "members" and res.status_code == 200:
+                    member_roles = {m["role"] for m in res.json()["members"]}
+                    assert "document_reviewer" in member_roles
+                    assert "clinical_reviewer" not in member_roles
 
             # Cross-tenant org_b MUST always return 403 + spoofed X-Organization-ID header MUST fail 403!
             assert client.get(f"/api/v1/organizations/{org_b.id}/cases").status_code == 403
@@ -494,6 +526,57 @@ def test_complete_five_role_rbac_matrix_and_multi_tenant_isolation(migrated_engi
                 ).status_code
                 == 403
             )
+
+    # 1b. Verify legacy database row with raw 'clinical_reviewer' string is transparently read and serialized as 'document_reviewer'
+    db_legacy = factory()
+    try:
+        from sqlalchemy import text as sql_text
+        from app.schemas.tenant import MembershipAssignInput
+
+        # Input schema accepts legacy 'clinical_reviewer' and normalizes to DOCUMENT_REVIEWER
+        parsed_input = MembershipAssignInput(user_id=role_users[OrganizationRole.DOCUMENT_REVIEWER], role="clinical_reviewer")  # type: ignore[arg-type]
+        assert parsed_input.role is OrganizationRole.DOCUMENT_REVIEWER
+        assert parsed_input.role.value == "document_reviewer"
+
+        db_legacy.execute(
+            sql_text("UPDATE organization_memberships SET role = 'clinical_reviewer' WHERE user_id = :uid"),
+            {"uid": role_users[OrganizationRole.DOCUMENT_REVIEWER]},
+        )
+        db_legacy.commit()
+    finally:
+        db_legacy.close()
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as legacy_client:
+        _, legacy_csrf = _login_user_via_bff(
+            legacy_client,
+            idp,
+            sub=f"sub-{OrganizationRole.DOCUMENT_REVIEWER.value}",
+            email=f"{OrganizationRole.DOCUMENT_REVIEWER.value}@jyxia.local",
+            code="c-legacy-rev",
+        )
+        assert legacy_client.get("/api/v1/me/organizations").json()["organizations"][0]["role"] == "document_reviewer"
+        assert legacy_client.get(f"/api/v1/organizations/{org_a.id}/access-context").json()["role"] == "document_reviewer"
+        assert legacy_client.get(f"/api/v1/organizations/{org_a.id}/cases").json()["role"] == "document_reviewer"
+        sel_legacy = legacy_client.post(
+            "/api/v1/auth/select-organization",
+            json={"organization_id": org_a.id},
+            headers={"Origin": "http://127.0.0.1:8000", CSRF_HEADER_NAME: legacy_csrf},
+        )
+        assert sel_legacy.status_code == 200
+        assert sel_legacy.json()["role"] == "document_reviewer"
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as admin_check_client:
+        _login_user_via_bff(
+            admin_check_client,
+            idp,
+            sub=f"sub-{OrganizationRole.ORG_ADMIN.value}",
+            email=f"{OrganizationRole.ORG_ADMIN.value}@jyxia.local",
+            code="c-admin-legacy-check",
+        )
+        members_list = admin_check_client.get(f"/api/v1/organizations/{org_a.id}/members").json()["members"]
+        rev_entries = [m for m in members_list if m["user_id"] == role_users[OrganizationRole.DOCUMENT_REVIEWER]]
+        assert len(rev_entries) == 1
+        assert rev_entries[0]["role"] == "document_reviewer"
 
     # 2. Multi-organization user selection, session/CSRF rotation & mid-session membership revocation
     with TestClient(app, base_url="http://127.0.0.1:8000") as multi_client:

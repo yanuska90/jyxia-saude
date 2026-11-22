@@ -527,3 +527,316 @@ def test_oidc_anti_ssrf_blocks_private_ips_redirects_userinfo_and_dns_rebinding(
     )
     ad_kc_dev = StandardOidcProviderAdapter(kc_dev_settings, transport=kc_dev_idp.transport())
     assert ad_kc_dev.get_metadata().issuer == "http://127.0.0.1:8080/realms/jyxia-dev"
+
+
+def _build_ephemeral_tls_contexts(cert_dns_name: str):
+    """Generate an ephemeral CA + server leaf X.509 cert containing ONLY DNSName(cert_dns_name) (zero IP SAN)."""
+    from datetime import datetime, timedelta, timezone
+    import ssl
+    import tempfile
+    from pathlib import Path
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.now(timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "JYXIA Ephemeral OIDC Test CA")])
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .sign(private_key=ca_key, algorithm=hashes.SHA256())
+    )
+
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cert_dns_name)])
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_name)
+        .issuer_name(ca_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(cert_dns_name)]),
+            critical=False,
+        )
+        .sign(private_key=ca_key, algorithm=hashes.SHA256())
+    )
+
+    ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    leaf_pem = leaf_cert.public_bytes(serialization.Encoding.PEM)
+    leaf_key_pem = leaf_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    )
+
+    client_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cadata=ca_pem)
+    client_ctx.check_hostname = True
+    client_ctx.verify_mode = ssl.CERT_REQUIRED
+
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cert_file = Path(tmp_dir) / "leaf.pem"
+        cert_file.write_bytes(leaf_pem + b"\n" + leaf_key_pem)
+        server_ctx.load_cert_chain(certfile=str(cert_file))
+
+    return server_ctx, client_ctx
+
+
+def test_oidc_pinned_http_transport_real_tls_sni_and_toctou_immunity() -> None:
+    """Prove real TCP socket IP pinning, TLS SNI + X.509 hostname verification, and TOCTOU elimination (ACH-07)."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import json
+    import ssl
+    import threading
+    import httpcore
+    import httpx
+    from app.core.oidc import OidcProviderUnavailableError, _PinnedOidcNetworkBackend
+
+    target_hostname = "idp.pinned-tls.jyxia.invalid"
+    server_ctx, client_ctx = _build_ephemeral_tls_contexts(target_hostname)
+    observed_sni: list[str | None] = []
+    observed_hosts: list[str | None] = []
+    observed_peer_ips: list[str] = []
+    server_mode = {"redirect": False}
+
+    def _on_sni(ssl_sock, sni_name: str | None, _ssl_ctx) -> None:
+        observed_sni.append(sni_name)
+
+    server_ctx.sni_callback = _on_sni
+
+    class _OidcTlsHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            return None
+
+        def do_GET(self) -> None:
+            observed_hosts.append(self.headers.get("Host"))
+            observed_peer_ips.append(str(self.client_address[0]))
+            if server_mode["redirect"]:
+                self.send_response(302)
+                self.send_header("Location", "https://169.254.169.254/latest/meta-data")
+                self.end_headers()
+                return
+            issuer_url = f"https://{target_hostname}:{self.server.server_port}/realms/tls"
+            body = json.dumps(
+                {
+                    "issuer": issuer_url,
+                    "authorization_endpoint": f"{issuer_url}/auth",
+                    "token_endpoint": f"{issuer_url}/token",
+                    "jwks_uri": f"{issuer_url}/certs",
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _OidcTlsHandler)
+    port = httpd.server_port
+    httpd.socket = server_ctx.wrap_socket(httpd.socket, server_side=True)
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        issuer_url = f"https://{target_hostname}:{port}/realms/tls"
+        tls_settings = _oidc_settings(
+            env="test",
+            oidc_issuer=issuer_url,
+            oidc_redirect_uri="https://app.public.jyxia.invalid/api/v1/auth/callback",
+            oidc_post_logout_redirect_uri="https://app.public.jyxia.invalid/",
+            oidc_allow_http_dev=False,
+        )
+
+        # Teste A & Teste B & Teste E — Real TCP socket connects to pinned IP without a 2nd DNS resolution,
+        # while preserving original hostname for TLS SNI and X.509 certificate hostname verification!
+        dns_call_count = 0
+
+        def _single_shot_dns_resolver(host: str, resolved_port: int):
+            nonlocal dns_call_count
+            dns_call_count += 1
+            assert host == target_hostname
+            assert resolved_port == port
+            if dns_call_count == 1:
+                return ("127.0.0.1",)
+            # If httpcore ever performed a 2nd DNS lookup when opening the TCP socket, return forbidden IP!
+            return ("169.254.169.254",)
+
+        adapter_tls = StandardOidcProviderAdapter(
+            tls_settings,
+            dns_resolver=_single_shot_dns_resolver,
+            ssl_context=client_ctx,
+            allow_loopback_target_in_test=True,
+        )
+        metadata = adapter_tls.get_metadata()
+        assert metadata.issuer == issuer_url
+        # DNS resolver was invoked ONLY once during pre-validation; socket connected directly to pinned IP!
+        assert dns_call_count == 1
+        assert len(adapter_tls.connection_history) == 1
+        conn_rec = adapter_tls.connection_history[0]
+        assert conn_rec.transport_mode == "pinned_tcp_socket"
+        assert conn_rec.requested_host == target_hostname
+        assert conn_rec.port == port
+        assert conn_rec.connected_ip == "127.0.0.1"
+        assert conn_rec.tls_server_hostname == target_hostname
+        assert conn_rec.tls_established is True
+        assert observed_sni[-1] == target_hostname
+        assert observed_hosts[-1] == f"{target_hostname}:{port}"
+        assert observed_peer_ips[-1] == "127.0.0.1"
+
+        # Teste B part 2: When a subsequent call (_fetch_jwks) re-validates DNS and DNS now returns
+        # private IP 169.254.169.254, it is rejected BEFORE opening any new TCP socket!
+        with pytest.raises(OidcAuthenticationError, match="private or non-global"):
+            adapter_tls._fetch_jwks()
+        assert len(adapter_tls.connection_history) == 1
+
+        # Teste E part 2: Certificate hostname mismatch (cert issued for wrong-host.jyxia.invalid) MUST fail TLS verification!
+        wrong_server_ctx, wrong_client_ctx = _build_ephemeral_tls_contexts("wrong-host.jyxia.invalid")
+        httpd_wrong = ThreadingHTTPServer(("127.0.0.1", 0), _OidcTlsHandler)
+        wrong_port = httpd_wrong.server_port
+        httpd_wrong.socket = wrong_server_ctx.wrap_socket(httpd_wrong.socket, server_side=True)
+        wrong_thread = threading.Thread(target=httpd_wrong.serve_forever, daemon=True)
+        wrong_thread.start()
+        try:
+            wrong_settings = tls_settings.model_copy(
+                update={"oidc_issuer": f"https://{target_hostname}:{wrong_port}/realms/tls"}
+            )
+            adapter_wrong_cert = StandardOidcProviderAdapter(
+                wrong_settings,
+                dns_resolver=lambda _h, _p: ("127.0.0.1",),
+                ssl_context=wrong_client_ctx,
+                allow_loopback_target_in_test=True,
+            )
+            with pytest.raises(OidcProviderUnavailableError):
+                adapter_wrong_cert.get_metadata()
+        finally:
+            httpd_wrong.shutdown()
+            httpd_wrong.server_close()
+
+        # Weakened SSLContext (check_hostname=False or CERT_NONE) MUST be rejected by constructor
+        weak_ctx = ssl.create_default_context()
+        weak_ctx.check_hostname = False
+        with pytest.raises(OidcAuthenticationError, match="check_hostname"):
+            StandardOidcProviderAdapter(tls_settings, ssl_context=weak_ctx)
+
+        # Teste F — Real TLS server responding with 302 redirect to private IP MUST be rejected
+        server_mode["redirect"] = True
+        adapter_real_redirect = StandardOidcProviderAdapter(
+            tls_settings,
+            dns_resolver=lambda _h, _p: ("127.0.0.1",),
+            ssl_context=client_ctx,
+            allow_loopback_target_in_test=True,
+        )
+        with pytest.raises(OidcAuthenticationError, match="redirect"):
+            adapter_real_redirect.get_metadata()
+
+        # Teste C & Teste D — Private IP or mixed public+private DNS results rejected with ZERO socket connections
+        for rejected_ips in [
+            ("127.0.0.1",),
+            ("169.254.169.254",),
+            ("10.0.0.1",),
+            ("93.184.216.34", "169.254.169.254"),
+        ]:
+            ad_c_d = StandardOidcProviderAdapter(
+                tls_settings,
+                dns_resolver=lambda _h, _p, ips=rejected_ips: ips,
+                ssl_context=client_ctx,
+                allow_loopback_target_in_test=False,
+            )
+            with pytest.raises(OidcAuthenticationError):
+                ad_c_d.get_metadata()
+            assert len(ad_c_d.connection_history) == 0
+
+        # Teste G — Injected transport prohibited in production/staging and cannot bypass checks in test
+        for strict_env in ("production", "staging"):
+            strict_settings = tls_settings.model_copy(update={"env": strict_env})
+            with pytest.raises(OidcAuthenticationError, match="prohibited in production and staging"):
+                StandardOidcProviderAdapter(
+                    strict_settings,
+                    transport=httpx.MockTransport(lambda _r: httpx.Response(200)),
+                )
+            with pytest.raises(OidcAuthenticationError, match="prohibited in production and staging"):
+                StandardOidcProviderAdapter(
+                    strict_settings,
+                    dns_resolver=lambda _h, _p: ("93.184.216.34",),
+                )
+            with pytest.raises(OidcAuthenticationError, match="prohibited in production and staging"):
+                StandardOidcProviderAdapter(
+                    strict_settings,
+                    allow_loopback_target_in_test=True,
+                )
+
+        # In test with oidc_allow_http_dev=False and injected MockTransport, missing DNS resolution for
+        # non-existent domain MUST NOT be silently skipped (fails closed via socket.getaddrinfo)
+        ad_injected_no_dns = StandardOidcProviderAdapter(
+            tls_settings,
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"issuer": issuer_url})),
+        )
+        with pytest.raises(OidcProviderUnavailableError, match="DNS resolution failed"):
+            ad_injected_no_dns.get_metadata()
+        assert len(ad_injected_no_dns.connection_history) == 0
+
+        # Teste H — NetworkBackend refuses unpinned authorities and invalidates pinned hosts cleanly
+        net_backend = _PinnedOidcNetworkBackend(adapter_tls)
+        with pytest.raises(httpcore.ConnectError, match="unpinned OIDC authority"):
+            net_backend.connect_tcp("unapproved.authority.jyxia.invalid", 443)
+        adapter_tls.invalidate_pinned_hosts()
+        assert adapter_tls.get_pinned_ips(target_hostname, port) == ()
+        with pytest.raises(httpcore.ConnectError, match="unpinned OIDC authority"):
+            net_backend.connect_tcp(target_hostname, port)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

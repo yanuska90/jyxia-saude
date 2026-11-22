@@ -190,12 +190,14 @@ def test_rbac_and_oidc_fail_closed_for_unconfigured_and_cross_org() -> None:
     from datetime import datetime, timezone
     from app.core.rbac import ROLE_DESCRIPTIONS
 
+    assert OrganizationRole.DOCUMENT_REVIEWER.value == "document_reviewer"
     assert OrganizationRole.DOCUMENT_REVIEWER is OrganizationRole.CLINICAL_REVIEWER
-    assert OrganizationRole.ADMINISTRATIVE_REVIEWER is OrganizationRole.CLINICAL_REVIEWER
-    assert OrganizationRole("document_reviewer") is OrganizationRole.CLINICAL_REVIEWER
-    assert OrganizationRole("administrative_reviewer") is OrganizationRole.CLINICAL_REVIEWER
-    assert "Administrative Document Reviewer" in ROLE_DESCRIPTIONS[OrganizationRole.CLINICAL_REVIEWER]
-    assert "zero clinical" in ROLE_DESCRIPTIONS[OrganizationRole.CLINICAL_REVIEWER]
+    assert OrganizationRole.ADMINISTRATIVE_REVIEWER is OrganizationRole.DOCUMENT_REVIEWER
+    assert OrganizationRole("document_reviewer") is OrganizationRole.DOCUMENT_REVIEWER
+    assert OrganizationRole("clinical_reviewer") is OrganizationRole.DOCUMENT_REVIEWER
+    assert OrganizationRole("administrative_reviewer") is OrganizationRole.DOCUMENT_REVIEWER
+    assert "Administrative Document Reviewer" in ROLE_DESCRIPTIONS[OrganizationRole.DOCUMENT_REVIEWER]
+    assert "zero clinical" in ROLE_DESCRIPTIONS[OrganizationRole.DOCUMENT_REVIEWER]
 
     unconfigured_settings = load_settings({})
     adapter = StandardOidcProviderAdapter(unconfigured_settings)
