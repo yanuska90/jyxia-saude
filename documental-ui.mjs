@@ -1,5 +1,5 @@
 import * as pdfjs from './vendor/pdf.min.mjs';
-import {DocumentarySession,KINDS,SCENARIOS,allowedFixture,brazilDate,verifyEvents} from './documental-core.mjs';
+import {DocumentarySession,KINDS,SCENARIOS,allowedFixture,brazilDate,verifyEvents} from './documental-core.mjs?v=3.1.0';
 pdfjs.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.min.mjs',import.meta.url).href;
 const $=id=>document.getElementById(id);
 const manifest=await fetch('./documental-manifest.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('Não foi possível carregar os exemplos.');return r.json();});

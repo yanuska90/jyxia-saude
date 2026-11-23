@@ -3,6 +3,8 @@
 
 ## 3.1.0 — 22/11/2026
 
+- Identificação de versão nos endereços de CSS e módulos para evitar mistura com arquivos antigos em cache.
+
 - Site atualizado com problema, público, estado real, plano de validação e visão de acessibilidade.
 - Preparação para convênios apresentada como hipótese a pesquisar.
 - Demo com guia de uso e pendências que explicam motivo, próximo passo e documento, com atalho para revisão.
