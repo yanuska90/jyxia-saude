@@ -43,11 +43,11 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             FOR ALL
             USING (
                 session_user = 'jyxia_worker'
-                AND pg_catalog.current_user <> pg_catalog.session_user
+                AND current_user <> session_user
             )
             WITH CHECK (
                 session_user = 'jyxia_worker'
-                AND pg_catalog.current_user <> pg_catalog.session_user
+                AND current_user <> session_user
             );
             """
         )
@@ -91,6 +91,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
@@ -157,7 +158,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
                     started_at = COALESCE(v_run.started_at, v_now),
                     worker_id = p_worker_id,
                     lease_token_hash = p_lease_token_hash,
-                    lease_expires_at = v_now + pg_catalog.make_interval(secs => p_lease_seconds),
+                    lease_expires_at = v_now + pg_catalog.make_interval(secs => p_lease_seconds::double precision),
                     updated_at = GREATEST(v_now, v_run.created_at)
                 WHERE pr.id = v_run.id
                 RETURNING pr.* INTO v_run;
@@ -256,6 +257,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
@@ -348,6 +350,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
@@ -477,6 +480,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
@@ -624,6 +628,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
@@ -788,6 +793,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
@@ -882,6 +888,7 @@ def _upgrade_pg_worker_functions_rls_and_grants() -> None:
             SECURITY DEFINER
             SET search_path = pg_catalog, public
             AS $$
+            #variable_conflict use_column
             DECLARE
                 v_owner_role varchar;
                 v_now timestamptz;
