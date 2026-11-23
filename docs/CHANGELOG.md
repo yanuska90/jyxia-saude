@@ -1,5 +1,14 @@
 # Registro de decisões e versões
 
+## Etapa 3.3.4 — 23 de novembro de 2026 (`backend/` `0.2.0` — Motor determinístico de consistência dos 4 eixos, rastreabilidade integral de evidências e histórico append-only, Migration `0009`)
+
+- **Motor determinístico de consistência independente de framework (`services/consistency_engine.py`, `core/constants.py`, `core/config.py`):**
+  - Avaliação determinística dos quatro eixos (`identidade`, `procedimento_codigo`, `lateralidade`, `temporalidade`) usando exclusivamente `ExtractedField`, `EvidenceReference`, lineage de `DocumentVersion` e `HumanReview`, sem fuzzy matching, LLM, embeddings ou inferência de equivalência clínica (`no cross-system code mapping`, `name alone never sufficient`);
+  - Preservação dos seis estados de eixo (`ok`, `conflito`, `abstencao`, `nao_avaliado`, `nao_aplicavel`, `pendente`) e da taxonomia global (`pendente`, `bloqueado`, `abstencao`, `conferida_com_escopo_limitado`, `conferida`), impedindo promoção automática a `conferida` enquanto a revisão humana estiver pendente e separando explicitamente resultado automatizado, status da revisão humana e decisão clínica fora de escopo (`administrative_only=true`, `clinical_approval=false`).
+- **Migration `20261122_0009`, integração ao `ProcessingWorker` e API autenticada (`models/entities.py`, `repositories/institutional.py`, `services/processing_worker.py`, `api/routes/processing.py`):**
+  - Extensão de `processing_runs` (`case_id`, step `compare_consistency` em `ck_processing_runs_step_type_valid`, índice parcial `uq_processing_runs_active_case_compare`) e criação das tabelas append-only `consistency_assessments`, `consistency_axis_results` e `consistency_axis_evidences` com `ENABLE` + `FORCE ROW LEVEL SECURITY`, triggers `BEFORE UPDATE/DELETE`, FK composta validando vínculo estrito com `evidence_references(organization_id, document_version_id, id)`, privilégio `SELECT`-only para `jyxia_app` e novas RPCs `SECURITY DEFINER` exclusivas de `jyxia_worker`;
+  - Encadeamento em barreira na conclusão da extração (`jyxia_worker_prepare_extraction_completion_context` / `jyxia_worker_complete_extraction_and_chain_compare`) e endpoints `POST/GET /api/v1/organizations/{organization_id}/cases/{case_id}/consistency-assessments` e `GET .../consistency-assessments/{assessment_id}` sob MFA, CSRF, RBAC (`case:write` / `document:read`), `Cache-Control: no-store` e RLS.
+
 ## Etapa 3.3.3 — 23 de novembro de 2026 (`backend/` `0.2.0` — Extração determinística de texto PDF, campos explícitos, evidências espaciais e abstenção explícita, Migration `0008`)
 
 - **Biblioteca PDF offline, extração por página e limites de segurança (`services/pdf_extraction.py`, `core/config.py`, `backend/pyproject.toml`):**

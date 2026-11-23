@@ -90,6 +90,7 @@ jobs:
                   \"\"\")
           "
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0008
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0007
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0006
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0005

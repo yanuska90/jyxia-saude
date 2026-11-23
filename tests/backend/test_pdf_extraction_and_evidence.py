@@ -1127,8 +1127,8 @@ def test_pipeline_blocks_extract_without_integrity_recovers_crash_and_preserves_
         f_a = pool.submit(w_a.process_one_cycle, max_jobs=10)
         f_b = pool.submit(w_b.process_one_cycle, max_jobs=10)
         s_a, s_b = f_a.result(), f_b.result()
-    assert s_a.claimed + s_b.claimed == 8
-    assert s_a.succeeded + s_b.succeeded == 8
+    assert s_a.claimed + s_b.claimed == 9
+    assert s_a.succeeded + s_b.succeeded == 9
 
 
 # =============================================================================

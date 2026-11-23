@@ -365,8 +365,8 @@ def test_worker_executes_verify_object_integrity_end_to_end_and_preserves_saniti
         worker_id="unit-integrity-worker",
     )
     stats = worker.process_one_cycle(max_jobs=10)
-    assert stats.claimed == 4
-    assert stats.succeeded == 4
+    assert stats.claimed == 5
+    assert stats.succeeded == 5
     assert stats.failed == 0
 
     with TestClient(app) as client:
@@ -376,10 +376,11 @@ def test_worker_executes_verify_object_integrity_end_to_end_and_preserves_saniti
         )
         assert list_resp.status_code == 200
         payload = list_resp.json()
-        assert payload["total"] == 4
+        assert payload["total"] == 5
         assert {item["step_type"] for item in payload["processing_runs"]} == {
             ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
             ProcessingStepType.EXTRACT_PDF_TEXT.value,
+            ProcessingStepType.COMPARE_CONSISTENCY.value,
         }
 
         for run_id in (run_pdf_id, run_png_id):
@@ -413,9 +414,9 @@ def test_worker_executes_verify_object_integrity_end_to_end_and_preserves_saniti
             owner_session, TenantContext(organization_id=org_a_id)
         )
         event_types = [e.event_type for e in events]
-        assert event_types.count("processing_run.queued") == 4
-        assert event_types.count("processing_run.started") == 4
-        assert event_types.count("processing_run.succeeded") == 2
+        assert event_types.count("processing_run.queued") == 5
+        assert event_types.count("processing_run.started") == 5
+        assert event_types.count("processing_run.succeeded") == 3
         assert event_types.count("processing_run.abstained") == 2
         assert AuditEventRepository.verify_chain_detailed(
             owner_session, TenantContext(organization_id=org_a_id)
@@ -1091,8 +1092,8 @@ def test_worker_cli_once_graceful_shutdown_and_concurrent_workers(
         f1 = pool.submit(w1.process_one_cycle, max_jobs=10)
         f2 = pool.submit(w2.process_one_cycle, max_jobs=10)
         s1, s2 = f1.result(), f2.result()
-    assert s1.claimed + s2.claimed == 10
-    assert s1.succeeded + s2.succeeded == 10
+    assert s1.claimed + s2.claimed == 11
+    assert s1.succeeded + s2.succeeded == 11
 
     # Standalone worker CLI (--once) execution
     with TestClient(app) as client:

@@ -21,7 +21,7 @@ from app.repositories.identity import IdentityAndSessionRepository
 from app.repositories.institutional import OrganizationRepository
 from app.schemas.tenant import TenantContext
 
-EXPECTED_TABLES = {
+EXPECTED_TABLES_0003 = {
     "organizations",
     "users",
     "organization_memberships",
@@ -37,6 +37,12 @@ EXPECTED_TABLES = {
     "oidc_auth_states",
     "auth_sessions",
     "security_auth_events",
+}
+
+EXPECTED_TABLES = EXPECTED_TABLES_0003 | {
+    "consistency_assessments",
+    "consistency_axis_results",
+    "consistency_axis_evidences",
 }
 
 
@@ -67,7 +73,7 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             audit_cols = {c["name"] for c in inspector.get_columns("audit_events")}
             assert "schema_version" in audit_cols
             run_cols = {c["name"] for c in inspector.get_columns("processing_runs")}
-            assert {"step_type", "attempt_count", "max_attempts", "available_at", "lease_token_hash"}.issubset(
+            assert {"step_type", "case_id", "attempt_count", "max_attempts", "available_at", "lease_token_hash"}.issubset(
                 run_cols
             )
 
@@ -75,7 +81,22 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
 
+        # Incremental downgrade 0009 -> 0008
+        command.downgrade(cfg, "20261122_0008")
+        with engine.connect() as conn:
+            ver_0008 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert ver_0008 == "20261122_0008"
+            tables_0008 = set(inspect(conn).get_table_names())
+            assert "consistency_assessments" not in tables_0008
+            assert "case_id" not in {
+                c["name"] for c in inspect(conn).get_columns("processing_runs")
+            }
+
         # Incremental downgrade 0008 -> 0007
+        command.downgrade(cfg, "20261122_0008")
+        with engine.connect() as conn:
+            assert "consistency_assessments" not in set(inspect(conn).get_table_names())
+
         command.downgrade(cfg, "20261122_0007")
         with engine.connect() as conn:
             ver_0007 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
@@ -109,7 +130,7 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
         with engine.connect() as conn:
             ver_0003 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
             assert ver_0003 == "20261120_0003"
-            assert EXPECTED_TABLES.issubset(set(inspect(conn).get_table_names()))
+            assert EXPECTED_TABLES_0003.issubset(set(inspect(conn).get_table_names()))
 
         # Incremental downgrade 0003 -> 0002
         command.downgrade(cfg, "20261120_0002")
@@ -249,8 +270,19 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
         # then verify downgrade 0008 -> 0007 -> 0006 -> 0008
         session_run = factory()
         try:
-            from app.core.constants import DocumentKind, ExtractedFieldStatus, ProcessingStatus
+            from app.core.constants import (
+                AxisName,
+                AxisStatus,
+                CaseReadinessState,
+                DocumentKind,
+                ExtractedFieldStatus,
+                ProcessingStatus,
+                ProcessingStepType,
+            )
             from app.models.entities import (
+                ConsistencyAssessment,
+                ConsistencyAxisEvidence,
+                ConsistencyAxisResult,
                 Document,
                 DocumentCase,
                 DocumentVersion,
@@ -332,12 +364,92 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
                 extraction_method="pdf_text_geometry_pdfminer",
             )
             session_run.add(ev_mig)
+            session_run.flush()
+
+            compare_run = ProcessingRun(
+                organization_id=org.id,
+                document_version_id=ver_mig.id,
+                case_id=case_mig.id,
+                step_type=ProcessingStepType.COMPARE_CONSISTENCY.value,
+                policy_version="3.3.4",
+                extractor_version="3.3.4",
+                status=ProcessingStatus.SUCCEEDED.value,
+                readable=True,
+                readiness_state=CaseReadinessState.PENDENTE.value,
+            )
+            session_run.add(compare_run)
+            session_run.flush()
+            assess_mig = ConsistencyAssessment(
+                organization_id=org.id,
+                case_id=case_mig.id,
+                processing_run_id=compare_run.id,
+                assessment_sequence=1,
+                engine_name="jyxia-deterministic-consistency",
+                engine_version="3.3.4",
+                policy_version="3.3.4",
+                input_fingerprint_sha256="b" * 64,
+                automated_axes_outcome="pending",
+                readiness_state=CaseReadinessState.PENDENTE.value,
+                human_review_completed=False,
+                human_review_required=True,
+                administrative_only=True,
+                clinical_approval=False,
+                compared_documents_count=1,
+                compared_snapshot_json=[],
+                extraction_run_ids_json=[extract_run.id],
+                limitations_json=["TEST_MIGRATION"],
+                summary_json={"automated_result": {"outcome": "pending"}},
+            )
+            session_run.add(assess_mig)
+            session_run.flush()
+            ax_mig = ConsistencyAxisResult(
+                organization_id=org.id,
+                case_id=case_mig.id,
+                assessment_id=assess_mig.id,
+                axis_name=AxisName.IDENTIDADE.value,
+                status=AxisStatus.PENDENTE.value,
+                rule_code="IDENTITY_AWAITING_COMPARABLE_DOCUMENTS",
+                justification="Migration check single-document pending justification.",
+                fields_used_json=["patient"],
+                compared_document_ids_json=[doc_mig.id],
+                compared_version_ids_json=[ver_mig.id],
+                evidence_reference_ids_json=[ev_mig.id],
+                comparison_items_json=[],
+                limitations_json=["TEST_MIGRATION"],
+                engine_version="3.3.4",
+                administrative_only=True,
+                clinical_approval=False,
+            )
+            session_run.add(ax_mig)
+            session_run.flush()
+            session_run.add(
+                ConsistencyAxisEvidence(
+                    organization_id=org.id,
+                    assessment_id=assess_mig.id,
+                    axis_result_id=ax_mig.id,
+                    document_version_id=ver_mig.id,
+                    extracted_field_id=field_mig.id,
+                    evidence_reference_id=ev_mig.id,
+                )
+            )
             session_run.commit()
             queued_run_id = queued_run.id
             extract_run_id = extract_run.id
+            compare_run_id = compare_run.id
             field_mig_id = field_mig.id
         finally:
             session_run.close()
+
+        command.downgrade(cfg, "20261122_0008")
+        with engine.connect() as conn:
+            assert "consistency_assessments" not in set(inspect(conn).get_table_names())
+            assert (
+                conn.execute(
+                    text("SELECT step_type FROM processing_runs WHERE id = :id"),
+                    {"id": compare_run_id},
+                ).scalar()
+                == "verify_object_integrity"
+            )
 
         command.downgrade(cfg, "20261122_0007")
         session_0007 = factory()

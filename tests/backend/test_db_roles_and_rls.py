@@ -357,6 +357,9 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             "processing_runs",
             "extracted_fields",
             "evidence_references",
+            "consistency_assessments",
+            "consistency_axis_results",
+            "consistency_axis_evidences",
             "human_reviews",
             "audit_events",
             "external_identities",
@@ -897,6 +900,9 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             "processing_runs",
             "extracted_fields",
             "evidence_references",
+            "consistency_assessments",
+            "consistency_axis_results",
+            "consistency_axis_evidences",
             "audit_events",
             "security_auth_events",
         ):
@@ -946,6 +952,31 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
                     "SELECT public.jyxia_worker_complete_extraction_run("
                     "'nonexistent', 'spoof-worker', repeat('a', 64), true, '{}', '[]', "
                     "'aid', 1, 'processing_run.succeeded', '{}', repeat('0', 64), repeat('b', 64), now())"
+                )
+            )
+        app_check.rollback()
+        with pytest.raises(Exception):
+            app_check.execute(
+                text(
+                    "SELECT * FROM public.jyxia_worker_prepare_extraction_completion_context("
+                    "'nonexistent', 'spoof-worker', repeat('a', 64))"
+                )
+            )
+        app_check.rollback()
+        with pytest.raises(Exception):
+            app_check.execute(
+                text(
+                    "SELECT public.jyxia_worker_prepare_case_comparison_context("
+                    "'nonexistent', 'spoof-worker', repeat('a', 64))"
+                )
+            )
+        app_check.rollback()
+        with pytest.raises(Exception):
+            app_check.execute(
+                text(
+                    "SELECT public.jyxia_worker_complete_comparison_run("
+                    "'nonexistent', 'spoof-worker', repeat('a', 64), 'pendente', '{}', '{}', '{}', "
+                    "'aid', 1, '{}', repeat('0', 64), repeat('b', 64), now())"
                 )
             )
         app_check.rollback()
@@ -1111,7 +1142,7 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
     finally:
         app_db.close()
 
-    # 4. Concurrent FOR UPDATE SKIP LOCKED processing across two PG jyxia_worker consumers (6 integrity + 6 extract)
+    # 4. Concurrent FOR UPDATE SKIP LOCKED processing across two PG jyxia_worker consumers (6 integrity + 6 extract + 2 compare)
     w1 = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-worker-1")
     w2 = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-worker-2")
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1120,8 +1151,8 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
         s1 = fut1.result()
         s2 = fut2.result()
 
-    assert s1.claimed + s2.claimed == 12
-    assert s1.succeeded + s2.succeeded == 12
+    assert s1.claimed + s2.claimed == 14
+    assert s1.succeeded + s2.succeeded == 14
     assert s1.failed == 0 and s2.failed == 0
     assert s1.lease_lost == 0 and s2.lease_lost == 0
 
@@ -1130,11 +1161,18 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
         runs_a, total_a = ProcessingQueueRepository.list_case_runs(
             app_verify, ctx_a, case_id=case_a_id, limit=20
         )
-        assert total_a == 6
+        assert total_a == 7
         integrity_runs_a = [r for r, _, _ in runs_a if r.step_type == "verify_object_integrity"]
         extract_runs_a = [r for r, _, _ in runs_a if r.step_type == "extract_pdf_text"]
+        compare_runs_a = [r for r, _, _ in runs_a if r.step_type == "compare_consistency"]
         assert len(integrity_runs_a) == 3
         assert len(extract_runs_a) == 3
+        assert len(compare_runs_a) == 1
+        assert compare_runs_a[0].status == ProcessingStatus.SUCCEEDED.value
+        assert compare_runs_a[0].readiness_state == "abstencao"
+        assert compare_runs_a[0].result_json is not None
+        assert compare_runs_a[0].result_json["clinical_approval"] is False
+        assert compare_runs_a[0].result_json["administrative_only"] is True
         for run_row in integrity_runs_a:
             assert run_row.status == ProcessingStatus.SUCCEEDED.value
             assert run_row.attempt_count == 1

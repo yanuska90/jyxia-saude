@@ -14,17 +14,12 @@ Documento técnico atualizado na **Etapa 3.2** (`backend/` `0.2.0`), evoluindo a
 - **`db/` (`base.py`, `session.py`):**
   - `apply_pg_rls_context()` e `apply_pg_identity_context()` vinculam `app.current_organization_id`, `app.current_user_id`, `app.current_session_token_hash`, `app.current_prev_session_token_hash`, `app.current_oidc_state_hash`, `app.current_oidc_issuer` e `app.current_oidc_subject` transacionalmente via `set_config(..., true)` para enforcement efetivo do RLS no PostgreSQL 16 sem vazamento entre conexões do pool.
 
-- **`models/entities.py` (`15` modelos relacionais multi-tenant + identidade):**
-  - Preserva integralmente os `11` modelos multi-tenant (`Organization`, `User`, `OrganizationMembership` incluindo `read_only` e status `suspended`/`revoked`, `DocumentCase`, `Document`, `DocumentVersion`, `ProcessingRun`, `ExtractedField`, `EvidenceReference`, `HumanReview`, `AuditEvent`);
-  - Adiciona **`4` modelos de identidade e segurança:**
-    12. `ExternalIdentity` (`external_identities`) — vinculação única `(issuer, subject)` -> `user_id` sem matching por e-mail e com status alinhados (`active`, `suspended`, `revoked`);
-    13. `OidcAuthState` (`oidc_auth_states`) — transação PKCE efêmera com `state_hash`, `nonce_hash`, `code_verifier_ciphertext` (AES-256-GCM) e consumo único atômico (`consumed_at`);
-    14. `AuthSession` (`auth_sessions`) — sessão BFF server-side com digests `session_token_hash` / `csrf_token_hash`, `acr`, `amr_json`, `mfa_verified_at`, timeouts de ociosidade/absoluto, rotação de sessão/CSRF na troca de organização e `revoked_at` (sem tokens OIDC em claro);
-    15. `SecurityAuditEvent` (`security_auth_events`) — trilha global append-only encadeada (`jyxia.sec_audit.v1`) para logins, recusas MFA, CSRF, cross-tenant e negações RBAC.
+- **`models/entities.py` (`18` modelos relacionais multi-tenant + identidade + consistência):**
+  - Preserva integralmente os `11` modelos multi-tenant, os `4` modelos de identidade/segurança (`ExternalIdentity`, `OidcAuthState`, `AuthSession`, `SecurityAuditEvent`) e adiciona **`3` modelos append-only da Etapa 3.3.4:** `ConsistencyAssessment`, `ConsistencyAxisResult` e `ConsistencyAxisEvidence` (FK composta para `evidence_references`).
 
 ## 2. Separação de privilégios no PostgreSQL 16, FORCE RLS, worker isolado e trilha append-only
 
-- **Migrations `20261120_0003` a `20261122_0008` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
+- **Migrations `20261120_0003` a `20261122_0009` + [`backend/infra/postgres_init_roles.sql`](../backend/infra/postgres_init_roles.sql):**
   - Separa `migration_owner` (dona do schema/DDL/funções `SECURITY DEFINER`) da role de API `jyxia_app` e da role dedicada de processamento assíncrono **`jyxia_worker`** (ambas `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION`, sem `DDL`, sem `DELETE`/`TRUNCATE` e sem `INSERT` direto em auditoria; `jyxia_worker` não recebe acesso direto a nenhuma tabela, operando exclusivamente via funções `SECURITY DEFINER SET search_path = pg_catalog, public` com prova criptográfica de lease `lease_token_hash`);
   - Habilita **Row-Level Security com `FORCE ROW LEVEL SECURITY`** nas 9 tabelas organizacionais/auditoria (`organization_memberships`, `document_cases`, `documents`, `document_versions`, `processing_runs`, `extracted_fields`, `evidence_references`, `human_reviews`, `audit_events`) e nas 3 tabelas sensíveis de sessão/identidade (`auth_sessions`, `external_identities`, `oidc_auth_states`, protegidas por hash não enumerável de sessão ativa ou transação OIDC, sem aceitar `app.current_user_id` isolado), além de RLS em `security_auth_events` e política dedicada `p_processing_runs_worker_queue_definer` exclusivamente para claim/reclaim via `SECURITY DEFINER` sob `session_user = 'jyxia_worker'`;
   - Instala triggers **`BEFORE TRUNCATE`** em `audit_events` e triggers `BEFORE UPDATE / DELETE / TRUNCATE` em `security_auth_events`;
