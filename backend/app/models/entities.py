@@ -30,6 +30,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import (
     CaseReadinessState,
+    DEFAULT_PROCESSING_MAX_ATTEMPTS,
     DocumentKind,
     ExternalIdentityStatus,
     ExtractedFieldStatus,
@@ -37,6 +38,7 @@ from app.core.constants import (
     MembershipStatus,
     OrganizationStatus,
     ProcessingStatus,
+    ProcessingStepType,
     SecurityAuditOutcome,
     StorageDriver,
 )
@@ -446,15 +448,50 @@ class ProcessingRun(Base):
             name="fk_processing_runs_org_docver",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["organization_id", "triggered_by_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_processing_runs_org_actor",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             f"status IN ({_enum_values_sql(ProcessingStatus)})",
             name="status_valid",
         ),
         CheckConstraint(
-            "finished_at IS NULL OR finished_at >= started_at",
+            f"step_type IN ({_enum_values_sql(ProcessingStepType)})",
+            name="step_type_valid",
+        ),
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonneg"),
+        CheckConstraint(
+            "max_attempts >= 1 AND attempt_count <= max_attempts",
+            name="max_attempts_valid",
+        ),
+        CheckConstraint(
+            "lease_token_hash IS NULL OR (length(trim(lease_token_hash)) = 64 AND lease_token_hash = lower(lease_token_hash))",
+            name="lease_hash_hex64",
+        ),
+        CheckConstraint(
+            "last_error_code IS NULL OR length(trim(last_error_code)) >= 2",
+            name="error_code_min_len",
+        ),
+        CheckConstraint(
+            "finished_at IS NULL OR (started_at IS NOT NULL AND finished_at >= started_at)",
             name="finished_after_started",
         ),
+        CheckConstraint("updated_at >= created_at", name="updated_after_created"),
         Index("ix_processing_runs_org_docver", "organization_id", "document_version_id"),
+        Index("ix_processing_runs_queue_claim", "status", "available_at", "created_at"),
+        Index("ix_processing_runs_org_status", "organization_id", "status", "available_at"),
+        Index(
+            "uq_processing_runs_active_ver_step",
+            "organization_id",
+            "document_version_id",
+            "step_type",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running', 'retry_wait')"),
+            postgresql_where=text("status IN ('queued', 'running', 'retry_wait')"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -462,22 +499,67 @@ class ProcessingRun(Base):
         String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
     )
     document_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    step_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+        server_default=text(f"'{ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value}'"),
+    )
+    triggered_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     extractor_version: Mapped[str] = mapped_column(String(64), nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default=ProcessingStatus.PENDING.value
+        String(32), nullable=False, default=ProcessingStatus.QUEUED.value
     )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=DEFAULT_PROCESSING_MAX_ATTEMPTS,
+        server_default=text(str(DEFAULT_PROCESSING_MAX_ATTEMPTS)),
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT, nullable=True)
     readable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     readiness_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
     axes_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utc_now
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+@event.listens_for(ProcessingRun, "before_insert")
+def _normalize_processing_run_insert_timestamps(
+    _mapper: Any, _connection: Any, target: ProcessingRun
+) -> None:
+    now = utc_now()
+    if target.created_at is None:
+        target.created_at = now
+    if target.available_at is None:
+        target.available_at = target.created_at
+    if target.updated_at is None or target.updated_at < target.created_at:
+        target.updated_at = target.created_at
 
 
 class ExtractedField(Base):

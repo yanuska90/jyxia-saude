@@ -107,12 +107,37 @@ class DocumentKind(StrEnum):
 
 
 class ProcessingStatus(StrEnum):
+    QUEUED = "queued"
     PENDING = "pending"
     RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    SUCCEEDED = "succeeded"
     COMPLETED = "completed"
     ABSTAINED = "abstained"
     QUARANTINED = "quarantined"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ProcessingStepType(StrEnum):
+    VERIFY_OBJECT_INTEGRITY = "verify_object_integrity"
+
+
+ACTIVE_PROCESSING_STATUSES: tuple[str, ...] = (
+    ProcessingStatus.QUEUED.value,
+    ProcessingStatus.RUNNING.value,
+    ProcessingStatus.RETRY_WAIT.value,
+)
+DEFAULT_PROCESSING_POLICY_VERSION = "3.3.2"
+DEFAULT_INTEGRITY_EXTRACTOR_VERSION = "integrity-verifier-3.3.2"
+DEFAULT_WORKER_ID = "jyxia-worker-1"
+DEFAULT_WORKER_POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_WORKER_LEASE_SECONDS = 60
+DEFAULT_PROCESSING_MAX_ATTEMPTS = 5
+DEFAULT_PROCESSING_RETRY_BACKOFF_MIN_SECONDS = 2.0
+DEFAULT_PROCESSING_RETRY_BACKOFF_MAX_SECONDS = 60.0
+DEFAULT_PROCESSING_RETRY_JITTER_RATIO = 0.2
+DEFAULT_WORKER_MAX_JOBS_PER_CYCLE = 10
 
 
 class ExtractedFieldStatus(StrEnum):

@@ -11,7 +11,19 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from app.core.constants import APP_NAME, APP_VERSION, DEFAULT_MAX_DOCUMENT_BYTES
+from app.core.constants import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_MAX_DOCUMENT_BYTES,
+    DEFAULT_PROCESSING_MAX_ATTEMPTS,
+    DEFAULT_PROCESSING_RETRY_BACKOFF_MAX_SECONDS,
+    DEFAULT_PROCESSING_RETRY_BACKOFF_MIN_SECONDS,
+    DEFAULT_PROCESSING_RETRY_JITTER_RATIO,
+    DEFAULT_WORKER_ID,
+    DEFAULT_WORKER_LEASE_SECONDS,
+    DEFAULT_WORKER_MAX_JOBS_PER_CYCLE,
+    DEFAULT_WORKER_POLL_INTERVAL_SECONDS,
+)
 
 _DEFAULT_DEV_SESSION_SECRET = "jyxia-dev-only-ephemeral-session-secret-not-for-production"
 _DEFAULT_DEV_CSRF_SECRET = "jyxia-dev-only-ephemeral-csrf-secret-not-for-production"
@@ -22,6 +34,7 @@ _WEAK_SECRET_FRAGMENTS: tuple[str, ...] = (
     "synthetic_local_only",
     "synthetic_dev",
     "synthetic_app",
+    "synthetic_worker",
     "synthetic_kc",
     "placeholder",
     "dev_only",
@@ -96,6 +109,15 @@ def _parse_int(raw: str | None, *, default: int, field_name: str) -> int:
         return int(raw.strip())
     except ValueError as exc:
         raise ConfigurationError(f"Invalid integer value for {field_name}.") from exc
+
+
+def _parse_float(raw: str | None, *, default: float, field_name: str) -> float:
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise ConfigurationError(f"Invalid float value for {field_name}.") from exc
 
 
 def _parse_csv(raw: str | None, *, lowercase: bool = False) -> tuple[str, ...]:
@@ -189,10 +211,32 @@ class Settings(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     database_url: str | None = None
+    worker_database_url: str | None = None
     migration_database_url: str | None = None
     storage_root: str = Field(default="../JYXIA_LOCAL_WORK/synthetic_storage", min_length=1)
     allow_local_synthetic_storage: bool = True
     max_document_bytes: int = Field(default=DEFAULT_MAX_DOCUMENT_BYTES, ge=1024, le=52_428_800)
+
+    # Async background processing worker
+    worker_enabled: bool = True
+    worker_id: str = Field(default=DEFAULT_WORKER_ID, min_length=3, max_length=120)
+    worker_poll_interval_seconds: float = Field(
+        default=DEFAULT_WORKER_POLL_INTERVAL_SECONDS, ge=0.05, le=60.0
+    )
+    worker_lease_seconds: int = Field(default=DEFAULT_WORKER_LEASE_SECONDS, ge=5, le=3600)
+    worker_max_attempts: int = Field(default=DEFAULT_PROCESSING_MAX_ATTEMPTS, ge=1, le=20)
+    worker_retry_backoff_min_seconds: float = Field(
+        default=DEFAULT_PROCESSING_RETRY_BACKOFF_MIN_SECONDS, ge=0.0, le=300.0
+    )
+    worker_retry_backoff_max_seconds: float = Field(
+        default=DEFAULT_PROCESSING_RETRY_BACKOFF_MAX_SECONDS, ge=0.1, le=3600.0
+    )
+    worker_retry_jitter_ratio: float = Field(
+        default=DEFAULT_PROCESSING_RETRY_JITTER_RATIO, ge=0.0, le=0.5
+    )
+    worker_max_jobs_per_cycle: int = Field(
+        default=DEFAULT_WORKER_MAX_JOBS_PER_CYCLE, ge=1, le=500
+    )
 
     app_base_url: str = "http://127.0.0.1:8000"
     cors_allowed_origins: tuple[str, ...] = ()
@@ -224,7 +268,7 @@ class Settings(BaseModel):
     session_idle_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
     session_absolute_timeout_seconds: int = Field(default=28800, ge=300, le=604800)
 
-    @field_validator("database_url", "migration_database_url")
+    @field_validator("database_url", "worker_database_url", "migration_database_url")
     @classmethod
     def _validate_database_url(cls, value: str | None) -> str | None:
         if value is None:
@@ -315,6 +359,11 @@ class Settings(BaseModel):
             if not self.oidc_allowed_acr:
                 raise ValueError("Mandatory MFA requires at least one allowed ACR assurance value.")
 
+        if self.worker_retry_backoff_max_seconds < self.worker_retry_backoff_min_seconds:
+            raise ValueError(
+                "worker_retry_backoff_max_seconds must be >= worker_retry_backoff_min_seconds."
+            )
+
         if self.env in {"production", "staging"}:
             env_label = self.env.capitalize()
             if self.debug or self.log_level == "DEBUG":
@@ -340,6 +389,26 @@ class Settings(BaseModel):
                     raise ValueError(
                         f"{env_label} runtime database role must differ from migration database role."
                     )
+            if self.worker_database_url:
+                if self.worker_database_url.startswith("sqlite"):
+                    raise ValueError(f"SQLite is prohibited for worker in JYXIA_ENV={self.env}.")
+                parsed_wdb = urlparse(self.worker_database_url)
+                wdb_user = (parsed_wdb.username or "").strip().lower()
+                wdb_pw = parsed_wdb.password or ""
+                if not wdb_user or wdb_user in _FORBIDDEN_RUNTIME_DB_USERS:
+                    raise ValueError(
+                        f"{env_label} worker database URL cannot use privileged/default role '{wdb_user}'."
+                    )
+                if _is_weak_secret(wdb_pw, min_len=12):
+                    raise ValueError(
+                        f"{env_label} worker database credentials must be strong non-placeholder secrets."
+                    )
+                if self.migration_database_url:
+                    parsed_mig = urlparse(self.migration_database_url)
+                    if parsed_mig.username and parsed_mig.username == parsed_wdb.username:
+                        raise ValueError(
+                            f"{env_label} worker database role must differ from migration database role."
+                        )
             if self.allow_local_synthetic_storage:
                 raise ValueError(
                     f"Local synthetic disk storage must be disabled when JYXIA_ENV={self.env}."
@@ -407,6 +476,9 @@ class Settings(BaseModel):
     def masked_database_url(self) -> str:
         return mask_database_url(self.database_url)
 
+    def masked_worker_database_url(self) -> str:
+        return mask_database_url(self.worker_database_url)
+
     def __repr__(self) -> str:
         return (
             f"Settings(app_name={self.app_name!r}, app_version={self.app_version!r}, "
@@ -424,6 +496,7 @@ def load_settings(
     """Build and validate Settings from an environment mapping without mutating globals."""
     source = os.environ if environ is None else environ
     raw_db = source.get("JYXIA_DATABASE_URL") or source.get("APP_DATABASE_URL")
+    raw_wdb = source.get("JYXIA_WORKER_DATABASE_URL") or source.get("WORKER_DATABASE_URL")
     raw_mig_db = source.get("JYXIA_MIGRATION_DATABASE_URL") or source.get("MIGRATION_DATABASE_URL")
     raw_issuer = source.get("JYXIA_OIDC_ISSUER") or source.get("OIDC_ISSUER")
     raw_client = source.get("JYXIA_OIDC_CLIENT_ID") or source.get("OIDC_CLIENT_ID")
@@ -444,6 +517,7 @@ def load_settings(
             debug=_parse_bool(source.get("JYXIA_DEBUG"), default=False, field_name="JYXIA_DEBUG"),
             log_level=(source.get("JYXIA_LOG_LEVEL") or "INFO").strip().upper(),  # type: ignore[arg-type]
             database_url=raw_db.strip() if raw_db and raw_db.strip() else None,
+            worker_database_url=raw_wdb.strip() if raw_wdb and raw_wdb.strip() else None,
             migration_database_url=raw_mig_db.strip() if raw_mig_db and raw_mig_db.strip() else None,
             storage_root=(
                 source.get("JYXIA_STORAGE_ROOT") or "../JYXIA_LOCAL_WORK/synthetic_storage"
@@ -457,6 +531,47 @@ def load_settings(
                 source.get("JYXIA_MAX_DOCUMENT_BYTES"),
                 default=DEFAULT_MAX_DOCUMENT_BYTES,
                 field_name="JYXIA_MAX_DOCUMENT_BYTES",
+            ),
+            worker_enabled=_parse_bool(
+                source.get("JYXIA_WORKER_ENABLED"),
+                default=True,
+                field_name="JYXIA_WORKER_ENABLED",
+            ),
+            worker_id=(source.get("JYXIA_WORKER_ID") or DEFAULT_WORKER_ID).strip(),
+            worker_poll_interval_seconds=_parse_float(
+                source.get("JYXIA_WORKER_POLL_INTERVAL_SECONDS"),
+                default=DEFAULT_WORKER_POLL_INTERVAL_SECONDS,
+                field_name="JYXIA_WORKER_POLL_INTERVAL_SECONDS",
+            ),
+            worker_lease_seconds=_parse_int(
+                source.get("JYXIA_WORKER_LEASE_SECONDS"),
+                default=DEFAULT_WORKER_LEASE_SECONDS,
+                field_name="JYXIA_WORKER_LEASE_SECONDS",
+            ),
+            worker_max_attempts=_parse_int(
+                source.get("JYXIA_WORKER_MAX_ATTEMPTS"),
+                default=DEFAULT_PROCESSING_MAX_ATTEMPTS,
+                field_name="JYXIA_WORKER_MAX_ATTEMPTS",
+            ),
+            worker_retry_backoff_min_seconds=_parse_float(
+                source.get("JYXIA_WORKER_RETRY_BACKOFF_MIN_SECONDS"),
+                default=DEFAULT_PROCESSING_RETRY_BACKOFF_MIN_SECONDS,
+                field_name="JYXIA_WORKER_RETRY_BACKOFF_MIN_SECONDS",
+            ),
+            worker_retry_backoff_max_seconds=_parse_float(
+                source.get("JYXIA_WORKER_RETRY_BACKOFF_MAX_SECONDS"),
+                default=DEFAULT_PROCESSING_RETRY_BACKOFF_MAX_SECONDS,
+                field_name="JYXIA_WORKER_RETRY_BACKOFF_MAX_SECONDS",
+            ),
+            worker_retry_jitter_ratio=_parse_float(
+                source.get("JYXIA_WORKER_RETRY_JITTER_RATIO"),
+                default=DEFAULT_PROCESSING_RETRY_JITTER_RATIO,
+                field_name="JYXIA_WORKER_RETRY_JITTER_RATIO",
+            ),
+            worker_max_jobs_per_cycle=_parse_int(
+                source.get("JYXIA_WORKER_MAX_JOBS_PER_CYCLE"),
+                default=DEFAULT_WORKER_MAX_JOBS_PER_CYCLE,
+                field_name="JYXIA_WORKER_MAX_JOBS_PER_CYCLE",
             ),
             app_base_url=(source.get("JYXIA_APP_BASE_URL") or "http://127.0.0.1:8000").strip().rstrip("/"),
             cors_allowed_origins=_parse_csv(source.get("JYXIA_CORS_ALLOWED_ORIGINS")),

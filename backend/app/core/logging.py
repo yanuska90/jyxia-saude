@@ -52,6 +52,8 @@ FORBIDDEN_LOG_KEYS: frozenset[str] = frozenset(
         "csrf_secret",
         "dsn",
         "database_url",
+        "worker_database_url",
+        "lease_token",
         "authorization",
         "cookie",
     }
