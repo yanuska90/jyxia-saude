@@ -450,3 +450,86 @@ def test_backend_does_not_import_legacy_v2_modules() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 top = node.module.split(".")[0]
                 assert top not in forbidden_modules, f"Forbidden import {node.module} in {file_path}"
+
+
+def test_worker_settings_fail_closed_and_log_sanitization() -> None:
+    from pydantic import ValidationError
+    from app.core.config import Settings
+    from app.core.logging import build_safe_log_extra
+    from app.worker import resolve_worker_database_url
+
+    with pytest.raises(ValidationError):
+        Settings(
+            env="production",
+            debug=False,
+            log_level="INFO",
+            database_url="postgresql+psycopg://jyxia_app:Str0ng_Prod_Runt1me_Secret_99@127.0.0.1:5432/jyxia",
+            worker_database_url="postgresql+psycopg://jyxia_migrator:Str0ng_Prod_W0rker_Secret_99@127.0.0.1:5432/jyxia",
+            allow_local_synthetic_storage=False,
+            oidc_enabled=True,
+            oidc_issuer="https://idp.exemplo.invalid/realms/jyxia",
+            oidc_client_id="jyxia-prod",
+            oidc_client_secret="Str0ng_Oidc_Cl1ent_Secret_Prod_99",
+            oidc_redirect_uri="https://app.exemplo.invalid/api/v1/auth/callback",
+            session_secret="Str0ng_S3ss1on_Secret_Key_32Chars_99_Prod_Alpha",
+            csrf_secret="Str0ng_Csrf_Secret_Key_32Chars_99_Prod_Beta",
+            session_cookie_secure=True,
+            app_base_url="https://app.exemplo.invalid",
+            cors_allowed_origins=("https://app.exemplo.invalid",),
+        )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            env="staging",
+            debug=False,
+            log_level="INFO",
+            database_url="postgresql+psycopg://jyxia_app:Str0ng_Prod_Runt1me_Secret_99@127.0.0.1:5432/jyxia",
+            worker_database_url="postgresql+psycopg://jyxia_worker:synthetic_worker_role_change_me@127.0.0.1:5432/jyxia",
+            allow_local_synthetic_storage=False,
+            oidc_enabled=True,
+            oidc_issuer="https://idp.exemplo.invalid/realms/jyxia",
+            oidc_client_id="jyxia-staging",
+            oidc_client_secret="Str0ng_Oidc_Cl1ent_Secret_Prod_99",
+            oidc_redirect_uri="https://app.exemplo.invalid/api/v1/auth/callback",
+            session_secret="Str0ng_S3ss1on_Secret_Key_32Chars_99_Prod_Alpha",
+            csrf_secret="Str0ng_Csrf_Secret_Key_32Chars_99_Prod_Beta",
+            session_cookie_secure=True,
+            app_base_url="https://app.exemplo.invalid",
+            cors_allowed_origins=("https://app.exemplo.invalid",),
+        )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            env="development",
+            worker_retry_backoff_min_seconds=30.0,
+            worker_retry_backoff_max_seconds=5.0,
+        )
+
+    prod_without_worker_dsn = Settings(
+        env="production",
+        debug=False,
+        log_level="INFO",
+        database_url="postgresql+psycopg://jyxia_app:Str0ng_Prod_Runt1me_Secret_99@127.0.0.1:5432/jyxia",
+        allow_local_synthetic_storage=False,
+        oidc_enabled=True,
+        oidc_issuer="https://idp.exemplo.invalid/realms/jyxia",
+        oidc_client_id="jyxia-prod",
+        oidc_client_secret="Str0ng_Oidc_Cl1ent_Secret_Prod_99",
+        oidc_redirect_uri="https://app.exemplo.invalid/api/v1/auth/callback",
+        session_secret="Str0ng_S3ss1on_Secret_Key_32Chars_99_Prod_Alpha",
+        csrf_secret="Str0ng_Csrf_Secret_Key_32Chars_99_Prod_Beta",
+        session_cookie_secure=True,
+        app_base_url="https://app.exemplo.invalid",
+        cors_allowed_origins=("https://app.exemplo.invalid",),
+    )
+    with pytest.raises(ConfigurationError):
+        resolve_worker_database_url(prod_without_worker_dsn)
+
+    safe_extra = build_safe_log_extra(
+        lease_token="secret_lease_token_value",
+        worker_database_url="postgresql+psycopg://jyxia_worker:SuperSecret99@127.0.0.1:5432/jyxia",
+        worker_id="jyxia-worker-1",
+    )
+    assert safe_extra["lease_token"] == "[REDACTED]"
+    assert safe_extra["worker_database_url"] == "[REDACTED]"
+    assert safe_extra["worker_id"] == "jyxia-worker-1"

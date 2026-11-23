@@ -58,15 +58,16 @@ jobs:
           /tmp/jyxia-ci-venv/bin/pip install --no-cache-dir -r backend/requirements-dev.txt
           /tmp/jyxia-ci-venv/bin/ruff check --config backend/pyproject.toml backend tests/backend tools
           /tmp/jyxia-ci-venv/bin/pip-audit
-      - name: Inicializar role restrita jyxia_app no PostgreSQL 16 e verificar migracoes Alembic
+      - name: Inicializar roles restritas jyxia_app e jyxia_worker no PostgreSQL 16 e verificar migracoes Alembic
         env:
           JYXIA_APP_PW: jyxia_ci_app_ephemeral_pw
+          JYXIA_WORKER_PW: jyxia_ci_worker_ephemeral_pw
           JYXIA_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
         run: |
           echo "::add-mask::$JYXIA_APP_PW"
+          echo "::add-mask::$JYXIA_WORKER_PW"
           /tmp/jyxia-ci-venv/bin/python -c "
           import os, psycopg
-          pw = os.environ['JYXIA_APP_PW']
           with psycopg.connect(os.environ['JYXIA_MIGRATION_DATABASE_URL'].replace('+psycopg', ''), autocommit=True) as conn:
               with conn.cursor() as cur:
                   cur.execute(\"\"\"
@@ -76,13 +77,20 @@ jobs:
                           CREATE ROLE jyxia_app LOGIN PASSWORD 'jyxia_ci_app_ephemeral_pw'
                               NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
                       END IF;
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'jyxia_worker') THEN
+                          CREATE ROLE jyxia_worker LOGIN PASSWORD 'jyxia_ci_worker_ephemeral_pw'
+                              NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+                      END IF;
                   END \$\$;
                   REVOKE CREATE ON SCHEMA public FROM PUBLIC;
                   GRANT USAGE ON SCHEMA public TO jyxia_app;
                   GRANT CONNECT ON DATABASE jyxia_test TO jyxia_app;
+                  GRANT USAGE ON SCHEMA public TO jyxia_worker;
+                  GRANT CONNECT ON DATABASE jyxia_test TO jyxia_worker;
                   \"\"\")
           "
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0006
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0005
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261121_0004
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0003
@@ -116,6 +124,7 @@ jobs:
         env:
           JYXIA_TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
           JYXIA_TEST_APP_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_TEST_WORKER_DATABASE_URL: postgresql+psycopg://jyxia_worker:jyxia_ci_worker_ephemeral_pw@127.0.0.1:5432/jyxia_test
         run: |
           set -o pipefail
           if ! /tmp/jyxia-ci-venv/bin/python -u -m pytest tests/backend -v -rs 2>&1 | tee /tmp/pytest_ci.log; then

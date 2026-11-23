@@ -849,3 +849,348 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         assert SecurityAuditRepository.verify_chain(verify_db)
     finally:
         verify_db.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("JYXIA_TEST_APP_DATABASE_URL", "").strip()
+    or not os.environ.get("JYXIA_TEST_WORKER_DATABASE_URL", "").strip(),
+    reason="PostgreSQL runtime roles jyxia_app and jyxia_worker required for PG16 worker tests.",
+)
+def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recovery(
+    migrated_engine, app_engine, worker_engine
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    from app.core.config import Settings
+    from app.core.constants import DocumentKind, ProcessingStatus
+    from app.repositories.institutional import LeaseOwnershipError, ProcessingQueueRepository
+    from app.services.institutional_service import InstitutionalService
+    from app.services.processing_worker import ProcessingWorker
+    from app.services.storage import LocalControlledSyntheticStorage
+
+    owner_factory = create_session_factory(migrated_engine)
+    app_factory = create_session_factory(app_engine)
+    worker_factory = create_session_factory(worker_engine)
+
+    # 1. Verify jyxia_worker PostgreSQL role flags are strictly least-privilege
+    w_check = worker_factory()
+    try:
+        role_row = w_check.execute(
+            text(
+                "SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolcanlogin, rolinherit "
+                "FROM pg_roles WHERE rolname = 'jyxia_worker'"
+            )
+        ).first()
+        assert role_row is not None
+        assert tuple(role_row) == (False, False, False, False, True, False)
+
+        # Direct table access MUST be denied for jyxia_worker across sensitive and domain tables
+        for tbl in (
+            "organizations",
+            "users",
+            "auth_sessions",
+            "external_identities",
+            "oidc_auth_states",
+            "document_cases",
+            "documents",
+            "document_versions",
+            "processing_runs",
+            "audit_events",
+            "security_auth_events",
+        ):
+            with pytest.raises(Exception):
+                w_check.execute(text(f"SELECT count(*) FROM {tbl}"))
+            w_check.rollback()
+
+        with pytest.raises(Exception):
+            w_check.execute(text("DELETE FROM processing_runs"))
+        w_check.rollback()
+    finally:
+        w_check.close()
+
+    # 2. Verify jyxia_app CANNOT execute jyxia_worker_* SECURITY DEFINER functions
+    app_check = app_factory()
+    try:
+        with pytest.raises(Exception):
+            app_check.execute(text("SELECT * FROM public.jyxia_worker_begin_expired_reclaim()"))
+        app_check.rollback()
+        with pytest.raises(Exception):
+            app_check.execute(
+                text(
+                    "SELECT * FROM public.jyxia_worker_claim_next_run("
+                    "'spoof-worker', repeat('a', 64), 30, 'verify_object_integrity')"
+                )
+            )
+        app_check.rollback()
+    finally:
+        app_check.close()
+
+    # 3. Seed Org A & Org B actors, cases, and authenticated sessions
+    owner_db = owner_factory()
+    now_utc = datetime.now(timezone.utc)
+    try:
+        org_a = OrganizationRepository.create_organization(owner_db, slug="wrk-a", name="Worker Org A")
+        org_b = OrganizationRepository.create_organization(owner_db, slug="wrk-b", name="Worker Org B")
+        user_a = OrganizationRepository.create_user(
+            owner_db, email="wrk.a@jyxia.local", display_name="Worker User A", mfa_enrolled=True
+        )
+        user_b = OrganizationRepository.create_user(
+            owner_db, email="wrk.b@jyxia.local", display_name="Worker User B", mfa_enrolled=True
+        )
+        OrganizationRepository.assign_membership(
+            owner_db,
+            TenantContext(organization_id=org_a.id),
+            user_id=user_a.id,
+            role=OrganizationRole.ORG_ADMIN.value,
+        )
+        OrganizationRepository.assign_membership(
+            owner_db,
+            TenantContext(organization_id=org_b.id),
+            user_id=user_b.id,
+            role=OrganizationRole.ORG_ADMIN.value,
+        )
+        ext_a = IdentityAndSessionRepository.bind_external_identity(
+            owner_db,
+            user_id=user_a.id,
+            issuer="https://idp.jyxia.local/realms/wrk",
+            subject="sub-wrk-a",
+            email_at_binding=user_a.email,
+        )
+        ext_b = IdentityAndSessionRepository.bind_external_identity(
+            owner_db,
+            user_id=user_b.id,
+            issuer="https://idp.jyxia.local/realms/wrk",
+            subject="sub-wrk-b",
+            email_at_binding=user_b.email,
+        )
+        IdentityAndSessionRepository.create_auth_session(
+            owner_db,
+            user_id=user_a.id,
+            external_identity_id=ext_a.id,
+            active_organization_id=org_a.id,
+            session_token_hash="1" * 64,
+            csrf_token_hash="3" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
+        IdentityAndSessionRepository.create_auth_session(
+            owner_db,
+            user_id=user_b.id,
+            external_identity_id=ext_b.id,
+            active_organization_id=org_b.id,
+            session_token_hash="2" * 64,
+            csrf_token_hash="4" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
+        case_a = CaseAndDocumentRepository.create_case(
+            owner_db,
+            TenantContext(organization_id=org_a.id, actor_user_id=user_a.id),
+            case_code="PG-WRK-A-01",
+            external_reference=None,
+            procedure_reference="PG16 worker test case A",
+            declared_laterality=None,
+            readiness_state=CaseReadinessState.PENDENTE.value,
+        )
+        case_b = CaseAndDocumentRepository.create_case(
+            owner_db,
+            TenantContext(organization_id=org_b.id, actor_user_id=user_b.id),
+            case_code="PG-WRK-B-01",
+            external_reference=None,
+            procedure_reference="PG16 worker test case B",
+            declared_laterality=None,
+            readiness_state=CaseReadinessState.PENDENTE.value,
+        )
+        owner_db.commit()
+        org_a_id, org_b_id = org_a.id, org_b.id
+        user_a_id, user_b_id = user_a.id, user_b.id
+        case_a_id, case_b_id = case_a.id, case_b.id
+    finally:
+        owner_db.close()
+
+    pg_storage_root = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "jyxia_pg16_worker_test"
+    pg_storage = LocalControlledSyntheticStorage(pg_storage_root, enabled=True, max_bytes=1024 * 1024)
+    settings = Settings(env="test", storage_root=pg_storage_root.as_posix())
+    ctx_a = TenantContext(
+        organization_id=org_a_id,
+        actor_user_id=user_a_id,
+        session_token_hash="1" * 64,
+        source="authenticated_request",
+    )
+    ctx_b = TenantContext(
+        organization_id=org_b_id,
+        actor_user_id=user_b_id,
+        session_token_hash="2" * 64,
+        source="authenticated_request",
+    )
+
+    run_ids_a: list[str] = []
+    run_ids_b: list[str] = []
+    app_db = app_factory()
+    try:
+        for i in range(3):
+            pdf = f"%PDF-1.4\n% orgA-doc-{i}\n%%EOF\n".encode("ascii")
+            ing = InstitutionalService.ingest_case_document(
+                app_db,
+                ctx_a,
+                storage=pg_storage,
+                case_id=case_a_id,
+                content=pdf,
+                mime_type="application/pdf",
+                original_filename=f"org-a-{i}.pdf",
+                document_kind=DocumentKind.LAUDO,
+                source_label="pg16_worker_test",
+            )
+            assert ing.initial_processing_run is not None
+            run_ids_a.append(ing.initial_processing_run.id)
+
+            pdf_b = f"%PDF-1.4\n% orgB-doc-{i}\n%%EOF\n".encode("ascii")
+            ing_b = InstitutionalService.ingest_case_document(
+                app_db,
+                ctx_b,
+                storage=pg_storage,
+                case_id=case_b_id,
+                content=pdf_b,
+                mime_type="application/pdf",
+                original_filename=f"org-b-{i}.pdf",
+                document_kind=DocumentKind.LAUDO,
+                source_label="pg16_worker_test",
+            )
+            assert ing_b.initial_processing_run is not None
+            run_ids_b.append(ing_b.initial_processing_run.id)
+    finally:
+        app_db.close()
+
+    # 4. Concurrent FOR UPDATE SKIP LOCKED processing across two PG jyxia_worker consumers
+    w1 = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-worker-1")
+    w2 = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-worker-2")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut1 = pool.submit(w1.process_one_cycle, max_jobs=6)
+        fut2 = pool.submit(w2.process_one_cycle, max_jobs=6)
+        s1 = fut1.result()
+        s2 = fut2.result()
+
+    assert s1.claimed + s2.claimed == 6
+    assert s1.succeeded + s2.succeeded == 6
+    assert s1.failed == 0 and s2.failed == 0
+    assert s1.lease_lost == 0 and s2.lease_lost == 0
+
+    app_verify = app_factory()
+    try:
+        runs_a, total_a = ProcessingQueueRepository.list_case_runs(
+            app_verify, ctx_a, case_id=case_a_id, limit=10
+        )
+        assert total_a == 3
+        for run_row, _doc_id, _c_id in runs_a:
+            assert run_row.status == ProcessingStatus.SUCCEEDED.value
+            assert run_row.attempt_count == 1
+            assert run_row.readable is False
+            assert run_row.readiness_state is None
+            assert run_row.result_json is not None
+            assert run_row.result_json["sha256_verified"] is True
+            assert run_row.result_json["clinical_approval"] is False
+            assert run_row.result_json["administrative_only"] is True
+
+        # FORCE RLS isolates Org A processing_runs from Org B session
+        clear_pg_rls_context(app_verify)
+        apply_pg_rls_context(app_verify, organization_id=org_b_id, user_id=user_b_id)
+        apply_pg_identity_context(app_verify, session_token_hash="2" * 64)
+        assert (
+            app_verify.execute(
+                text("SELECT count(*) FROM processing_runs WHERE organization_id = :oa"),
+                {"oa": org_a_id},
+            ).scalar()
+            == 0
+        )
+        app_verify.rollback()
+    finally:
+        app_verify.close()
+
+    # 5. Real PostgreSQL 16 lease expiry, stale-lease fencing, and automatic reclaim
+    app_re = app_factory()
+    try:
+        # Enqueue one fresh upload for lease crash/reclaim test
+        crash_ing = InstitutionalService.ingest_case_document(
+            app_re,
+            ctx_a,
+            storage=pg_storage,
+            case_id=case_a_id,
+            content=b"%PDF-1.4\n% lease-recovery-test\n%%EOF\n",
+            mime_type="application/pdf",
+            original_filename="lease-recovery.pdf",
+            document_kind=DocumentKind.LAUDO,
+            source_label="pg16_lease_test",
+        )
+        assert crash_ing.initial_processing_run is not None
+        crash_run_id = crash_ing.initial_processing_run.id
+    finally:
+        app_re.close()
+
+    _raw_tok, tok_hash = ProcessingQueueRepository.generate_lease_proof()
+    w_claim_sess = worker_factory()
+    try:
+        claimed_crash = ProcessingQueueRepository.claim_next_run(
+            w_claim_sess,
+            worker_id="pg-crashed-worker",
+            lease_token_hash=tok_hash,
+            lease_seconds=30,
+        )
+        assert claimed_crash is not None
+        assert claimed_crash.run_id == crash_run_id
+        assert claimed_crash.attempt_count == 1
+    finally:
+        w_claim_sess.close()
+
+    # Force lease expiration via migration owner under explicit tenant RLS context
+    owner_exp = owner_factory()
+    try:
+        apply_pg_rls_context(owner_exp, organization_id=org_a_id, user_id=user_a_id)
+        owner_exp.execute(
+            text("UPDATE processing_runs SET lease_expires_at = now() - interval '15 seconds' WHERE id = :rid"),
+            {"rid": crash_run_id},
+        )
+        owner_exp.commit()
+    finally:
+        owner_exp.close()
+
+    # Stale crashed worker CANNOT complete run after lease expiration
+    w_stale_sess = worker_factory()
+    try:
+        with pytest.raises(LeaseOwnershipError):
+            ProcessingQueueRepository.complete_run(
+                w_stale_sess,
+                run_id=crash_run_id,
+                worker_id="pg-crashed-worker",
+                lease_token_hash=tok_hash,
+                result_json={"sha256_verified": True},
+            )
+    finally:
+        w_stale_sess.close()
+
+    # Healthy worker reclaims expired lease and completes run on attempt_count == 2
+    recovery_worker = ProcessingWorker(
+        worker_factory, pg_storage, settings, worker_id="pg-recovery-worker"
+    )
+    rec_stats = recovery_worker.process_one_cycle(max_jobs=5)
+    assert rec_stats.reclaimed_leases == 1
+    assert rec_stats.claimed == 1
+    assert rec_stats.succeeded == 1
+
+    owner_verify = owner_factory()
+    try:
+        assert AuditEventRepository.verify_chain(owner_verify, TenantContext(organization_id=org_a_id))
+        assert AuditEventRepository.verify_chain(owner_verify, TenantContext(organization_id=org_b_id))
+    finally:
+        owner_verify.close()

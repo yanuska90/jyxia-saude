@@ -98,7 +98,7 @@ def migrated_engine(database_url: str) -> Generator[Engine, None, None]:
         try:
             with engine.begin() as conn:
                 ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-                already_head = ver == "20261122_0006"
+                already_head = ver == "20261122_0007"
         except SQLAlchemyError:
             already_head = False
 
@@ -124,6 +124,21 @@ def app_engine(migrated_engine: Engine) -> Generator[Engine, None, None]:
         yield migrated_engine
         return
     engine = create_db_engine(app_url)
+    _attach_pg_test_timeouts(engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture()
+def worker_engine(migrated_engine: Engine) -> Generator[Engine, None, None]:
+    """Return runtime `jyxia_worker` engine in PG CI, or `migrated_engine` locally on SQLite."""
+    worker_url = os.environ.get("JYXIA_TEST_WORKER_DATABASE_URL", "").strip()
+    if not worker_url:
+        yield migrated_engine
+        return
+    engine = create_db_engine(worker_url)
     _attach_pg_test_timeouts(engine)
     try:
         yield engine

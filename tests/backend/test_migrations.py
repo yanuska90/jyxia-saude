@@ -66,10 +66,23 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             assert "original_filename" in ver_cols
             audit_cols = {c["name"] for c in inspector.get_columns("audit_events")}
             assert "schema_version" in audit_cols
+            run_cols = {c["name"] for c in inspector.get_columns("processing_runs")}
+            assert {"step_type", "attempt_count", "max_attempts", "available_at", "lease_token_hash"}.issubset(
+                run_cols
+            )
 
             mc = MigrationContext.configure(conn)
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
+
+        # Incremental downgrade 0007 -> 0006
+        command.downgrade(cfg, "20261122_0006")
+        with engine.connect() as conn:
+            ver_0006 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert ver_0006 == "20261122_0006"
+            assert "step_type" not in {
+                c["name"] for c in inspect(conn).get_columns("processing_runs")
+            }
 
         # Incremental downgrade 0006 -> 0005
         command.downgrade(cfg, "20261122_0005")
@@ -223,6 +236,81 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
             session_verify.rollback()
         finally:
             session_verify.close()
+
+        # Populate a queued ProcessingRun at head (0007), then verify downgrade 0007 -> 0006 -> 0007
+        session_run = factory()
+        try:
+            from app.core.constants import DocumentKind, ProcessingStatus
+            from app.models.entities import Document, DocumentCase, DocumentVersion, ProcessingRun
+
+            case_mig = DocumentCase(
+                organization_id=org.id,
+                case_code="MIG-CASE-01",
+                procedure_reference="Migration Populated Run Case",
+                created_by_user_id=u_active.id,
+            )
+            session_run.add(case_mig)
+            session_run.flush()
+            doc_mig = Document(
+                organization_id=org.id,
+                case_id=case_mig.id,
+                document_kind=DocumentKind.LAUDO.value,
+                source_label="migration_check",
+                created_by_user_id=u_active.id,
+            )
+            session_run.add(doc_mig)
+            session_run.flush()
+            ver_mig = DocumentVersion(
+                organization_id=org.id,
+                document_id=doc_mig.id,
+                version_number=1,
+                sha256_hex="a" * 64,
+                mime_type="application/pdf",
+                byte_size=128,
+                storage_key=f"{org.id}/synthetic/mig.pdf",
+                created_by_user_id=u_active.id,
+            )
+            session_run.add(ver_mig)
+            session_run.flush()
+            queued_run = ProcessingRun(
+                organization_id=org.id,
+                document_version_id=ver_mig.id,
+                policy_version="3.3.2",
+                extractor_version="integrity-verifier-3.3.2",
+                status=ProcessingStatus.QUEUED.value,
+                started_at=None,
+            )
+            session_run.add(queued_run)
+            session_run.commit()
+            queued_run_id = queued_run.id
+        finally:
+            session_run.close()
+
+        command.downgrade(cfg, "20261122_0006")
+        session_down = factory()
+        try:
+            migrated_row = session_down.execute(
+                text("SELECT status, started_at FROM processing_runs WHERE id = :id"),
+                {"id": queued_run_id},
+            ).first()
+            assert migrated_row is not None
+            assert migrated_row[0] == "pending"
+            assert migrated_row[1] is not None
+        finally:
+            session_down.close()
+
+        command.upgrade(cfg, "head")
+        session_reup = factory()
+        try:
+            from app.models.entities import ProcessingRun as ReupProcessingRun
+
+            reup_run = session_reup.get(ReupProcessingRun, queued_run_id)
+            assert reup_run is not None
+            assert reup_run.step_type == "verify_object_integrity"
+            assert reup_run.attempt_count == 0
+            assert reup_run.max_attempts == 5
+        finally:
+            session_reup.close()
 
         # Downgrade 0005 -> 0004 -> 0003 on populated DB preserves all records, then re-upgrade to head
         command.downgrade(cfg, "20261121_0004")
