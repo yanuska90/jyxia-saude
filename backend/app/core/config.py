@@ -14,6 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from app.core.constants import (
     APP_NAME,
     APP_VERSION,
+    DEFAULT_CONSISTENCY_ENGINE_VERSION,
+    DEFAULT_CONSISTENCY_POLICY_VERSION,
+    DEFAULT_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS,
     DEFAULT_MAX_DOCUMENT_BYTES,
     DEFAULT_PDF_EXTRACTION_TIMEOUT_SECONDS,
     DEFAULT_PDF_MAX_BLOCKS_PER_PAGE,
@@ -247,6 +250,16 @@ class Settings(BaseModel):
     worker_extract_pdf_text_extractor_version: str = Field(
         default=DEFAULT_PDF_TEXT_EXTRACTOR_VERSION, min_length=1, max_length=64
     )
+    consistency_engine_version: str = Field(
+        default=DEFAULT_CONSISTENCY_ENGINE_VERSION, min_length=1, max_length=64
+    )
+    consistency_policy_version: str = Field(
+        default=DEFAULT_CONSISTENCY_POLICY_VERSION, min_length=1, max_length=64
+    )
+    consistency_temporality_max_age_days: int = Field(
+        default=DEFAULT_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS, ge=1, le=3650
+    )
+    worker_auto_chain_consistency_comparison: bool = True
     pdf_max_pages: int = Field(default=DEFAULT_PDF_MAX_PAGES, ge=1, le=500)
     pdf_max_extracted_chars: int = Field(
         default=DEFAULT_PDF_MAX_EXTRACTED_CHARS, ge=100, le=5_000_000
@@ -598,6 +611,24 @@ def load_settings(
             worker_extract_pdf_text_extractor_version=(
                 source.get("JYXIA_PDF_EXTRACTOR_VERSION") or DEFAULT_PDF_TEXT_EXTRACTOR_VERSION
             ).strip(),
+            consistency_engine_version=(
+                source.get("JYXIA_CONSISTENCY_ENGINE_VERSION")
+                or DEFAULT_CONSISTENCY_ENGINE_VERSION
+            ).strip(),
+            consistency_policy_version=(
+                source.get("JYXIA_CONSISTENCY_POLICY_VERSION")
+                or DEFAULT_CONSISTENCY_POLICY_VERSION
+            ).strip(),
+            consistency_temporality_max_age_days=_parse_int(
+                source.get("JYXIA_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS"),
+                default=DEFAULT_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS,
+                field_name="JYXIA_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS",
+            ),
+            worker_auto_chain_consistency_comparison=_parse_bool(
+                source.get("JYXIA_WORKER_AUTO_CHAIN_CONSISTENCY_COMPARISON"),
+                default=True,
+                field_name="JYXIA_WORKER_AUTO_CHAIN_CONSISTENCY_COMPARISON",
+            ),
             pdf_max_pages=_parse_int(
                 source.get("JYXIA_PDF_MAX_PAGES"),
                 default=DEFAULT_PDF_MAX_PAGES,

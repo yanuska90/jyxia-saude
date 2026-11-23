@@ -29,6 +29,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import (
+    AxisName,
+    AxisStatus,
     CaseReadinessState,
     DEFAULT_PROCESSING_MAX_ATTEMPTS,
     DocumentKind,
@@ -454,6 +456,12 @@ class ProcessingRun(Base):
             name="fk_processing_runs_org_actor",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["organization_id", "case_id"],
+            ["document_cases.organization_id", "document_cases.id"],
+            name="fk_processing_runs_org_case",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             f"status IN ({_enum_values_sql(ProcessingStatus)})",
             name="status_valid",
@@ -481,6 +489,7 @@ class ProcessingRun(Base):
         ),
         CheckConstraint("updated_at >= created_at", name="updated_after_created"),
         Index("ix_processing_runs_org_docver", "organization_id", "document_version_id"),
+        Index("ix_processing_runs_org_case", "organization_id", "case_id", "step_type", "created_at"),
         Index("ix_processing_runs_queue_claim", "status", "available_at", "created_at"),
         Index("ix_processing_runs_org_status", "organization_id", "status", "available_at"),
         Index(
@@ -492,6 +501,18 @@ class ProcessingRun(Base):
             sqlite_where=text("status IN ('queued', 'running', 'retry_wait')"),
             postgresql_where=text("status IN ('queued', 'running', 'retry_wait')"),
         ),
+        Index(
+            "uq_processing_runs_active_case_compare",
+            "organization_id",
+            "case_id",
+            unique=True,
+            sqlite_where=text(
+                "step_type = 'compare_consistency' AND status IN ('queued', 'running', 'retry_wait') AND case_id IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "step_type = 'compare_consistency' AND status IN ('queued', 'running', 'retry_wait') AND case_id IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -499,6 +520,7 @@ class ProcessingRun(Base):
         String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
     )
     document_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    case_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     step_type: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
@@ -1005,3 +1027,229 @@ def _forbid_security_audit_delete(
     _mapper: Any, _connection: Any, _target: SecurityAuditEvent
 ) -> None:
     raise ValueError("SecurityAuditEvent is strictly append-only and cannot be deleted.")
+
+
+class ConsistencyAssessment(Base):
+    """Append-only deterministic 4-axis case consistency evaluation linked to its ProcessingRun."""
+
+    __tablename__ = "consistency_assessments"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id", name="uq_consistency_assessments_org_id"),
+        UniqueConstraint(
+            "organization_id", "case_id", "id", name="uq_consistency_assessments_org_case_id"
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "processing_run_id",
+            name="uq_consistency_assessments_org_run",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "case_id",
+            "assessment_sequence",
+            name="uq_consistency_assessments_org_case_seq",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "case_id"],
+            ["document_cases.organization_id", "document_cases.id"],
+            name="fk_consistency_assessments_org_case",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "processing_run_id"],
+            ["processing_runs.organization_id", "processing_runs.id"],
+            name="fk_consistency_assessments_org_run",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("assessment_sequence >= 1", name="assessment_sequence_positive"),
+        CheckConstraint(
+            "length(trim(input_fingerprint_sha256)) = 64 "
+            "AND input_fingerprint_sha256 = lower(input_fingerprint_sha256)",
+            name="input_fingerprint_hex64",
+        ),
+        CheckConstraint(
+            "automated_axes_outcome IN ('all_ok', 'conflict_detected', 'abstained', 'pending', 'limited_scope')",
+            name="automated_outcome_valid",
+        ),
+        CheckConstraint(
+            f"readiness_state IN ({_enum_values_sql(CaseReadinessState)})",
+            name="readiness_state_valid",
+        ),
+        CheckConstraint("compared_documents_count >= 0", name="compared_docs_nonneg"),
+        CheckConstraint("administrative_only = TRUE", name="administrative_only_true"),
+        CheckConstraint("clinical_approval = FALSE", name="clinical_approval_false"),
+        Index(
+            "ix_consistency_assessments_org_case_seq",
+            "organization_id",
+            "case_id",
+            "assessment_sequence",
+        ),
+        Index(
+            "ix_consistency_assessments_org_fingerprint",
+            "organization_id",
+            "case_id",
+            "input_fingerprint_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    case_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    processing_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    assessment_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    engine_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    engine_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_fingerprint_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    automated_axes_outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    readiness_state: Mapped[str] = mapped_column(String(64), nullable=False)
+    human_review_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    human_review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    administrative_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    clinical_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    compared_documents_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    compared_snapshot_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON_VARIANT, nullable=False)
+    extraction_run_ids_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON_VARIANT, nullable=False)
+    assessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class ConsistencyAxisResult(Base):
+    """Per-axis deterministic result, justification, rule code, and comparison payload."""
+
+    __tablename__ = "consistency_axis_results"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id", name="uq_consistency_axis_org_id"),
+        UniqueConstraint(
+            "organization_id",
+            "assessment_id",
+            "id",
+            name="uq_consistency_axis_org_assess_id",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "assessment_id",
+            "axis_name",
+            name="uq_consistency_axis_org_assess_axis",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "case_id", "assessment_id"],
+            [
+                "consistency_assessments.organization_id",
+                "consistency_assessments.case_id",
+                "consistency_assessments.id",
+            ],
+            name="fk_consistency_axis_org_case_assess",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(f"axis_name IN ({_enum_values_sql(AxisName)})", name="axis_name_valid"),
+        CheckConstraint(f"status IN ({_enum_values_sql(AxisStatus)})", name="status_valid"),
+        CheckConstraint("length(trim(rule_code)) >= 3", name="rule_code_min_len"),
+        CheckConstraint("length(trim(justification)) >= 5", name="justification_min_len"),
+        CheckConstraint("administrative_only = TRUE", name="administrative_only_true"),
+        CheckConstraint("clinical_approval = FALSE", name="clinical_approval_false"),
+        Index("ix_consistency_axis_org_assess", "organization_id", "assessment_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    case_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    assessment_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    axis_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule_code: Mapped[str] = mapped_column(String(96), nullable=False)
+    justification: Mapped[str] = mapped_column(Text, nullable=False)
+    fields_used_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    compared_document_ids_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    compared_version_ids_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    evidence_reference_ids_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    comparison_items_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON_VARIANT, nullable=False)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON_VARIANT, nullable=False)
+    engine_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    administrative_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    clinical_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class ConsistencyAxisEvidence(Base):
+    """Multi-tenant FK-enforced join linking axis findings strictly to persisted EvidenceReferences."""
+
+    __tablename__ = "consistency_axis_evidences"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "axis_result_id",
+            "evidence_reference_id",
+            name="uq_consistency_axis_ev_link",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "assessment_id", "axis_result_id"],
+            [
+                "consistency_axis_results.organization_id",
+                "consistency_axis_results.assessment_id",
+                "consistency_axis_results.id",
+            ],
+            name="fk_consistency_axis_ev_axis_result",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_version_id", "extracted_field_id"],
+            [
+                "extracted_fields.organization_id",
+                "extracted_fields.document_version_id",
+                "extracted_fields.id",
+            ],
+            name="fk_consistency_axis_ev_field",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "document_version_id", "evidence_reference_id"],
+            [
+                "evidence_references.organization_id",
+                "evidence_references.document_version_id",
+                "evidence_references.id",
+            ],
+            name="fk_consistency_axis_ev_ref",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_consistency_axis_ev_org_axis", "organization_id", "axis_result_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    assessment_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    axis_result_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    document_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    extracted_field_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    evidence_reference_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+@event.listens_for(ConsistencyAssessment, "before_update")
+@event.listens_for(ConsistencyAxisResult, "before_update")
+@event.listens_for(ConsistencyAxisEvidence, "before_update")
+def _forbid_consistency_mutation_update(_mapper: Any, _connection: Any, _target: Any) -> None:
+    raise ValueError("Consistency assessments and axis evidence history are append-only.")
+
+
+@event.listens_for(ConsistencyAssessment, "before_delete")
+@event.listens_for(ConsistencyAxisResult, "before_delete")
+@event.listens_for(ConsistencyAxisEvidence, "before_delete")
+def _forbid_consistency_mutation_delete(_mapper: Any, _connection: Any, _target: Any) -> None:
+    raise ValueError("Consistency assessments and axis evidence history cannot be deleted.")

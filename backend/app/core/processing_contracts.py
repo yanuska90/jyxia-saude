@@ -126,6 +126,7 @@ class AxisEvaluationPort(Protocol):
         fields: list[FieldCandidateContract],
         policy_version: str,
     ) -> ConsistencyEvaluationContract:
+        """Note: production case comparison uses app.services.consistency_engine.evaluate_case_consistency."""
         ...
 
 
