@@ -1285,6 +1285,6 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             owner_verify, TenantContext(organization_id=org_a_id), case_id=case_a_id
         )
         assert assess_total_a == 2
-        assert [a.assessment_sequence for a in assessments_a] == [2, 1]
+        assert [a.assessment_sequence for a, _ in assessments_a] == [2, 1]
     finally:
         owner_verify.close()
