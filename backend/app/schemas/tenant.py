@@ -9,11 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.core.constants import (
     CaseReadinessState,
+    DEFAULT_PROCESSING_MAX_ATTEMPTS,
     DocumentKind,
     ExtractedFieldStatus,
     HumanReviewAction,
     OrganizationRole,
     ProcessingStatus,
+    ProcessingStepType,
     StorageDriver,
 )
 
@@ -64,7 +66,7 @@ class TenantContext(BaseModel):
     session_token_hash: str | None = Field(
         default=None, min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"
     )
-    source: Literal["internal_service", "authenticated_request", "test", "cli"] = (
+    source: Literal["internal_service", "authenticated_request", "worker", "test", "cli"] = (
         "internal_service"
     )
 
@@ -190,8 +192,13 @@ class ProcessingRunCreateInput(BaseModel):
     document_version_id: str = Field(min_length=1, max_length=36)
     policy_version: str = Field(min_length=1, max_length=64)
     extractor_version: str = Field(min_length=1, max_length=64)
+    step_type: ProcessingStepType = ProcessingStepType.VERIFY_OBJECT_INTEGRITY
+    triggered_by_user_id: str | None = Field(default=None, min_length=1, max_length=36)
     idempotency_key: str | None = Field(default=None, min_length=4, max_length=128)
     status: ProcessingStatus = ProcessingStatus.COMPLETED
+    max_attempts: int = Field(default=DEFAULT_PROCESSING_MAX_ATTEMPTS, ge=1, le=20)
+    available_at: datetime | None = None
+    result_json: dict[str, Any] | None = None
     readable: bool = True
     readiness_state: CaseReadinessState | None = None
     axes_summary: dict[str, Any] | None = None

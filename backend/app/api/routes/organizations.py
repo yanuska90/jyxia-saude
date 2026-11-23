@@ -15,6 +15,7 @@ from app.api.dependencies import (
     require_csrf_protection,
     require_org_permission,
 )
+from app.api.routes.processing import to_processing_run_summary
 from app.core.constants import (
      DocumentKind,
     IDEMPOTENCY_KEY_HEADER_NAME,
@@ -425,6 +426,15 @@ async def upload_case_document(
     doc = ingestion.document
     ver = ingestion.version
     assert doc.case_id is not None
+    initial_run = (
+        to_processing_run_summary(
+            ingestion.initial_processing_run,
+            document_id=doc.id,
+            case_id=doc.case_id,
+        )
+        if ingestion.initial_processing_run is not None
+        else None
+    )
     return DocumentIngestionResponse(
         document_id=doc.id,
         organization_id=doc.organization_id,
@@ -441,6 +451,7 @@ async def upload_case_document(
         clinical_approval=False,
         created_at=doc.created_at,
         current_version=_to_version_summary(ver),
+        initial_processing_run=initial_run,
     )
 
 

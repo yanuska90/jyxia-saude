@@ -11,9 +11,18 @@ import logging
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.constants import DocumentKind, OrganizationRole
+from app.core.constants import (
+    DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+    DEFAULT_PROCESSING_MAX_ATTEMPTS,
+    DEFAULT_PROCESSING_POLICY_VERSION,
+    DocumentKind,
+    OrganizationRole,
+    ProcessingStepType,
+)
 from app.core.logging import LOGGER_NAME, build_safe_log_extra
+from app.core.processing_contracts import compute_processing_idempotency_key
 from app.core.rbac import AuthorizationDeniedError, RbacPermission, permissions_for_role
+from app.db.base import new_uuid
 from app.models.entities import (
     AuditEvent,
     Document,
@@ -32,6 +41,7 @@ from app.repositories.institutional import (
     AuditEventRepository,
     CaseAndDocumentRepository,
     OrganizationRepository,
+    ProcessingQueueRepository,
     TenantScopeError,
 )
 from app.schemas.tenant import (
@@ -60,11 +70,33 @@ class DocumentNotFoundError(LookupError):
     """Raised when a target case, document, or version does not exist in the active organization."""
 
 
+class ProcessingRunActiveConflictError(ValueError):
+    """Raised when an active processing run already exists for the target document version."""
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentIngestionResult:
     document: Document
     version: DocumentVersion
     idempotent_replay: bool = False
+    initial_processing_run: ProcessingRun | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessingRunDetailResult:
+    processing_run: ProcessingRun
+    document_id: str
+    case_id: str | None
+    idempotent_replay: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CaseProcessingRunsPageResult:
+    case: DocumentCase
+    total: int
+    limit: int
+    offset: int
+    items: list[tuple[ProcessingRun, str, str | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,10 +389,14 @@ class InstitutionalService:
                     )
                     if not existing_versions:
                         raise DocumentNotFoundError("Idempotent document lacks registered version.")
+                    existing_run = ProcessingQueueRepository.get_latest_run_for_version(
+                        session, ctx, document_version_id=existing_versions[0].id
+                    )
                     return DocumentIngestionResult(
                         document=existing_doc,
                         version=existing_versions[0],
                         idempotent_replay=True,
+                        initial_processing_run=existing_run,
                     )
 
             doc = CaseAndDocumentRepository.create_document(
@@ -400,6 +436,23 @@ class InstitutionalService:
                 storage_driver=version_input.storage_driver.value,
                 storage_key=version_input.storage_key,
             )
+            queue_idempotency_key = compute_processing_idempotency_key(
+                organization_id=ctx.organization_id,
+                document_version_id=version.id,
+                sha256_hex=version.sha256_hex,
+                extractor_version=DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+                policy_version=DEFAULT_PROCESSING_POLICY_VERSION,
+            )
+            initial_run = ProcessingQueueRepository.enqueue_run(
+                session,
+                ctx,
+                document_version_id=version.id,
+                step_type=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                policy_version=DEFAULT_PROCESSING_POLICY_VERSION,
+                extractor_version=DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+                idempotency_key=queue_idempotency_key,
+                max_attempts=DEFAULT_PROCESSING_MAX_ATTEMPTS,
+            )
             AuditEventRepository.append_event(
                 session,
                 ctx,
@@ -419,11 +472,33 @@ class InstitutionalService:
                     "storage_driver": version.storage_driver,
                 },
             )
+            AuditEventRepository.append_event(
+                session,
+                ctx,
+                event_type="processing_run.queued",
+                target_entity_type="processing_run",
+                target_entity_id=initial_run.id,
+                payload_json={
+                    "operation": "processing_run_queued",
+                    "case_id": case.id,
+                    "document_id": doc.id,
+                    "document_version_id": version.id,
+                    "processing_run_id": initial_run.id,
+                    "step_type": initial_run.step_type,
+                    "status": initial_run.status,
+                    "policy_version": initial_run.policy_version,
+                    "extractor_version": initial_run.extractor_version,
+                    "max_attempts": initial_run.max_attempts,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
             session.commit()
             return DocumentIngestionResult(
                 document=doc,
                 version=version,
                 idempotent_replay=False,
+                initial_processing_run=initial_run,
             )
         except IntegrityError:
             session.rollback()
@@ -446,10 +521,14 @@ class InstitutionalService:
                             session, ctx, document_id=winner.id
                         )
                         if winner_versions:
+                            winner_run = ProcessingQueueRepository.get_latest_run_for_version(
+                                session, ctx, document_version_id=winner_versions[0].id
+                            )
                             return DocumentIngestionResult(
                                 document=winner,
                                 version=winner_versions[0],
                                 idempotent_replay=True,
+                                initial_processing_run=winner_run,
                             )
                     raise IdempotencyConflictError(
                         "Idempotency-Key was concurrently used with different document content or metadata."
@@ -569,7 +648,12 @@ class InstitutionalService:
 
     @staticmethod
     def register_document_version(
-        session: Session, ctx: TenantContext, payload: DocumentVersionCreateInput
+        session: Session,
+        ctx: TenantContext,
+        payload: DocumentVersionCreateInput,
+        *,
+        enqueue_processing: bool = False,
+        processing_max_attempts: int = DEFAULT_PROCESSING_MAX_ATTEMPTS,
     ) -> DocumentVersion:
         _verify_actor_membership(session, ctx)
         version = CaseAndDocumentRepository.create_document_version(
@@ -598,6 +682,44 @@ class InstitutionalService:
                 "mime_type": version.mime_type,
             },
         )
+        if enqueue_processing:
+            queue_idemp = compute_processing_idempotency_key(
+                organization_id=ctx.organization_id,
+                document_version_id=version.id,
+                sha256_hex=version.sha256_hex,
+                extractor_version=DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+                policy_version=DEFAULT_PROCESSING_POLICY_VERSION,
+            )
+            run = ProcessingQueueRepository.enqueue_run(
+                session,
+                ctx,
+                document_version_id=version.id,
+                step_type=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                policy_version=DEFAULT_PROCESSING_POLICY_VERSION,
+                extractor_version=DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+                idempotency_key=queue_idemp,
+                max_attempts=processing_max_attempts,
+            )
+            AuditEventRepository.append_event(
+                session,
+                ctx,
+                event_type="processing_run.queued",
+                target_entity_type="processing_run",
+                target_entity_id=run.id,
+                payload_json={
+                    "operation": "processing_run_queued",
+                    "document_id": version.document_id,
+                    "document_version_id": version.id,
+                    "processing_run_id": run.id,
+                    "step_type": run.step_type,
+                    "status": run.status,
+                    "policy_version": run.policy_version,
+                    "extractor_version": run.extractor_version,
+                    "max_attempts": run.max_attempts,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
         return version
 
     @staticmethod
@@ -612,6 +734,8 @@ class InstitutionalService:
         content: bytes,
         page_count: int | None = None,
         original_filename: str | None = None,
+        enqueue_processing: bool = False,
+        processing_max_attempts: int = DEFAULT_PROCESSING_MAX_ATTEMPTS,
     ) -> DocumentVersion:
         stored = storage.store_synthetic_bytes(
             organization_id=ctx.organization_id,
@@ -632,6 +756,8 @@ class InstitutionalService:
                 original_filename=stored.original_filename,
                 storage_key=stored.storage_key,
             ),
+            enqueue_processing=enqueue_processing,
+            processing_max_attempts=processing_max_attempts,
         )
 
     @staticmethod
@@ -652,6 +778,11 @@ class InstitutionalService:
             axes_summary=payload.axes_summary,
             started_at=payload.started_at,
             finished_at=payload.finished_at,
+            step_type=payload.step_type.value,
+            triggered_by_user_id=payload.triggered_by_user_id,
+            max_attempts=payload.max_attempts,
+            available_at=payload.available_at,
+            result_json=payload.result_json,
         )
         AuditEventRepository.append_event(
             session,
@@ -666,6 +797,171 @@ class InstitutionalService:
             },
         )
         return run
+
+    @staticmethod
+    def list_case_processing_runs(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        document_version_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> CaseProcessingRunsPageResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+        if case is None:
+            raise DocumentNotFoundError(
+                f"DocumentCase '{case_id}' was not found in organization."
+            )
+        items, total = ProcessingQueueRepository.list_case_runs(
+            session,
+            ctx,
+            case_id=case.id,
+            document_version_id=document_version_id,
+            limit=limit,
+            offset=offset,
+        )
+        return CaseProcessingRunsPageResult(
+            case=case,
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=items,
+        )
+
+    @staticmethod
+    def get_processing_run(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        processing_run_id: str,
+    ) -> ProcessingRunDetailResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        row = ProcessingQueueRepository.get_run_with_document_context(
+            session, ctx, processing_run_id=processing_run_id
+        )
+        if row is None:
+            raise DocumentNotFoundError(
+                f"ProcessingRun '{processing_run_id}' was not found in organization."
+            )
+        run, document_id, case_id = row
+        return ProcessingRunDetailResult(
+            processing_run=run,
+            document_id=document_id,
+            case_id=case_id,
+        )
+
+    @staticmethod
+    def enqueue_document_version_reprocessing(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+        version_id: str,
+        idempotency_key: str | None = None,
+        max_attempts: int = DEFAULT_PROCESSING_MAX_ATTEMPTS,
+    ) -> ProcessingRunDetailResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_UPLOAD)
+        doc = CaseAndDocumentRepository.get_document(session, ctx, document_id)
+        if doc is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' was not found in organization."
+            )
+        version = CaseAndDocumentRepository.get_document_version_for_document(
+            session, ctx, document_id=doc.id, version_id=version_id
+        )
+        if version is None:
+            raise DocumentNotFoundError(
+                f"DocumentVersion '{version_id}' was not found for document '{document_id}'."
+            )
+
+        scoped_idemp_key: str | None = None
+        if idempotency_key is not None:
+            raw_key = idempotency_key.strip()
+            scoped_idemp_key = f"reprocess:{version.id}:{raw_key}"[:128]
+            existing_by_idemp = ProcessingQueueRepository.get_by_idempotency_key(
+                session, ctx, idempotency_key=scoped_idemp_key
+            )
+            if existing_by_idemp is not None:
+                if existing_by_idemp.document_version_id != version.id:
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was already used for another document version."
+                    )
+                return ProcessingRunDetailResult(
+                    processing_run=existing_by_idemp,
+                    document_id=doc.id,
+                    case_id=doc.case_id,
+                    idempotent_replay=True,
+                )
+
+        active = ProcessingQueueRepository.get_active_run_for_version(
+            session,
+            ctx,
+            document_version_id=version.id,
+            step_type=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+        )
+        if active is not None:
+            raise ProcessingRunActiveConflictError(
+                "An active processing run already exists for this document version."
+            )
+
+        final_idemp_key = scoped_idemp_key or f"reprocess:{version.id}:{new_uuid()}"[:128]
+        try:
+            run = ProcessingQueueRepository.enqueue_run(
+                session,
+                ctx,
+                document_version_id=version.id,
+                step_type=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                policy_version=DEFAULT_PROCESSING_POLICY_VERSION,
+                extractor_version=DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+                idempotency_key=final_idemp_key,
+                max_attempts=max_attempts,
+            )
+            AuditEventRepository.append_event(
+                session,
+                ctx,
+                event_type="processing_run.reprocess_queued",
+                target_entity_type="processing_run",
+                target_entity_id=run.id,
+                payload_json={
+                    "operation": "processing_run_reprocess_queued",
+                    "case_id": doc.case_id,
+                    "document_id": doc.id,
+                    "document_version_id": version.id,
+                    "processing_run_id": run.id,
+                    "step_type": run.step_type,
+                    "status": run.status,
+                    "policy_version": run.policy_version,
+                    "extractor_version": run.extractor_version,
+                    "max_attempts": run.max_attempts,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
+            session.commit()
+            return ProcessingRunDetailResult(
+                processing_run=run,
+                document_id=doc.id,
+                case_id=doc.case_id,
+                idempotent_replay=False,
+            )
+        except IntegrityError as exc:
+            session.rollback()
+            if scoped_idemp_key is not None:
+                winner = ProcessingQueueRepository.get_by_idempotency_key(
+                    session, ctx, idempotency_key=scoped_idemp_key
+                )
+                if winner is not None and winner.document_version_id == version.id:
+                    return ProcessingRunDetailResult(
+                        processing_run=winner,
+                        document_id=doc.id,
+                        case_id=doc.case_id,
+                        idempotent_replay=True,
+                    )
+            raise ProcessingRunActiveConflictError(
+                "Concurrent processing run registration conflicted with active queue state."
+            ) from exc
 
     @staticmethod
     def record_extracted_field(

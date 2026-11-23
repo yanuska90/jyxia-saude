@@ -212,6 +212,49 @@ class DocumentSummaryResponse(BaseModel):
     current_version: DocumentVersionSummaryResponse | None = None
 
 
+class ProcessingRunSummaryResponse(BaseModel):
+    """Sanitized processing execution state without exposing lease secrets or storage paths."""
+
+    model_config = ConfigDict(frozen=True)
+
+    processing_run_id: str
+    organization_id: str
+    document_version_id: str
+    document_id: str | None = None
+    case_id: str | None = None
+    step_type: str
+    status: str
+    policy_version: str
+    extractor_version: str
+    attempt_count: int
+    max_attempts: int
+    available_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_error_code: str | None = None
+    last_error_detail: str | None = None
+    result_json: dict[str, Any] | None = None
+    readable: bool = False
+    readiness_state: str | None = None
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class CaseProcessingRunsListResponse(BaseModel):
+    """Paginated list of processing runs belonging to an organization's document case."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    case_id: str
+    total: int
+    limit: int
+    offset: int
+    processing_runs: list[ProcessingRunSummaryResponse]
+
+
 class DocumentIngestionResponse(BaseModel):
     """Response returned upon authenticated document upload and initial version registration."""
 
@@ -232,6 +275,7 @@ class DocumentIngestionResponse(BaseModel):
     clinical_approval: bool = False
     created_at: datetime
     current_version: DocumentVersionSummaryResponse
+    initial_processing_run: ProcessingRunSummaryResponse | None = None
 
 
 class CaseDocumentsListResponse(BaseModel):

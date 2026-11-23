@@ -67,6 +67,19 @@ class StoredObjectMetadata:
     original_filename: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StoredObjectIntegrityReport:
+    organization_id: str
+    mime_type: str
+    expected_sha256_hex: str
+    observed_sha256_hex: str
+    expected_byte_size: int
+    observed_byte_size: int
+    sha256_verified: bool
+    byte_size_verified: bool
+    structural_validation_passed: bool
+
+
 class StorageWriteStream(Protocol):
     """Streaming writer protocol for chunked validation and atomic storage ingestion."""
 
@@ -108,6 +121,16 @@ class DocumentStoragePort(Protocol):
         storage_key: str,
         expected_sha256_hex: str | None = None,
     ) -> bytes: ...
+
+    def verify_object_integrity(
+        self,
+        *,
+        organization_id: str,
+        storage_key: str,
+        expected_sha256_hex: str,
+        expected_byte_size: int,
+        mime_type: str,
+    ) -> StoredObjectIntegrityReport: ...
 
     def delete_uncommitted_object(
         self,
@@ -811,6 +834,123 @@ class LocalControlledSyntheticStorage:
         ):
             raise StorageIntegrityError("Stored binary checksum mismatch.")
         return data
+
+    def verify_object_integrity(
+        self,
+        *,
+        organization_id: str,
+        storage_key: str,
+        expected_sha256_hex: str,
+        expected_byte_size: int,
+        mime_type: str,
+    ) -> StoredObjectIntegrityReport:
+        """Stream-verify object existence, SHA-256 checksum, byte size, and structural format."""
+        if not self.enabled:
+            raise StorageUnavailableError("Controlled storage is currently unavailable.")
+
+        safe_org = _validate_organization_segment(organization_id)
+        if (
+            not storage_key
+            or "\x00" in storage_key
+            or ".." in storage_key
+            or "\\" in storage_key
+            or not _SAFE_KEY_PATTERN.fullmatch(storage_key)
+            or not storage_key.startswith(f"{safe_org}/")
+        ):
+            raise StorageValidationError("Storage key rejected by tenant boundary or format check.")
+
+        if mime_type not in {"application/pdf", "image/png"}:
+            raise StorageUnsupportedFormatError(
+                f"Unsupported mime_type '{mime_type}' for structural verification."
+            )
+
+        if not self.root_dir.exists():
+            raise StorageUnavailableError("Controlled storage directory is currently unavailable.")
+
+        _reject_symlink_chain(self.root_dir)
+        target_raw = self.root_dir / storage_key
+        org_raw = self.root_dir / safe_org
+        _reject_symlink_chain(target_raw, boundary=self.root_dir)
+        org_dir = org_raw.resolve()
+        target_path = target_raw.resolve()
+        if not org_dir.is_relative_to(self.root_dir) or not target_path.is_relative_to(org_dir):
+            raise StorageValidationError("Requested synthetic object escaped tenant boundary.")
+        if not target_path.is_file():
+            raise StorageObjectNotFoundError(
+                "Requested synthetic object is missing within tenant storage scope."
+            )
+
+        validator: _PdfStreamValidator | _PngStreamValidator = (
+            _PdfStreamValidator() if mime_type == "application/pdf" else _PngStreamValidator()
+        )
+        hasher = hashlib.sha256()
+        observed_byte_size = 0
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(target_path, flags)
+            with os.fdopen(fd, "rb") as handle:
+                while True:
+                    chunk = handle.read(65536)
+                    if not chunk:
+                        break
+                    observed_byte_size += len(chunk)
+                    if observed_byte_size > self.max_bytes:
+                        raise StoragePayloadTooLargeError(
+                            "Stored object exceeds max_bytes safety ceiling."
+                        )
+                    hasher.update(chunk)
+                    try:
+                        validator.feed(chunk)
+                    except StorageUnsupportedFormatError:
+                        raise
+                    except StorageValidationError as exc:
+                        raise StorageUnsupportedFormatError(str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(
+                "Requested synthetic object vanished during verification."
+            ) from exc
+        except (
+            StorageObjectNotFoundError,
+            StoragePayloadTooLargeError,
+            StorageUnsupportedFormatError,
+            StorageValidationError,
+        ):
+            raise
+        except OSError as exc:
+            raise StorageUnavailableError(
+                "Controlled storage I/O unavailable during integrity verification."
+            ) from exc
+
+        if observed_byte_size <= 0:
+            raise StorageIntegrityError("Stored binary object is empty.")
+
+        try:
+            validator.finalize()
+        except StorageUnsupportedFormatError:
+            raise
+        except StorageValidationError as exc:
+            raise StorageUnsupportedFormatError(str(exc)) from exc
+        observed_sha256_hex = hasher.hexdigest()
+        if observed_byte_size != expected_byte_size:
+            raise StorageIntegrityError(
+                "Stored binary byte size differs from registered document version."
+            )
+        if observed_sha256_hex != expected_sha256_hex:
+            raise StorageIntegrityError(
+                "Stored binary SHA-256 differs from registered document version."
+            )
+
+        return StoredObjectIntegrityReport(
+            organization_id=safe_org,
+            mime_type=mime_type,
+            expected_sha256_hex=expected_sha256_hex,
+            observed_sha256_hex=observed_sha256_hex,
+            expected_byte_size=expected_byte_size,
+            observed_byte_size=observed_byte_size,
+            sha256_verified=True,
+            byte_size_verified=True,
+            structural_validation_passed=True,
+        )
 
     def delete_uncommitted_object(
         self,
