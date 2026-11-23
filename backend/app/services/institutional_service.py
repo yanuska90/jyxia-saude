@@ -12,6 +12,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.constants import (
+    DEFAULT_CONSISTENCY_ENGINE_VERSION,
+    DEFAULT_CONSISTENCY_POLICY_VERSION,
     DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
     DEFAULT_PROCESSING_MAX_ATTEMPTS,
     DEFAULT_PROCESSING_POLICY_VERSION,
@@ -25,6 +27,8 @@ from app.core.rbac import AuthorizationDeniedError, RbacPermission, permissions_
 from app.db.base import new_uuid
 from app.models.entities import (
     AuditEvent,
+    ConsistencyAssessment,
+    ConsistencyAxisResult,
     Document,
     DocumentCase,
     DocumentVersion,
@@ -137,6 +141,22 @@ class DocumentVersionEvidenceResult:
     version: DocumentVersion
     latest_extract_run: ProcessingRun | None
     items: list[tuple[EvidenceReference, ExtractedField, ProcessingRun]]
+
+
+@dataclass(frozen=True, slots=True)
+class CaseConsistencyAssessmentsPageResult:
+    case: DocumentCase
+    total: int
+    limit: int
+    offset: int
+    items: list[tuple[ConsistencyAssessment, dict[str, str]]]
+
+
+@dataclass(frozen=True, slots=True)
+class CaseConsistencyAssessmentDetailResult:
+    case: DocumentCase
+    assessment: ConsistencyAssessment
+    axes: list[ConsistencyAxisResult]
 
 
 def _verify_actor_membership(session: Session, ctx: TenantContext) -> None:
@@ -1168,3 +1188,175 @@ class InstitutionalService:
         session: Session, ctx: TenantContext
     ) -> AuditChainVerificationResult:
         return AuditEventRepository.verify_chain_detailed(session, ctx)
+
+    @staticmethod
+    def enqueue_case_consistency_comparison(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        engine_version: str = DEFAULT_CONSISTENCY_ENGINE_VERSION,
+        policy_version: str = DEFAULT_CONSISTENCY_POLICY_VERSION,
+        idempotency_key: str | None = None,
+        max_attempts: int = DEFAULT_PROCESSING_MAX_ATTEMPTS,
+    ) -> ProcessingRunDetailResult:
+        _require_actor_permission(session, ctx, RbacPermission.CASE_WRITE)
+        case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+        if case is None:
+            raise DocumentNotFoundError(
+                f"DocumentCase '{case_id}' was not found in organization."
+            )
+
+        anchor = ProcessingQueueRepository.get_latest_active_case_document_version(
+            session, ctx, case_id=case.id
+        )
+        if anchor is None:
+            raise ProcessingRunActiveConflictError(
+                "DocumentCase has no uploaded document versions to evaluate."
+            )
+        anchor_doc, anchor_ver = anchor
+
+        scoped_idemp_key: str | None = None
+        if idempotency_key is not None:
+            raw_key = idempotency_key.strip()
+            scoped_idemp_key = f"compare:{case.id}:{raw_key}"[:128]
+            existing = ProcessingQueueRepository.get_by_idempotency_key(
+                session, ctx, idempotency_key=scoped_idemp_key
+            )
+            if existing is not None:
+                if existing.case_id != case.id or existing.step_type != ProcessingStepType.COMPARE_CONSISTENCY.value:
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was already used for another case or processing step."
+                    )
+                return ProcessingRunDetailResult(
+                    processing_run=existing,
+                    document_id=anchor_doc.id,
+                    case_id=case.id,
+                    idempotent_replay=True,
+                )
+
+        active = ProcessingQueueRepository.get_active_case_compare_run(
+            session, ctx, case_id=case.id
+        )
+        if active is not None:
+            raise ProcessingRunActiveConflictError(
+                "An active consistency comparison run is already queued or running for this case."
+            )
+
+        final_idemp_key = scoped_idemp_key or f"compare:{case.id}:{new_uuid()}"[:128]
+        try:
+            run = CaseAndDocumentRepository.create_processing_run(
+                session,
+                ctx,
+                document_version_id=anchor_ver.id,
+                case_id=case.id,
+                step_type=ProcessingStepType.COMPARE_CONSISTENCY.value,
+                triggered_by_user_id=ctx.actor_user_id,
+                policy_version=policy_version,
+                extractor_version=engine_version,
+                idempotency_key=final_idemp_key,
+                status="queued",
+                readable=False,
+                readiness_state=None,
+                axes_summary=None,
+                started_at=None,
+                finished_at=None,
+                max_attempts=max_attempts,
+            )
+            AuditEventRepository.append_event(
+                session,
+                ctx,
+                event_type="processing_run.compare_queued",
+                target_entity_type="processing_run",
+                target_entity_id=run.id,
+                payload_json={
+                    "operation": "processing_run_compare_queued",
+                    "case_id": case.id,
+                    "anchor_document_version_id": anchor_ver.id,
+                    "processing_run_id": run.id,
+                    "step_type": run.step_type,
+                    "status": run.status,
+                    "policy_version": run.policy_version,
+                    "extractor_version": run.extractor_version,
+                    "max_attempts": run.max_attempts,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
+            session.commit()
+            return ProcessingRunDetailResult(
+                processing_run=run,
+                document_id=anchor_doc.id,
+                case_id=case.id,
+                idempotent_replay=False,
+            )
+        except IntegrityError as exc:
+            session.rollback()
+            if scoped_idemp_key is not None:
+                winner = ProcessingQueueRepository.get_by_idempotency_key(
+                    session, ctx, idempotency_key=scoped_idemp_key
+                )
+                if winner is not None and winner.case_id == case.id:
+                    return ProcessingRunDetailResult(
+                        processing_run=winner,
+                        document_id=anchor_doc.id,
+                        case_id=case.id,
+                        idempotent_replay=True,
+                    )
+            raise ProcessingRunActiveConflictError(
+                "Concurrent consistency comparison enqueue conflicted with queue state."
+            ) from exc
+
+    @staticmethod
+    def list_case_consistency_assessments(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> CaseConsistencyAssessmentsPageResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+        if case is None:
+            raise DocumentNotFoundError(
+                f"DocumentCase '{case_id}' was not found in organization."
+            )
+        items, total = ProcessingQueueRepository.list_case_consistency_assessments(
+            session, ctx, case_id=case.id, limit=limit, offset=offset
+        )
+        return CaseConsistencyAssessmentsPageResult(
+            case=case,
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=items,
+        )
+
+    @staticmethod
+    def get_case_consistency_assessment(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        assessment_id: str,
+    ) -> CaseConsistencyAssessmentDetailResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+        if case is None:
+            raise DocumentNotFoundError(
+                f"DocumentCase '{case_id}' was not found in organization."
+            )
+        detail = ProcessingQueueRepository.get_case_consistency_assessment_detail(
+            session, ctx, case_id=case.id, assessment_id=assessment_id
+        )
+        if detail is None:
+            raise DocumentNotFoundError(
+                f"ConsistencyAssessment '{assessment_id}' was not found for case '{case_id}'."
+            )
+        assessment, axes = detail
+        return CaseConsistencyAssessmentDetailResult(
+            case=case,
+            assessment=assessment,
+            axes=axes,
+        )

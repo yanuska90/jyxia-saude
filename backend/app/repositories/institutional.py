@@ -20,6 +20,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.constants import (
     ACTIVE_PROCESSING_STATUSES,
+    AxisName,
+    DEFAULT_CONSISTENCY_ENGINE_NAME,
+    DEFAULT_CONSISTENCY_ENGINE_VERSION,
+    DEFAULT_CONSISTENCY_POLICY_VERSION,
+    DEFAULT_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS,
     DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
     DEFAULT_PDF_TEXT_EXTRACTOR_VERSION,
     DEFAULT_PROCESSING_MAX_ATTEMPTS,
@@ -35,6 +40,9 @@ from app.db.session import apply_pg_identity_context, apply_pg_rls_context
 from app.models.entities import (
     AUDIT_SCHEMA_VERSION,
     AuditEvent,
+    ConsistencyAssessment,
+    ConsistencyAxisEvidence,
+    ConsistencyAxisResult,
     Document,
     DocumentCase,
     DocumentVersion,
@@ -45,6 +53,15 @@ from app.models.entities import (
     OrganizationMembership,
     ProcessingRun,
     User,
+)
+from app.services.consistency_engine import (
+    CaseConsistencyInput,
+    CaseConsistencyResult,
+    CaseDocumentInput,
+    DocumentVersionInput,
+    EvidenceInput,
+    ExtractedFieldInput,
+    HumanReviewInput,
 )
 from app.schemas.tenant import TenantContext
 
@@ -660,12 +677,23 @@ class CaseAndDocumentRepository:
         started_at: datetime | None,
         finished_at: datetime | None,
         step_type: str = ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+        case_id: str | None = None,
         triggered_by_user_id: str | None = None,
         max_attempts: int = DEFAULT_PROCESSING_MAX_ATTEMPTS,
         available_at: datetime | None = None,
         result_json: dict[str, Any] | None = None,
     ) -> ProcessingRun:
-        _require_tenant_row(session, DocumentVersion, ctx, document_version_id, "DocumentVersion")
+        ver_row = _require_tenant_row(
+            session, DocumentVersion, ctx, document_version_id, "DocumentVersion"
+        )
+        resolved_case_id = case_id
+        if resolved_case_id is None:
+            resolved_case_id = session.scalar(
+                select(Document.case_id).where(
+                    Document.organization_id == ctx.organization_id,
+                    Document.id == ver_row.document_id,
+                )
+            )
         now = utc_now()
         effective_started_at = (
             started_at if status in ACTIVE_PROCESSING_STATUSES else (started_at or now)
@@ -673,6 +701,7 @@ class CaseAndDocumentRepository:
         run = ProcessingRun(
             organization_id=ctx.organization_id,
             document_version_id=document_version_id,
+            case_id=resolved_case_id,
             step_type=step_type,
             triggered_by_user_id=triggered_by_user_id
             if triggered_by_user_id is not None
@@ -1409,6 +1438,7 @@ class ProcessingQueueRepository:
         allowed_steps = (
             ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
             ProcessingStepType.EXTRACT_PDF_TEXT.value,
+            ProcessingStepType.COMPARE_CONSISTENCY.value,
         )
         if requested_step != "any" and requested_step not in allowed_steps:
             raise ValueError(f"Unsupported worker claim step_type: {requested_step}")
@@ -1915,8 +1945,10 @@ class ProcessingQueueRepository:
         result_json: dict[str, Any],
         extracted_fields: list[dict[str, Any]],
         audit_event_type: str,
-    ) -> None:
-        """Atomically persist ExtractedField, EvidenceReference, ProcessingRun completion and AuditEvent."""
+        chain_compare_engine_version: str | None = DEFAULT_CONSISTENCY_ENGINE_VERSION,
+        chain_compare_policy_version: str | None = DEFAULT_CONSISTENCY_POLICY_VERSION,
+    ) -> str | None:
+        """Atomically persist ExtractedField, EvidenceReference, ProcessingRun completion and optional compare barrier chain."""
         if audit_event_type not in ("processing_run.succeeded", "processing_run.abstained"):
             raise ValueError(f"Unsupported extraction audit_event_type: {audit_event_type}")
 
@@ -1956,7 +1988,7 @@ class ProcessingQueueRepository:
                 head = (
                     session.execute(
                         text(
-                            "SELECT * FROM public.jyxia_worker_prepare_run_audit_head("
+                            "SELECT * FROM public.jyxia_worker_prepare_extraction_completion_context("
                             ":p_run_id, :p_worker_id, :p_lease_token_hash)"
                         ),
                         {
@@ -1991,6 +2023,90 @@ class ProcessingQueueRepository:
                     },
                 )
             )
+
+            should_chain_compare = (
+                chain_compare_engine_version is not None
+                and bool(head["should_chain_compare"])
+                and head["case_id"] is not None
+            )
+            if should_chain_compare:
+                chained_run_id = new_uuid()
+                chain_policy = chain_compare_policy_version or DEFAULT_CONSISTENCY_POLICY_VERSION
+                chain_idemp = f"chain:{run_id}:compare_consistency"[:128]
+                chain_audit_id, chain_seq, chain_prev, chain_hash, chain_ts, chain_payload = (
+                    ProcessingQueueRepository._build_worker_audit_metadata(
+                        organization_id=str(head["organization_id"]),
+                        run_id=chained_run_id,
+                        last_sequence=next_seq,
+                        last_event_hash=event_hash,
+                        event_type="processing_run.queued",
+                        payload_json={
+                            "operation": "processing_run_queued",
+                            "case_id": str(head["case_id"]),
+                            "document_id": str(head["document_id"]),
+                            "document_version_id": str(head["document_version_id"]),
+                            "processing_run_id": chained_run_id,
+                            "parent_processing_run_id": run_id,
+                            "step_type": ProcessingStepType.COMPARE_CONSISTENCY.value,
+                            "status": ProcessingStatus.QUEUED.value,
+                            "policy_version": chain_policy,
+                            "extractor_version": chain_compare_engine_version,
+                            "max_attempts": int(head["max_attempts"]),
+                            "administrative_only": True,
+                            "clinical_approval": False,
+                        },
+                    )
+                )
+                try:
+                    session.execute(
+                        text(
+                            "SELECT public.jyxia_worker_complete_extraction_and_chain_compare("
+                            ":p_run_id, :p_worker_id, :p_lease_token_hash, :p_readable, "
+                            ":p_result_json, :p_fields_json, :p_audit_id, "
+                            ":p_audit_sequence_number, :p_audit_event_type, "
+                            ":p_audit_payload_json, :p_audit_prev_event_hash, "
+                            ":p_audit_event_hash, :p_audit_created_at, "
+                            ":p_chain_run_id, :p_chain_case_id, :p_chain_engine_version, "
+                            ":p_chain_policy_version, :p_chain_idempotency_key, "
+                            ":p_chain_audit_id, :p_chain_audit_sequence_number, "
+                            ":p_chain_audit_payload_json, :p_chain_audit_prev_event_hash, "
+                            ":p_chain_audit_event_hash, :p_chain_audit_created_at)"
+                        ),
+                        {
+                            "p_run_id": run_id,
+                            "p_worker_id": worker_id,
+                            "p_lease_token_hash": lease_token_hash,
+                            "p_readable": bool(readable),
+                            "p_result_json": json.dumps(safe_result, ensure_ascii=True),
+                            "p_fields_json": json.dumps(prepared_fields, ensure_ascii=True),
+                            "p_audit_id": audit_id,
+                            "p_audit_sequence_number": next_seq,
+                            "p_audit_event_type": audit_event_type,
+                            "p_audit_payload_json": json.dumps(safe_payload, ensure_ascii=True),
+                            "p_audit_prev_event_hash": prev_hash,
+                            "p_audit_event_hash": event_hash,
+                            "p_audit_created_at": created_at,
+                            "p_chain_run_id": chained_run_id,
+                            "p_chain_case_id": str(head["case_id"]),
+                            "p_chain_engine_version": chain_compare_engine_version,
+                            "p_chain_policy_version": chain_policy,
+                            "p_chain_idempotency_key": chain_idemp,
+                            "p_chain_audit_id": chain_audit_id,
+                            "p_chain_audit_sequence_number": chain_seq,
+                            "p_chain_audit_payload_json": json.dumps(chain_payload, ensure_ascii=True),
+                            "p_chain_audit_prev_event_hash": chain_prev,
+                            "p_chain_audit_event_hash": chain_hash,
+                            "p_chain_audit_created_at": chain_ts,
+                        },
+                    )
+                except Exception as exc:
+                    session.rollback()
+                    if "lease invalid or expired" in str(exc).lower():
+                        raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                    raise
+                session.commit()
+                return chained_run_id
+
             try:
                 session.execute(
                     text(
@@ -2023,7 +2139,7 @@ class ProcessingQueueRepository:
                     raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
                 raise
             session.commit()
-            return
+            return None
 
         lock_cm = _sqlite_lock_for(ProcessingQueueRepository._WORKER_QUEUE_LOCK_KEY)
         with lock_cm:
@@ -2124,7 +2240,118 @@ class ProcessingQueueRepository:
                     "clinical_approval": False,
                 },
             )
+
+            chained_compare_id: str | None = None
+            if chain_compare_engine_version is not None:
+                doc_row = session.execute(
+                    select(DocumentVersion.document_id, Document.case_id)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .where(
+                        DocumentVersion.id == run.document_version_id,
+                        DocumentVersion.organization_id == run.organization_id,
+                    )
+                ).first()
+                case_id = doc_row[1] if doc_row else run.case_id
+                if case_id is not None:
+                    active_docs_count = int(
+                        session.scalar(
+                            select(func.count(Document.id)).where(
+                                Document.organization_id == run.organization_id,
+                                Document.case_id == case_id,
+                                Document.discarded_at.is_(None),
+                            )
+                        )
+                        or 0
+                    )
+                    other_active_doc_step = session.scalar(
+                        select(ProcessingRun.id)
+                        .join(DocumentVersion, DocumentVersion.id == ProcessingRun.document_version_id)
+                        .join(Document, Document.id == DocumentVersion.document_id)
+                        .where(
+                            ProcessingRun.organization_id == run.organization_id,
+                            Document.organization_id == run.organization_id,
+                            Document.case_id == case_id,
+                            Document.discarded_at.is_(None),
+                            ProcessingRun.id != run.id,
+                            ProcessingRun.step_type.in_(
+                                (
+                                    ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                                    ProcessingStepType.EXTRACT_PDF_TEXT.value,
+                                )
+                            ),
+                            ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    active_compare = session.scalar(
+                        select(ProcessingRun.id)
+                        .where(
+                            ProcessingRun.organization_id == run.organization_id,
+                            ProcessingRun.case_id == case_id,
+                            ProcessingRun.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value,
+                            ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    if (
+                        active_docs_count >= 2
+                        and other_active_doc_step is None
+                        and active_compare is None
+                    ):
+                        chain_policy = chain_compare_policy_version or DEFAULT_CONSISTENCY_POLICY_VERSION
+                        chained_run = ProcessingRun(
+                            organization_id=run.organization_id,
+                            document_version_id=run.document_version_id,
+                            case_id=case_id,
+                            step_type=ProcessingStepType.COMPARE_CONSISTENCY.value,
+                            triggered_by_user_id=None,
+                            policy_version=chain_policy,
+                            extractor_version=chain_compare_engine_version,
+                            idempotency_key=f"chain:{run.id}:compare_consistency"[:128],
+                            status=ProcessingStatus.QUEUED.value,
+                            attempt_count=0,
+                            max_attempts=run.max_attempts,
+                            available_at=now,
+                            readable=False,
+                            readiness_state=None,
+                            started_at=None,
+                            finished_at=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        session.add(chained_run)
+                        session.flush()
+                        chained_compare_id = chained_run.id
+
+                        AuditEventRepository.append_event(
+                            session,
+                            TenantContext(
+                                organization_id=run.organization_id,
+                                actor_user_id=None,
+                                source="worker",
+                            ),
+                            event_type="processing_run.queued",
+                            target_entity_type="processing_run",
+                            target_entity_id=chained_run.id,
+                            payload_json={
+                                "operation": "processing_run_queued",
+                                "case_id": case_id,
+                                "document_id": str(doc_row[0]) if doc_row else None,
+                                "document_version_id": run.document_version_id,
+                                "processing_run_id": chained_run.id,
+                                "parent_processing_run_id": run.id,
+                                "step_type": chained_run.step_type,
+                                "status": chained_run.status,
+                                "policy_version": chained_run.policy_version,
+                                "extractor_version": chained_run.extractor_version,
+                                "max_attempts": chained_run.max_attempts,
+                                "administrative_only": True,
+                                "clinical_approval": False,
+                            },
+                        )
+
             session.commit()
+            return chained_compare_id
 
     @staticmethod
     def fail_or_retry_run(
@@ -2476,3 +2703,867 @@ class ProcessingQueueRepository:
             finally:
                 session.close()
         return reclaimed
+
+    @staticmethod
+    def get_active_case_compare_run(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+    ) -> ProcessingRun | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        return session.scalar(
+            select(ProcessingRun)
+            .where(
+                ProcessingRun.organization_id == ctx.organization_id,
+                ProcessingRun.case_id == case_id,
+                ProcessingRun.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value,
+                ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
+            )
+            .limit(1)
+        )
+
+    @staticmethod
+    def get_latest_active_case_document_version(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+    ) -> tuple[Document, DocumentVersion] | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        row = session.execute(
+            select(Document, DocumentVersion)
+            .join(
+                DocumentVersion,
+                (DocumentVersion.organization_id == Document.organization_id)
+                & (DocumentVersion.document_id == Document.id),
+            )
+            .where(
+                Document.organization_id == ctx.organization_id,
+                Document.case_id == case_id,
+                Document.discarded_at.is_(None),
+                DocumentVersion.is_current.is_(True),
+            )
+            .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+            .limit(1)
+        ).first()
+        if row is not None:
+            return row[0], row[1]
+
+        fallback = session.execute(
+            select(Document, DocumentVersion)
+            .join(
+                DocumentVersion,
+                (DocumentVersion.organization_id == Document.organization_id)
+                & (DocumentVersion.document_id == Document.id),
+            )
+            .where(
+                Document.organization_id == ctx.organization_id,
+                Document.case_id == case_id,
+            )
+            .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+            .limit(1)
+        ).first()
+        if fallback is None:
+            return None
+        return fallback[0], fallback[1]
+
+    @staticmethod
+    def list_case_consistency_assessments(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[tuple[ConsistencyAssessment, dict[str, str]]], int]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        total = int(
+            session.scalar(
+                select(func.count(ConsistencyAssessment.id)).where(
+                    ConsistencyAssessment.organization_id == ctx.organization_id,
+                    ConsistencyAssessment.case_id == case_id,
+                )
+            )
+            or 0
+        )
+        assessments = list(
+            session.scalars(
+                select(ConsistencyAssessment)
+                .where(
+                    ConsistencyAssessment.organization_id == ctx.organization_id,
+                    ConsistencyAssessment.case_id == case_id,
+                )
+                .order_by(
+                    ConsistencyAssessment.assessment_sequence.desc(),
+                    ConsistencyAssessment.created_at.desc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        if not assessments:
+            return [], total
+
+        assess_ids = [a.id for a in assessments]
+        axis_rows = list(
+            session.execute(
+                select(
+                    ConsistencyAxisResult.assessment_id,
+                    ConsistencyAxisResult.axis_name,
+                    ConsistencyAxisResult.status,
+                ).where(
+                    ConsistencyAxisResult.organization_id == ctx.organization_id,
+                    ConsistencyAxisResult.assessment_id.in_(assess_ids),
+                )
+            ).all()
+        )
+        status_map: dict[str, dict[str, str]] = defaultdict(dict)
+        for a_id, ax_name, ax_status in axis_rows:
+            status_map[str(a_id)][str(ax_name)] = str(ax_status)
+        return [(a, status_map.get(a.id, {})) for a in assessments], total
+
+    @staticmethod
+    def get_case_consistency_assessment_detail(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        assessment_id: str,
+    ) -> tuple[ConsistencyAssessment, list[ConsistencyAxisResult]] | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        assessment = session.scalar(
+            select(ConsistencyAssessment).where(
+                ConsistencyAssessment.organization_id == ctx.organization_id,
+                ConsistencyAssessment.case_id == case_id,
+                ConsistencyAssessment.id == assessment_id,
+            )
+        )
+        if assessment is None:
+            return None
+
+        axis_order = {
+            AxisName.IDENTIDADE.value: 0,
+            AxisName.PROCEDIMENTO_CODIGO.value: 1,
+            AxisName.LATERALIDADE.value: 2,
+            AxisName.TEMPORALIDADE.value: 3,
+        }
+        axes = list(
+            session.scalars(
+                select(ConsistencyAxisResult).where(
+                    ConsistencyAxisResult.organization_id == ctx.organization_id,
+                    ConsistencyAxisResult.case_id == case_id,
+                    ConsistencyAxisResult.assessment_id == assessment.id,
+                )
+            )
+        )
+        axes.sort(key=lambda r: axis_order.get(r.axis_name, 99))
+        return assessment, axes
+
+    @staticmethod
+    def prepare_case_comparison_input(
+        session: Session,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_token_hash: str,
+        max_issue_date_spread_days: int = DEFAULT_CONSISTENCY_TEMPORALITY_MAX_AGE_DAYS,
+        engine_version: str = DEFAULT_CONSISTENCY_ENGINE_VERSION,
+        policy_version: str = DEFAULT_CONSISTENCY_POLICY_VERSION,
+    ) -> tuple[CaseConsistencyInput, int]:
+        """Load complete tenant-scoped case snapshot cleanly via PG RPC or SQLite lease lock."""
+        def _parse_dt(val: Any) -> datetime:
+            if isinstance(val, datetime):
+                return _as_utc(val)
+            raw = str(val).replace("Z", "+00:00")
+            return _as_utc(datetime.fromisoformat(raw))
+
+        if _is_pg_session(session):
+            try:
+                raw_json = session.execute(
+                    text(
+                        "SELECT public.jyxia_worker_prepare_case_comparison_context("
+                        ":p_run_id, :p_worker_id, :p_lease_token_hash)"
+                    ),
+                    {
+                        "p_run_id": run_id,
+                        "p_worker_id": worker_id,
+                        "p_lease_token_hash": lease_token_hash,
+                    },
+                ).scalar_one()
+            except Exception as exc:
+                session.rollback()
+                if "lease invalid or expired" in str(exc).lower():
+                    raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                raise
+
+            snap = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+            session.rollback()
+            docs_in: list[CaseDocumentInput] = []
+            for d_raw in snap.get("documents", []):
+                vers_in: list[DocumentVersionInput] = []
+                for v_raw in d_raw.get("versions", []):
+                    ext_info = v_raw.get("latest_extract") or {}
+                    fields_in: list[ExtractedFieldInput] = []
+                    for f_raw in v_raw.get("extracted_fields", []):
+                        evs_in = tuple(
+                            EvidenceInput(
+                                evidence_id=str(e_raw["evidence_id"]),
+                                organization_id=str(e_raw["organization_id"]),
+                                document_version_id=str(e_raw["document_version_id"]),
+                                extracted_field_id=str(e_raw["extracted_field_id"]),
+                                page_number=int(e_raw["page_number"]),
+                                bbox=(
+                                    float(e_raw["bbox_x"]),
+                                    float(e_raw["bbox_y"]),
+                                    float(e_raw["bbox_w"]),
+                                    float(e_raw["bbox_h"]),
+                                ),
+                                quote_excerpt=e_raw.get("quote_excerpt"),
+                                extraction_method=str(e_raw["extraction_method"]),
+                            )
+                            for e_raw in f_raw.get("evidences", [])
+                        )
+                        fields_in.append(
+                            ExtractedFieldInput(
+                                extracted_field_id=str(f_raw["extracted_field_id"]),
+                                organization_id=str(f_raw["organization_id"]),
+                                document_version_id=str(f_raw["document_version_id"]),
+                                processing_run_id=str(f_raw["processing_run_id"]),
+                                field_key=str(f_raw["field_key"]),
+                                raw_value=f_raw.get("raw_value"),
+                                normalized_value=f_raw.get("normalized_value"),
+                                status=str(f_raw["status"]),
+                                abstained=bool(f_raw["abstained"]),
+                                metadata_json=dict(f_raw.get("metadata_json") or {}),
+                                evidences=evs_in,
+                            )
+                        )
+                    reviews_in = tuple(
+                        HumanReviewInput(
+                            review_id=str(r_raw["review_id"]),
+                            document_version_id=str(r_raw["document_version_id"]),
+                            action_type=str(r_raw["action_type"]),
+                            field_key=r_raw.get("field_key"),
+                            policy_version=str(r_raw["policy_version"]),
+                            created_at=_parse_dt(r_raw["created_at"]),
+                        )
+                        for r_raw in v_raw.get("human_reviews", [])
+                    )
+                    vers_in.append(
+                        DocumentVersionInput(
+                            version_id=str(v_raw["version_id"]),
+                            document_id=str(v_raw["document_id"]),
+                            version_number=int(v_raw["version_number"]),
+                            sha256_hex=str(v_raw["sha256_hex"]),
+                            mime_type=str(v_raw["mime_type"]),
+                            created_at=_parse_dt(v_raw["created_at"]),
+                            is_current=bool(v_raw["is_current"]),
+                            superseded_by_version_id=v_raw.get("superseded_by_version_id"),
+                            integrity_status=v_raw.get("integrity_status"),
+                            extraction_run_id=ext_info.get("run_id"),
+                            extraction_status=ext_info.get("status"),
+                            extractor_version=ext_info.get("extractor_version"),
+                            extraction_readable=ext_info.get("readable"),
+                            extraction_outcome=ext_info.get("outcome"),
+                            extracted_fields=tuple(fields_in),
+                            human_reviews=reviews_in,
+                        )
+                    )
+                docs_in.append(
+                    CaseDocumentInput(
+                        document_id=str(d_raw["document_id"]),
+                        document_kind=str(d_raw["document_kind"]),
+                        document_subfamily=d_raw.get("document_subfamily"),
+                        source_label=str(d_raw["source_label"]),
+                        quarantined=bool(d_raw["quarantined"]),
+                        discarded_at=_parse_dt(d_raw["discarded_at"]) if d_raw.get("discarded_at") else None,
+                        versions=tuple(vers_in),
+                    )
+                )
+            return (
+                CaseConsistencyInput(
+                    organization_id=str(snap["organization_id"]),
+                    case_id=str(snap["case_id"]),
+                    case_code=str(snap["case_code"]),
+                    procedure_reference=snap.get("procedure_reference"),
+                    declared_laterality=snap.get("declared_laterality"),
+                    engine_name=DEFAULT_CONSISTENCY_ENGINE_NAME,
+                    engine_version=engine_version,
+                    policy_version=policy_version,
+                    max_issue_date_spread_days=max_issue_date_spread_days,
+                    documents=tuple(docs_in),
+                ),
+                int(snap.get("last_assessment_sequence") or 0),
+            )
+
+        lock_cm = _sqlite_lock_for(ProcessingQueueRepository._WORKER_QUEUE_LOCK_KEY)
+        with lock_cm:
+            now = utc_now()
+            run = session.scalar(select(ProcessingRun).where(ProcessingRun.id == run_id))
+            if (
+                run is None
+                or run.status != ProcessingStatus.RUNNING.value
+                or run.worker_id != worker_id
+                or run.lease_token_hash != lease_token_hash
+                or run.lease_expires_at is None
+                or _as_utc(run.lease_expires_at) < now
+            ):
+                session.rollback()
+                raise LeaseOwnershipError("Worker lease is invalid or expired.")
+            if run.step_type != ProcessingStepType.COMPARE_CONSISTENCY.value:
+                session.rollback()
+                raise ValueError("prepare_case_comparison_input requires compare_consistency run.")
+
+            resolved_case_id = run.case_id
+            if resolved_case_id is None:
+                resolved_case_id = session.scalar(
+                    select(Document.case_id)
+                    .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+                    .where(
+                        DocumentVersion.organization_id == run.organization_id,
+                        DocumentVersion.id == run.document_version_id,
+                    )
+                )
+            if resolved_case_id is None:
+                session.rollback()
+                raise TenantScopeError("DocumentCase not found for compare_consistency run.")
+
+            case = session.scalar(
+                select(DocumentCase).where(
+                    DocumentCase.organization_id == run.organization_id,
+                    DocumentCase.id == resolved_case_id,
+                )
+            )
+            if case is None:
+                session.rollback()
+                raise TenantScopeError("DocumentCase not found inside tenant scope.")
+
+            docs = list(
+                session.scalars(
+                    select(Document)
+                    .where(
+                        Document.organization_id == run.organization_id,
+                        Document.case_id == case.id,
+                    )
+                    .order_by(Document.id.asc())
+                )
+            )
+            docs_in = []
+            for d in docs:
+                versions = list(
+                    session.scalars(
+                        select(DocumentVersion)
+                        .where(
+                            DocumentVersion.organization_id == run.organization_id,
+                            DocumentVersion.document_id == d.id,
+                        )
+                        .order_by(
+                            DocumentVersion.version_number.asc(),
+                            DocumentVersion.created_at.asc(),
+                            DocumentVersion.id.asc(),
+                        )
+                    )
+                )
+                vers_in = []
+                for v in versions:
+                    ver_int = session.scalar(
+                        select(ProcessingRun.status)
+                        .where(
+                            ProcessingRun.organization_id == run.organization_id,
+                            ProcessingRun.document_version_id == v.id,
+                            ProcessingRun.step_type == ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                        )
+                        .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+                        .limit(1)
+                    )
+                    succeeded_ext = session.scalar(
+                        select(ProcessingRun)
+                        .where(
+                            ProcessingRun.organization_id == run.organization_id,
+                            ProcessingRun.document_version_id == v.id,
+                            ProcessingRun.step_type == ProcessingStepType.EXTRACT_PDF_TEXT.value,
+                            ProcessingRun.status == ProcessingStatus.SUCCEEDED.value,
+                        )
+                        .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+                        .limit(1)
+                    )
+                    latest_ext = succeeded_ext or session.scalar(
+                        select(ProcessingRun)
+                        .where(
+                            ProcessingRun.organization_id == run.organization_id,
+                            ProcessingRun.document_version_id == v.id,
+                            ProcessingRun.step_type == ProcessingStepType.EXTRACT_PDF_TEXT.value,
+                        )
+                        .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+                        .limit(1)
+                    )
+                    fields_in = []
+                    if succeeded_ext is not None:
+                        ef_rows = list(
+                            session.scalars(
+                                select(ExtractedField)
+                                .where(
+                                    ExtractedField.organization_id == run.organization_id,
+                                    ExtractedField.document_version_id == v.id,
+                                    ExtractedField.processing_run_id == succeeded_ext.id,
+                                )
+                                .order_by(ExtractedField.field_key.asc())
+                            )
+                        )
+                        for ef in ef_rows:
+                            ev_rows = list(
+                                session.scalars(
+                                    select(EvidenceReference)
+                                    .where(
+                                        EvidenceReference.organization_id == run.organization_id,
+                                        EvidenceReference.document_version_id == v.id,
+                                        EvidenceReference.extracted_field_id == ef.id,
+                                    )
+                                    .order_by(
+                                        EvidenceReference.page_number.asc(),
+                                        EvidenceReference.id.asc(),
+                                    )
+                                )
+                            )
+                            fields_in.append(
+                                ExtractedFieldInput(
+                                    extracted_field_id=ef.id,
+                                    organization_id=ef.organization_id,
+                                    document_version_id=ef.document_version_id,
+                                    processing_run_id=ef.processing_run_id,
+                                    field_key=ef.field_key,
+                                    raw_value=ef.raw_value,
+                                    normalized_value=ef.normalized_value,
+                                    status=ef.status,
+                                    abstained=ef.abstained,
+                                    metadata_json=dict(ef.metadata_json or {}),
+                                    evidences=tuple(
+                                        EvidenceInput(
+                                            evidence_id=ev.id,
+                                            organization_id=ev.organization_id,
+                                            document_version_id=ev.document_version_id,
+                                            extracted_field_id=ev.extracted_field_id,
+                                            page_number=ev.page_number,
+                                            bbox=(ev.bbox_x, ev.bbox_y, ev.bbox_w, ev.bbox_h),
+                                            quote_excerpt=ev.quote_excerpt,
+                                            extraction_method=ev.extraction_method,
+                                        )
+                                        for ev in ev_rows
+                                    ),
+                                )
+                            )
+                    hr_rows = list(
+                        session.scalars(
+                            select(HumanReview)
+                            .where(
+                                HumanReview.organization_id == run.organization_id,
+                                HumanReview.document_version_id == v.id,
+                            )
+                            .order_by(HumanReview.created_at.asc(), HumanReview.id.asc())
+                        )
+                    )
+                    ext_outcome = None
+                    if latest_ext is not None and isinstance(latest_ext.result_json, dict):
+                        raw_o = latest_ext.result_json.get("outcome")
+                        ext_outcome = str(raw_o) if raw_o is not None else None
+                    vers_in.append(
+                        DocumentVersionInput(
+                            version_id=v.id,
+                            document_id=v.document_id,
+                            version_number=v.version_number,
+                            sha256_hex=v.sha256_hex,
+                            mime_type=v.mime_type,
+                            created_at=_as_utc(v.created_at),
+                            is_current=v.is_current,
+                            superseded_by_version_id=v.superseded_by_version_id,
+                            integrity_status=ver_int,
+                            extraction_run_id=latest_ext.id if latest_ext else None,
+                            extraction_status=latest_ext.status if latest_ext else None,
+                            extractor_version=latest_ext.extractor_version if latest_ext else None,
+                            extraction_readable=latest_ext.readable if latest_ext else None,
+                            extraction_outcome=ext_outcome,
+                            extracted_fields=tuple(fields_in),
+                            human_reviews=tuple(
+                                HumanReviewInput(
+                                    review_id=hr.id,
+                                    document_version_id=hr.document_version_id,
+                                    action_type=hr.action_type,
+                                    field_key=hr.field_key,
+                                    policy_version=hr.policy_version,
+                                    created_at=_as_utc(hr.created_at),
+                                )
+                                for hr in hr_rows
+                            ),
+                        )
+                    )
+                docs_in.append(
+                    CaseDocumentInput(
+                        document_id=d.id,
+                        document_kind=d.document_kind,
+                        document_subfamily=d.document_subfamily,
+                        source_label=d.source_label,
+                        quarantined=d.quarantined,
+                        discarded_at=_as_utc(d.discarded_at) if d.discarded_at else None,
+                        versions=tuple(vers_in),
+                    )
+                )
+
+            last_assess_seq = int(
+                session.scalar(
+                    select(func.coalesce(func.max(ConsistencyAssessment.assessment_sequence), 0)).where(
+                        ConsistencyAssessment.organization_id == run.organization_id,
+                        ConsistencyAssessment.case_id == case.id,
+                    )
+                )
+                or 0
+            )
+            session.rollback()
+            return (
+                CaseConsistencyInput(
+                    organization_id=run.organization_id,
+                    case_id=case.id,
+                    case_code=case.case_code,
+                    procedure_reference=case.procedure_reference,
+                    declared_laterality=case.declared_laterality,
+                    engine_name=DEFAULT_CONSISTENCY_ENGINE_NAME,
+                    engine_version=engine_version,
+                    policy_version=policy_version,
+                    max_issue_date_spread_days=max_issue_date_spread_days,
+                    documents=tuple(docs_in),
+                ),
+                last_assess_seq,
+            )
+
+    @staticmethod
+    def complete_comparison_run(
+        session: Session,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_token_hash: str,
+        assessment_sequence: int,
+        evaluation: CaseConsistencyResult,
+    ) -> str:
+        """Atomically persist ConsistencyAssessment, 4 ConsistencyAxisResults, Evidence links, ProcessingRun completion, and AuditEvent."""
+        assessment_id = new_uuid()
+        now = utc_now()
+        axis_statuses_map = {ax.value: res.status.value for ax, res in evaluation.axes.items()}
+        axes_summary = {
+            "assessment_id": assessment_id,
+            "assessment_sequence": assessment_sequence,
+            "automated_axes_outcome": evaluation.automated_axes_outcome,
+            "readiness_state": evaluation.readiness_state.value,
+            "human_review_completed": evaluation.human_review_completed,
+            "axis_statuses": axis_statuses_map,
+            "engine_name": evaluation.engine_name,
+            "engine_version": evaluation.engine_version,
+            "policy_version": evaluation.policy_version,
+            "administrative_only": True,
+            "clinical_approval": False,
+        }
+        result_json = assert_safe_audit_payload(
+            {
+                "step_type": ProcessingStepType.COMPARE_CONSISTENCY.value,
+                "case_id": evaluation.case_id,
+                "assessment_id": assessment_id,
+                "assessment_sequence": assessment_sequence,
+                "engine_name": evaluation.engine_name,
+                "engine_version": evaluation.engine_version,
+                "policy_version": evaluation.policy_version,
+                "input_fingerprint_sha256": evaluation.input_fingerprint_sha256,
+                "automated_axes_outcome": evaluation.automated_axes_outcome,
+                "readiness_state": evaluation.readiness_state.value,
+                "human_review_completed": evaluation.human_review_completed,
+                "human_review_required": evaluation.human_review_required,
+                "compared_documents_count": evaluation.compared_documents_count,
+                "axis_statuses": axis_statuses_map,
+                "administrative_only": True,
+                "clinical_approval": False,
+            }
+        )
+
+        prepared_axes: list[dict[str, Any]] = []
+        total_evidence_links = 0
+        for ax in (
+            AxisName.IDENTIDADE,
+            AxisName.PROCEDIMENTO_CODIGO,
+            AxisName.LATERALIDADE,
+            AxisName.TEMPORALIDADE,
+        ):
+            res = evaluation.axes[ax]
+            axis_result_id = new_uuid()
+            links_payload = [
+                {
+                    "id": new_uuid(),
+                    "document_version_id": lnk.document_version_id,
+                    "extracted_field_id": lnk.extracted_field_id,
+                    "evidence_reference_id": lnk.evidence_reference_id,
+                }
+                for lnk in res.evidence_links
+            ]
+            total_evidence_links += len(links_payload)
+            prepared_axes.append(
+                {
+                    "id": axis_result_id,
+                    "axis_name": ax.value,
+                    "status": res.status.value,
+                    "rule_code": res.rule_code,
+                    "justification": res.justification,
+                    "fields_used_json": list(res.fields_used),
+                    "compared_document_ids_json": list(res.compared_document_ids),
+                    "compared_version_ids_json": list(res.compared_version_ids),
+                    "evidence_reference_ids_json": list(res.evidence_reference_ids),
+                    "comparison_items_json": list(res.comparison_items),
+                    "limitations_json": list(res.limitations),
+                    "engine_version": res.engine_version,
+                    "evidence_links": links_payload,
+                }
+            )
+
+        assessment_bundle = {
+            "id": assessment_id,
+            "case_id": evaluation.case_id,
+            "assessment_sequence": assessment_sequence,
+            "engine_name": evaluation.engine_name,
+            "engine_version": evaluation.engine_version,
+            "policy_version": evaluation.policy_version,
+            "input_fingerprint_sha256": evaluation.input_fingerprint_sha256,
+            "automated_axes_outcome": evaluation.automated_axes_outcome,
+            "readiness_state": evaluation.readiness_state.value,
+            "human_review_completed": evaluation.human_review_completed,
+            "human_review_required": evaluation.human_review_required,
+            "compared_documents_count": evaluation.compared_documents_count,
+            "compared_snapshot_json": list(evaluation.compared_snapshot),
+            "extraction_run_ids_json": list(evaluation.extraction_run_ids),
+            "limitations_json": list(evaluation.limitations),
+            "summary_json": evaluation.summary,
+            "axes": prepared_axes,
+        }
+
+        if _is_pg_session(session):
+            try:
+                head = (
+                    session.execute(
+                        text(
+                            "SELECT * FROM public.jyxia_worker_prepare_run_audit_head("
+                            ":p_run_id, :p_worker_id, :p_lease_token_hash)"
+                        ),
+                        {
+                            "p_run_id": run_id,
+                            "p_worker_id": worker_id,
+                            "p_lease_token_hash": lease_token_hash,
+                        },
+                    )
+                    .mappings()
+                    .one()
+                )
+            except Exception as exc:
+                session.rollback()
+                if "lease invalid or expired" in str(exc).lower():
+                    raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                raise
+
+            audit_id, next_seq, prev_hash, event_hash, created_at, safe_payload = (
+                ProcessingQueueRepository._build_worker_audit_metadata(
+                    organization_id=str(head["organization_id"]),
+                    run_id=run_id,
+                    last_sequence=int(head["last_sequence"]),
+                    last_event_hash=str(head["last_event_hash"]),
+                    event_type="processing_run.succeeded",
+                    payload_json={
+                        "operation": "processing_run_succeeded",
+                        "processing_run_id": run_id,
+                        "worker_id": worker_id,
+                        "evidence_links_count": total_evidence_links,
+                        **result_json,
+                        "administrative_only": True,
+                        "clinical_approval": False,
+                    },
+                )
+            )
+            try:
+                session.execute(
+                    text(
+                        "SELECT public.jyxia_worker_complete_comparison_run("
+                        ":p_run_id, :p_worker_id, :p_lease_token_hash, "
+                        ":p_readiness_state, :p_axes_summary_json, :p_result_json, "
+                        ":p_assessment_json, :p_audit_id, :p_audit_sequence_number, "
+                        ":p_audit_payload_json, :p_audit_prev_event_hash, "
+                        ":p_audit_event_hash, :p_audit_created_at)"
+                    ),
+                    {
+                        "p_run_id": run_id,
+                        "p_worker_id": worker_id,
+                        "p_lease_token_hash": lease_token_hash,
+                        "p_readiness_state": evaluation.readiness_state.value,
+                        "p_axes_summary_json": json.dumps(axes_summary, ensure_ascii=True),
+                        "p_result_json": json.dumps(result_json, ensure_ascii=True),
+                        "p_assessment_json": json.dumps(assessment_bundle, ensure_ascii=True),
+                        "p_audit_id": audit_id,
+                        "p_audit_sequence_number": next_seq,
+                        "p_audit_payload_json": json.dumps(safe_payload, ensure_ascii=True),
+                        "p_audit_prev_event_hash": prev_hash,
+                        "p_audit_event_hash": event_hash,
+                        "p_audit_created_at": created_at,
+                    },
+                )
+            except Exception as exc:
+                session.rollback()
+                if "lease invalid or expired" in str(exc).lower():
+                    raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                raise
+            session.commit()
+            return assessment_id
+
+        lock_cm = _sqlite_lock_for(ProcessingQueueRepository._WORKER_QUEUE_LOCK_KEY)
+        with lock_cm:
+            now = utc_now()
+            run = session.scalar(select(ProcessingRun).where(ProcessingRun.id == run_id))
+            if (
+                run is None
+                or run.status != ProcessingStatus.RUNNING.value
+                or run.worker_id != worker_id
+                or run.lease_token_hash != lease_token_hash
+                or run.lease_expires_at is None
+                or _as_utc(run.lease_expires_at) < now
+            ):
+                session.rollback()
+                raise LeaseOwnershipError("Worker lease is invalid or expired.")
+            if run.step_type != ProcessingStepType.COMPARE_CONSISTENCY.value:
+                session.rollback()
+                raise ValueError("complete_comparison_run requires compare_consistency step_type.")
+
+            expected_seq = int(
+                session.scalar(
+                    select(func.coalesce(func.max(ConsistencyAssessment.assessment_sequence), 0)).where(
+                        ConsistencyAssessment.organization_id == run.organization_id,
+                        ConsistencyAssessment.case_id == evaluation.case_id,
+                    )
+                )
+                or 0
+            ) + 1
+            if assessment_sequence != expected_seq:
+                session.rollback()
+                raise ValueError(
+                    f"Assessment sequence mismatch: expected {expected_seq}, got {assessment_sequence}."
+                )
+
+            assess_row = ConsistencyAssessment(
+                id=assessment_id,
+                organization_id=run.organization_id,
+                case_id=evaluation.case_id,
+                processing_run_id=run.id,
+                assessment_sequence=assessment_sequence,
+                engine_name=evaluation.engine_name,
+                engine_version=evaluation.engine_version,
+                policy_version=evaluation.policy_version,
+                input_fingerprint_sha256=evaluation.input_fingerprint_sha256,
+                automated_axes_outcome=evaluation.automated_axes_outcome,
+                readiness_state=evaluation.readiness_state.value,
+                human_review_completed=evaluation.human_review_completed,
+                human_review_required=evaluation.human_review_required,
+                administrative_only=True,
+                clinical_approval=False,
+                compared_documents_count=evaluation.compared_documents_count,
+                compared_snapshot_json=list(evaluation.compared_snapshot),
+                extraction_run_ids_json=list(evaluation.extraction_run_ids),
+                limitations_json=list(evaluation.limitations),
+                summary_json=evaluation.summary,
+                assessed_at=now,
+                created_at=now,
+            )
+            session.add(assess_row)
+            session.flush()
+
+            for ax_item in prepared_axes:
+                ax_row = ConsistencyAxisResult(
+                    id=ax_item["id"],
+                    organization_id=run.organization_id,
+                    case_id=evaluation.case_id,
+                    assessment_id=assess_row.id,
+                    axis_name=ax_item["axis_name"],
+                    status=ax_item["status"],
+                    rule_code=ax_item["rule_code"],
+                    justification=ax_item["justification"],
+                    fields_used_json=ax_item["fields_used_json"],
+                    compared_document_ids_json=ax_item["compared_document_ids_json"],
+                    compared_version_ids_json=ax_item["compared_version_ids_json"],
+                    evidence_reference_ids_json=ax_item["evidence_reference_ids_json"],
+                    comparison_items_json=ax_item["comparison_items_json"],
+                    limitations_json=ax_item["limitations_json"],
+                    engine_version=ax_item["engine_version"],
+                    administrative_only=True,
+                    clinical_approval=False,
+                    created_at=now,
+                )
+                session.add(ax_row)
+                session.flush()
+                for lnk in ax_item["evidence_links"]:
+                    session.add(
+                        ConsistencyAxisEvidence(
+                            id=lnk["id"],
+                            organization_id=run.organization_id,
+                            assessment_id=assess_row.id,
+                            axis_result_id=ax_row.id,
+                            document_version_id=lnk["document_version_id"],
+                            extracted_field_id=lnk["extracted_field_id"],
+                            evidence_reference_id=lnk["evidence_reference_id"],
+                            created_at=now,
+                        )
+                    )
+
+            case_row = session.scalar(
+                select(DocumentCase).where(
+                    DocumentCase.organization_id == run.organization_id,
+                    DocumentCase.id == evaluation.case_id,
+                )
+            )
+            if case_row is not None:
+                case_row.readiness_state = evaluation.readiness_state.value
+                case_row.updated_at = max(now, _as_utc(case_row.created_at))
+
+            run.status = ProcessingStatus.SUCCEEDED.value
+            run.lease_expires_at = None
+            run.lease_token_hash = None
+            run.last_error_code = None
+            run.last_error_detail = None
+            run.readiness_state = evaluation.readiness_state.value
+            run.axes_summary = axes_summary
+            run.result_json = result_json
+            run.readable = True
+            started_utc = _as_utc(run.started_at) if run.started_at is not None else now
+            run.finished_at = max(now, started_utc)
+            run.updated_at = max(now, _as_utc(run.created_at))
+            session.flush()
+
+            AuditEventRepository.append_event(
+                session,
+                TenantContext(
+                    organization_id=run.organization_id,
+                    actor_user_id=None,
+                    source="worker",
+                ),
+                event_type="processing_run.succeeded",
+                target_entity_type="processing_run",
+                target_entity_id=run.id,
+                payload_json={
+                    "operation": "processing_run_succeeded",
+                    "processing_run_id": run.id,
+                    "worker_id": worker_id,
+                    "evidence_links_count": total_evidence_links,
+                    **result_json,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
+            session.commit()
+            return assessment_id

@@ -9,14 +9,26 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
     get_db_session,
+    get_settings,
     require_csrf_protection,
     require_org_permission,
 )
+from app.core.config import Settings
 from app.core.constants import IDEMPOTENCY_KEY_HEADER_NAME
 from app.core.rbac import RbacPermission
-from app.models.entities import EvidenceReference, ExtractedField, ProcessingRun
+from app.models.entities import (
+    ConsistencyAssessment,
+    ConsistencyAxisResult,
+    EvidenceReference,
+    ExtractedField,
+    ProcessingRun,
+)
 from app.schemas.auth import (
     CaseProcessingRunsListResponse,
+    ConsistencyAssessmentDetailResponse,
+    ConsistencyAssessmentsListResponse,
+    ConsistencyAssessmentSummaryResponse,
+    ConsistencyAxisResultResponse,
     EvidenceReferencesListResponse,
     EvidenceReferenceSummaryResponse,
     ExtractedFieldItemResponse,
@@ -408,6 +420,212 @@ def list_document_version_evidence(
             else None
         ),
         evidence_references=evidences_out,
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+def _to_assessment_summary(
+    assessment: ConsistencyAssessment,
+    *,
+    axis_statuses: dict[str, str],
+) -> ConsistencyAssessmentSummaryResponse:
+    return ConsistencyAssessmentSummaryResponse(
+        assessment_id=assessment.id,
+        organization_id=assessment.organization_id,
+        case_id=assessment.case_id,
+        processing_run_id=assessment.processing_run_id,
+        assessment_sequence=assessment.assessment_sequence,
+        engine_name=assessment.engine_name,
+        engine_version=assessment.engine_version,
+        policy_version=assessment.policy_version,
+        input_fingerprint_sha256=assessment.input_fingerprint_sha256,
+        automated_axes_outcome=assessment.automated_axes_outcome,
+        readiness_state=assessment.readiness_state,
+        human_review_completed=assessment.human_review_completed,
+        human_review_required=assessment.human_review_required,
+        compared_documents_count=assessment.compared_documents_count,
+        axis_statuses=axis_statuses,
+        limitations=list(assessment.limitations_json or []),
+        assessed_at=assessment.assessed_at,
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+def _to_axis_response(axis_row: ConsistencyAxisResult) -> ConsistencyAxisResultResponse:
+    return ConsistencyAxisResultResponse(
+        axis_result_id=axis_row.id,
+        axis=axis_row.axis_name,
+        status=axis_row.status,
+        rule=axis_row.rule_code,
+        justification=axis_row.justification,
+        fields_used=list(axis_row.fields_used_json or []),
+        compared_document_ids=list(axis_row.compared_document_ids_json or []),
+        compared_version_ids=list(axis_row.compared_version_ids_json or []),
+        evidence_reference_ids=list(axis_row.evidence_reference_ids_json or []),
+        comparison=list(axis_row.comparison_items_json or []),
+        limitations=list(axis_row.limitations_json or []),
+        engine_version=axis_row.engine_version,
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.post(
+    "/{organization_id}/cases/{case_id}/consistency-assessments",
+    response_model=ProcessingRunSummaryResponse,
+    status_code=201,
+)
+def enqueue_case_consistency_assessment(
+    organization_id: str,
+    case_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.CASE_WRITE)),
+    ],
+    _csrf: Annotated[None, Depends(require_csrf_protection)],
+    idempotency_key: Annotated[
+        str | None, Header(alias=IDEMPOTENCY_KEY_HEADER_NAME)
+    ] = None,
+) -> ProcessingRunSummaryResponse:
+    """Enqueue async compare_consistency worker evaluation without running engine inside HTTP."""
+    _ = organization_id
+    _set_no_store(response)
+    if idempotency_key is not None:
+        try:
+            idempotency_key = validate_safe_metadata_text(
+                idempotency_key,
+                field_name="Idempotency-Key",
+                min_len=4,
+                max_len=128,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        detail = InstitutionalService.enqueue_case_consistency_comparison(
+            session,
+            ctx,
+            case_id=case_id,
+            engine_version=settings.consistency_engine_version,
+            policy_version=settings.consistency_policy_version,
+            idempotency_key=idempotency_key,
+            max_attempts=settings.worker_max_attempts,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ProcessingRunActiveConflictError, IdempotencyConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    response.status_code = 200 if detail.idempotent_replay else 201
+    return to_processing_run_summary(
+        detail.processing_run,
+        document_id=detail.document_id,
+        case_id=detail.case_id,
+    )
+
+
+@router.get(
+    "/{organization_id}/cases/{case_id}/consistency-assessments",
+    response_model=ConsistencyAssessmentsListResponse,
+)
+def list_case_consistency_assessments(
+    organization_id: str,
+    case_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.DOCUMENT_READ)),
+    ],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ConsistencyAssessmentsListResponse:
+    """List paginated consistency assessments history for a tenant DocumentCase."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        page = InstitutionalService.list_case_consistency_assessments(
+            session,
+            ctx,
+            case_id=case_id,
+            limit=limit,
+            offset=offset,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return ConsistencyAssessmentsListResponse(
+        organization_id=ctx.organization_id,
+        case_id=page.case.id,
+        total=page.total,
+        limit=page.limit,
+        offset=page.offset,
+        assessments=[
+            _to_assessment_summary(assess, axis_statuses=ax_map)
+            for assess, ax_map in page.items
+        ],
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.get(
+    "/{organization_id}/cases/{case_id}/consistency-assessments/{assessment_id}",
+    response_model=ConsistencyAssessmentDetailResponse,
+)
+def get_case_consistency_assessment_detail(
+    organization_id: str,
+    case_id: str,
+    assessment_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.DOCUMENT_READ)),
+    ],
+) -> ConsistencyAssessmentDetailResponse:
+    """Return full 4-axis breakdown, spatial evidences, limitations, and automated vs review states."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        res = InstitutionalService.get_case_consistency_assessment(
+            session,
+            ctx,
+            case_id=case_id,
+            assessment_id=assessment_id,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return ConsistencyAssessmentDetailResponse(
+        assessment_id=res.assessment.id,
+        organization_id=res.assessment.organization_id,
+        case_id=res.case.id,
+        processing_run_id=res.assessment.processing_run_id,
+        assessment_sequence=res.assessment.assessment_sequence,
+        engine_name=res.assessment.engine_name,
+        engine_version=res.assessment.engine_version,
+        policy_version=res.assessment.policy_version,
+        input_fingerprint_sha256=res.assessment.input_fingerprint_sha256,
+        automated_axes_outcome=res.assessment.automated_axes_outcome,
+        readiness_state=res.assessment.readiness_state,
+        human_review_completed=res.assessment.human_review_completed,
+        human_review_required=res.assessment.human_review_required,
+        compared_documents_count=res.assessment.compared_documents_count,
+        compared_snapshot=list(res.assessment.compared_snapshot_json or []),
+        extraction_run_ids=list(res.assessment.extraction_run_ids_json or []),
+        axes=[_to_axis_response(ax) for ax in res.axes],
+        limitations=list(res.assessment.limitations_json or []),
+        summary=dict(res.assessment.summary_json or {}),
+        assessed_at=res.assessment.assessed_at,
         administrative_only=True,
         clinical_approval=False,
     )

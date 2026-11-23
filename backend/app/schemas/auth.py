@@ -401,3 +401,94 @@ class EvidenceReferencesListResponse(BaseModel):
     evidence_references: list[EvidenceReferenceSummaryResponse]
     administrative_only: bool = True
     clinical_approval: bool = False
+
+
+class ConsistencyAxisResultResponse(BaseModel):
+    """Explainable per-axis consistency finding with bound evidence coordinates and rule code."""
+
+    model_config = ConfigDict(frozen=True)
+
+    axis_result_id: str
+    axis: str
+    status: str
+    rule: str
+    justification: str
+    fields_used: list[str]
+    compared_document_ids: list[str]
+    compared_version_ids: list[str]
+    evidence_reference_ids: list[str]
+    comparison: list[dict[str, Any]]
+    limitations: list[str]
+    engine_version: str
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class ConsistencyAssessmentSummaryResponse(BaseModel):
+    """Paginated historical consistency assessment summary without mutating prior runs."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assessment_id: str
+    organization_id: str
+    case_id: str
+    processing_run_id: str
+    assessment_sequence: int
+    engine_name: str
+    engine_version: str
+    policy_version: str
+    input_fingerprint_sha256: str
+    automated_axes_outcome: str
+    readiness_state: str
+    human_review_completed: bool
+    human_review_required: bool
+    compared_documents_count: int
+    axis_statuses: dict[str, str]
+    limitations: list[str]
+    assessed_at: datetime
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class ConsistencyAssessmentsListResponse(BaseModel):
+    """Paginated historical list of case consistency assessments."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    case_id: str
+    total: int
+    limit: int
+    offset: int
+    assessments: list[ConsistencyAssessmentSummaryResponse]
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class ConsistencyAssessmentDetailResponse(BaseModel):
+    """Complete deterministic 4-axis breakdown, version snapshot, limitations, and evidences."""
+
+    model_config = ConfigDict(frozen=True)
+
+    assessment_id: str
+    organization_id: str
+    case_id: str
+    processing_run_id: str
+    assessment_sequence: int
+    engine_name: str
+    engine_version: str
+    policy_version: str
+    input_fingerprint_sha256: str
+    automated_axes_outcome: str
+    readiness_state: str
+    human_review_completed: bool
+    human_review_required: bool
+    compared_documents_count: int
+    compared_snapshot: list[dict[str, Any]]
+    extraction_run_ids: list[str]
+    axes: list[ConsistencyAxisResultResponse]
+    limitations: list[str]
+    summary: dict[str, Any]
+    assessed_at: datetime
+    administrative_only: bool = True
+    clinical_approval: bool = False

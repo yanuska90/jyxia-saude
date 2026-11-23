@@ -25,6 +25,10 @@ from app.repositories.institutional import (
     ProcessingQueueRepository,
     sanitize_technical_error_detail,
 )
+from app.services.consistency_engine import (
+    CaseConsistencyResult,
+    evaluate_case_consistency,
+)
 from app.services.pdf_extraction import (
     DocumentTextExtractionResult,
     PdfExtractionError,
@@ -79,6 +83,14 @@ class ExtractionStepExecution:
     extracted_fields: list[dict[str, Any]]
     audit_event_type: str
     derived_artifact_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonStepExecution:
+    """Prepared atomic persistence bundle emitted by execute_compare_consistency_step."""
+
+    assessment_sequence: int
+    evaluation: CaseConsistencyResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +359,35 @@ def execute_extract_pdf_text_step(
     )
 
 
+def execute_compare_consistency_step(
+    claimed: ClaimedProcessingRunRecord,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> ComparisonStepExecution:
+    """Execute deterministic 4-axis documentary comparison strictly from persisted extractions."""
+    session = session_factory()
+    try:
+        case_input, last_seq = ProcessingQueueRepository.prepare_case_comparison_input(
+            session,
+            run_id=claimed.run_id,
+            worker_id=claimed.worker_id
+            if hasattr(claimed, "worker_id")
+            else settings.worker_id,  # resolved in worker below
+            lease_token_hash=claimed.lease_token_hash,
+            max_issue_date_spread_days=settings.consistency_temporality_max_age_days,
+            engine_version=claimed.extractor_version or settings.consistency_engine_version,
+            policy_version=claimed.policy_version or settings.consistency_policy_version,
+        )
+    finally:
+        session.close()
+
+    evaluation = evaluate_case_consistency(case_input)
+    return ComparisonStepExecution(
+        assessment_sequence=last_seq + 1,
+        evaluation=evaluation,
+    )
+
+
 _DEFAULT_STEP_HANDLERS: dict[str, Callable[[ClaimedProcessingRunRecord, DocumentStoragePort, Settings], Any]] = {
     ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value: execute_verify_object_integrity_step,
     ProcessingStepType.EXTRACT_PDF_TEXT.value: execute_extract_pdf_text_step,
@@ -432,6 +473,27 @@ class ProcessingWorker:
     def _execute_step(self, claimed: ClaimedProcessingRunRecord) -> Any:
         if self._custom_step_executor is not None:
             return self._custom_step_executor(claimed, self.storage, self.settings)
+        if claimed.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value:
+            read_session = self.session_factory()
+            try:
+                case_input, last_seq = ProcessingQueueRepository.prepare_case_comparison_input(
+                    read_session,
+                    run_id=claimed.run_id,
+                    worker_id=self.worker_id,
+                    lease_token_hash=claimed.lease_token_hash,
+                    max_issue_date_spread_days=self.settings.consistency_temporality_max_age_days,
+                    engine_version=claimed.extractor_version
+                    or self.settings.consistency_engine_version,
+                    policy_version=claimed.policy_version
+                    or self.settings.consistency_policy_version,
+                )
+            finally:
+                read_session.close()
+            evaluation = evaluate_case_consistency(case_input)
+            return ComparisonStepExecution(
+                assessment_sequence=last_seq + 1,
+                evaluation=evaluation,
+            )
         handler = _DEFAULT_STEP_HANDLERS.get(claimed.step_type)
         if handler is None:
             raise PermanentProcessingError(
@@ -562,6 +624,12 @@ class ProcessingWorker:
                         result_json=step_output.result_json,
                         extracted_fields=step_output.extracted_fields,
                         audit_event_type=step_output.audit_event_type,
+                        chain_compare_engine_version=(
+                            self.settings.consistency_engine_version
+                            if self.settings.worker_auto_chain_consistency_comparison
+                            else None
+                        ),
+                        chain_compare_policy_version=self.settings.consistency_policy_version,
                     )
                     derived_key_to_cleanup = None
                     succeeded_count += 1
@@ -576,6 +644,29 @@ class ProcessingWorker:
                             outcome=step_output.result_json.get("outcome"),
                             fields_count=step_output.result_json.get("fields_count"),
                             evidences_count=step_output.result_json.get("evidences_count"),
+                        ),
+                    )
+                elif isinstance(step_output, ComparisonStepExecution):
+                    assessment_id = ProcessingQueueRepository.complete_comparison_run(
+                        session,
+                        run_id=claimed.run_id,
+                        worker_id=self.worker_id,
+                        lease_token_hash=claimed.lease_token_hash,
+                        assessment_sequence=step_output.assessment_sequence,
+                        evaluation=step_output.evaluation,
+                    )
+                    succeeded_count += 1
+                    logger.info(
+                        "Processing run deterministic 4-axis consistency assessment completed.",
+                        extra=build_safe_log_extra(
+                            organization_id=claimed.organization_id,
+                            processing_run_id=claimed.run_id,
+                            case_id=step_output.evaluation.case_id,
+                            assessment_id=assessment_id,
+                            step_type=claimed.step_type,
+                            attempt_count=claimed.attempt_count,
+                            readiness_state=step_output.evaluation.readiness_state.value,
+                            automated_axes_outcome=step_output.evaluation.automated_axes_outcome,
                         ),
                     )
                 else:
