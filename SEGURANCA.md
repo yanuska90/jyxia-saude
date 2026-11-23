@@ -1,4 +1,4 @@
-# Segurança e privacidade da JYXIA 3.0.0
+# Segurança e privacidade da JYXIA 3.1.0
 
 ## Fronteira desta demonstração
 
@@ -21,3 +21,7 @@ Nunca colocar credenciais, arquivos .env, cookies, documentos reais ou dumps em 
 O cofre criptografado local da versão 2.3 permanece em demo-v2.html para preservar registros existentes. Não é o armazenamento da demo 3.0. Suas limitações e recuperação continuam nos documentos históricos; nenhuma senha pessoal foi lida ou recuperada nesta atualização.
 
 Referências: LGPD, texto atualizado em https://www2.camara.leg.br/legin/fed/lei/2018/lei-13709-14-agosto-2018-787077-normaatualizada-pl.html ; Anvisa, finalidade e enquadramento de software: https://www.gov.br/anvisa/pt-br/centraisdeconteudo/publicacoes/produtos-para-a-saude/manuais/software-como-dispositivo-medico-perguntas-e-respostas . Consultadas em 14/11/2026.
+
+## Alteração 3.1.0 — 22/11/2026
+
+Atualização de conteúdo, legibilidade, roteiro e orientação das pendências. Os novos textos dinâmicos usam textContent/createTextNode; o atalho abre somente o documento já presente na sessão. Não foram criados endpoints, formulários externos, integrações, armazenamento ou coleta de credenciais. Permanecem o catálogo sintético, a CSP e a revisão humana. O histórico encadeado não é prova de autoria nem log imutável. Segurança e conformidade para uso real continuam pendentes da fase institucional.

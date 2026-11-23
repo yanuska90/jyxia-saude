@@ -1,5 +1,15 @@
 # Registro de decisões e versões
 
+
+## 3.1.0 — 22/11/2026
+
+- Site atualizado com problema, público, estado real, plano de validação e visão de acessibilidade.
+- Preparação para convênios apresentada como hipótese a pesquisar.
+- Demo com guia de uso e pendências que explicam motivo, próximo passo e documento, com atalho para revisão.
+- Textos e controles ampliados; layout de celular, foco de teclado e alto contraste do sistema considerados.
+- Fonte em PDF, regras de extração e sete cenários sintéticos preservados; nenhum OCR, IA, login ou integração clínica foi acrescentado.
+- Documento DOCX de 14/11/2026 identificado como plano base histórico; README e documentação técnica atualizados.
+
 ## 3.0.0 — 14 de novembro de 2026
 
 Decisão de Yanuska: adotar os quatro arquivos de estratégia documental como base. Identidade JYXIA preservada. Primeiro módulo: conferência documental para procedimentos eletivos. Acessibilidade permanece requisito; teleconsulta e plataforma ampla saem do núcleo inicial.

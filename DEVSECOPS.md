@@ -50,3 +50,7 @@ Os riscos abertos impedem classificar o protótipo como ferramenta clínica pron
 O acesso individual a portais reais foi suspenso por decisão da titular. O novo campo recebe somente o pacote sintético aprovado, limitado a 256 KB, e devolve uma cópia do catálogo confiável após comparação do conteúdo. Arquivos rejeitados não alimentam a interface nem a persistência. Não existe mecanismo de anonimização de arquivos reais.
 
 Validação: 7 testes específicos de importação passaram, além dos 11 testes existentes de criptografia/links e dos 11 de ingestão. Foram cobertos pacote completo, identidade divergente, conteúdo extra, arquivo inválido ou excessivo, isolamento da cópia e fontes incompletas. No navegador, botão e seleção do arquivo resultaram em 7 registros de 2 fontes, reimportação sem duplicação e limpeza do cenário ao recarregar. O formulário foi conferido em largura de celular, sem rolagem horizontal. Esses testes não equivalem a um pentest independente.
+
+## Revisão documental 3.1.0 — 22/11/2026
+
+Escopo: apresentação, acessibilidade visual e navegação das pendências. A fronteira permanece a aba pública com dados sintéticos. Textos de motivo e próximo passo são definidos pela aplicação; dados do documento e observações são inseridos como texto. O atalho usa o identificador interno da pendência, sem URLs ou acesso externo. Nenhuma permissão, credencial ou dependência foi adicionada. Não houve pentest independente. As verificações específicas desta entrega ficam registradas em VALIDACAO_DOCUMENTAL.md.

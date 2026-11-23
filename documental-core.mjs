@@ -1,4 +1,4 @@
-export const VERSION='3.0.0';
+export const VERSION='3.1.0';
 export const KINDS={solicitacao:'Solicitação',laudo:'Laudo de exame',avaliacao:'Formulário de avaliação',termo:'Termo documental',desconhecido:'Não classificado'};
 export const SCENARIOS={
  completo:{label:'1 · Conjunto completo',files:['solicitacao.pdf','laudo.pdf','avaliacao.pdf','termo.pdf']},

@@ -1,20 +1,26 @@
 # JYXIA Inteligência Documental em Saúde
 
-Versão 3.0.0 · 14 de novembro de 2026 · Yanuska e João.
+Versão 3.1.0 · 22 de novembro de 2026 · Yanuska e João.
 
 A JYXIA organiza documentos, mostra a origem de informações e acompanha pendências com revisão humana. O primeiro módulo é a **conferência documental para procedimentos eletivos**. A hipótese de valor é reduzir procura, redigitação e retrabalho; ainda não há benefício operacional ou clínico validado.
 
 - [Site HTTPS](https://yanuska90.github.io/jyxia-saude/)
 - [Demo documental HTTPS](https://yanuska90.github.io/jyxia-saude/demo.html)
-- [Projeto completo em DOCX](Projeto_JYXIA_Inteligencia_Documental_v3.docx)
+- [Plano base v3.0 de 14/11/2026 em DOCX](Projeto_JYXIA_Inteligencia_Documental_v3.docx)
 - [Exemplos fictícios para baixar](fixtures-jyxia.zip)
+
+## Atualização de 22/11/2026
+
+Site e demo apresentam a versão 3.1.0. A atualização esclarece público, problema e estado real, acrescenta roteiro de uso e pendências com motivo/próximo passo/atalho para o documento, e aumenta legibilidade e áreas de toque. Os sete cenários e o mecanismo de extração permanecem os mesmos. Não foram acrescentados OCR, modelo de IA, autenticação ou integração clínica.
+
+O plano base em DOCX preserva a edição de 14/11/2026; as mudanças desta versão estão neste README, no site e no CHANGELOG.
 
 ## O que funciona
 
 1. Adicione um dos sete cenários ou anexe os arquivos fornecidos. O conteúdo deve corresponder ao catálogo sintético por SHA256; arquivos pessoais ou modificados são recusados.
 2. A demo extrai texto de PDFs com PDF.js, localiza nome, nascimento, identificador, emissão, tipo e origem informada. “Ver fonte” destaca o trecho na página original.
 3. Confira a identidade, a data e, em termos, a área de assinatura. Correções de data exigem observação e preservam o valor extraído. Uma marca visual não autentica assinatura.
-4. Trate pendências, atribua responsável fictício e prazo. Exceções exigem justificativa. Documentos divergentes ficam em quarentena sem vínculo confirmado ao caso.
+4. Leia o motivo e o próximo passo de cada pendência, abra seu documento de origem e atribua responsável fictício e prazo. Exceções exigem justificativa. Documentos divergentes ficam em quarentena sem vínculo confirmado ao caso.
 5. Confirme substituições entre documentos revisados do mesmo tipo; ambos ficam preservados. Arquivos idênticos não geram cópias adicionais.
 6. Exporte a sessão em JSON e verifique a sequência de hashes dos eventos. Não se trata de auditoria imutável ou autenticação de autoria.
 
@@ -52,6 +58,14 @@ O endereço local serve apenas para desenvolvimento; a entrega pública usa o HT
 A ideia surgiu quando eu, Yanuska, vivenciei um câncer há cerca de seis anos. Meus exames não estavam reunidos e eu precisava repetir minha história nos atendimentos. Também recebi um medicamento ao qual tinha alergia. Essa experiência mostrou a importância de informações acessíveis, organizadas e disponíveis para quem cuida do paciente.
 
 Conheci o João durante a faculdade e compartilhei a ideia. Aprendemos muito juntos ao longo deste ano. Hoje dividimos a responsabilidade e o sonho de fazer a JYXIA acontecer e contribuir para uma saúde mais ágil e acessível.
+
+## Validação e escolhas ainda abertas
+
+Propomos entrevistar inicialmente 3–5 profissionais e comparar a conferência documental com a preparação de pedidos para convênios. A necessidade de autorização de convênio, o segmento inicial e o modelo comercial dependem dessa pesquisa. Não há integração ou autorização automática.
+
+Um conjunto exploratório de cerca de 30 casos sintéticos adicionais deve ficar separado dos exemplos de desenvolvimento. Avaliar valor e significado por campo, localização da fonte, recusas corretas, falsos alertas, tempo total e correções humanas. Comparar com trabalho manual em casos equivalentes. Amostra sem erros observados não comprova risco zero nem desempenho em todos os hospitais.
+
+Procedimento e lateralidade divergentes são cenários candidatos para a próxima rodada; ainda não são campos extraídos pelos sete cenários atuais. Acessibilidade, linguagem clara e alternativa de atendimento assistido permanecem requisitos.
 
 ## Estratégia e histórico
 
