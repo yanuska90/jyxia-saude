@@ -1268,18 +1268,23 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
         w_stale_sess.close()
 
     # Healthy worker reclaims expired lease, completes verify_object_integrity (attempt 2),
-    # chains extract_pdf_text atomically, and completes extraction cleanly.
+    # chains extract_pdf_text atomically, and triggers barrier compare_consistency cleanly.
     recovery_worker = ProcessingWorker(
         worker_factory, pg_storage, settings, worker_id="pg-recovery-worker"
     )
     rec_stats = recovery_worker.process_one_cycle(max_jobs=5)
     assert rec_stats.reclaimed_leases == 1
-    assert rec_stats.claimed == 2
-    assert rec_stats.succeeded == 2
+    assert rec_stats.claimed == 3
+    assert rec_stats.succeeded == 3
 
     owner_verify = owner_factory()
     try:
         assert AuditEventRepository.verify_chain(owner_verify, TenantContext(organization_id=org_a_id))
         assert AuditEventRepository.verify_chain(owner_verify, TenantContext(organization_id=org_b_id))
+        assessments_a, assess_total_a = ProcessingQueueRepository.list_case_consistency_assessments(
+            owner_verify, TenantContext(organization_id=org_a_id), case_id=case_a_id
+        )
+        assert assess_total_a == 2
+        assert [a.assessment_sequence for a in assessments_a] == [2, 1]
     finally:
         owner_verify.close()
