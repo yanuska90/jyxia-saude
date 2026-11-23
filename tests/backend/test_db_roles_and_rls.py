@@ -1063,12 +1063,23 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
         source="authenticated_request",
     )
 
+    def _build_valid_empty_pdf(label: str) -> bytes:
+        note = label.encode("ascii", errors="ignore")
+        return (
+            b"%PDF-1.4\n% " + note + b"\n"
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+            b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n"
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>\nendobj\n"
+            b"xref\n0 4\n0000000000 65535 f \n"
+            b"trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n140\n%%EOF\n"
+        )
+
     run_ids_a: list[str] = []
     run_ids_b: list[str] = []
     app_db = app_factory()
     try:
         for i in range(3):
-            pdf = f"%PDF-1.4\n% orgA-doc-{i}\n%%EOF\n".encode("ascii")
+            pdf = _build_valid_empty_pdf(f"orgA-doc-{i}")
             ing = InstitutionalService.ingest_case_document(
                 app_db,
                 ctx_a,
@@ -1083,7 +1094,7 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             assert ing.initial_processing_run is not None
             run_ids_a.append(ing.initial_processing_run.id)
 
-            pdf_b = f"%PDF-1.4\n% orgB-doc-{i}\n%%EOF\n".encode("ascii")
+            pdf_b = _build_valid_empty_pdf(f"orgB-doc-{i}")
             ing_b = InstitutionalService.ingest_case_document(
                 app_db,
                 ctx_b,
@@ -1166,7 +1177,7 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             ctx_a,
             storage=pg_storage,
             case_id=case_a_id,
-            content=b"%PDF-1.4\n% lease-recovery-test\n%%EOF\n",
+            content=_build_valid_empty_pdf("lease-recovery-test"),
             mime_type="application/pdf",
             original_filename="lease-recovery.pdf",
             document_kind=DocumentKind.LAUDO,
