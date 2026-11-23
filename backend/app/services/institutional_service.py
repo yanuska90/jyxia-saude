@@ -123,6 +123,22 @@ class DocumentVersionContentResult:
     download_filename: str
 
 
+@dataclass(frozen=True, slots=True)
+class DocumentVersionExtractedFieldsResult:
+    document: Document
+    version: DocumentVersion
+    latest_extract_run: ProcessingRun | None
+    items: list[tuple[ExtractedField, ProcessingRun, list[EvidenceReference]]]
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentVersionEvidenceResult:
+    document: Document
+    version: DocumentVersion
+    latest_extract_run: ProcessingRun | None
+    items: list[tuple[EvidenceReference, ExtractedField, ProcessingRun]]
+
+
 def _verify_actor_membership(session: Session, ctx: TenantContext) -> None:
     if ctx.actor_user_id is None:
         return
@@ -899,7 +915,7 @@ class InstitutionalService:
             session,
             ctx,
             document_version_id=version.id,
-            step_type=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+            step_type=None,
         )
         if active is not None:
             raise ProcessingRunActiveConflictError(
@@ -1008,6 +1024,84 @@ class InstitutionalService:
             bbox_h=payload.bbox_h,
             quote_excerpt=payload.quote_excerpt,
             extraction_method=payload.extraction_method,
+        )
+
+    @staticmethod
+    def list_document_version_extracted_fields(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+        version_id: str,
+        processing_run_id: str | None = None,
+        latest_only: bool = False,
+    ) -> DocumentVersionExtractedFieldsResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        doc = CaseAndDocumentRepository.get_document(session, ctx, document_id)
+        if doc is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' was not found inside active organization."
+            )
+        version = CaseAndDocumentRepository.get_document_version_for_document(
+            session, ctx, document_id=doc.id, version_id=version_id
+        )
+        if version is None:
+            raise DocumentNotFoundError(
+                f"DocumentVersion '{version_id}' was not found for document '{document_id}'."
+            )
+        items, latest_run = ProcessingQueueRepository.list_document_version_extracted_fields(
+            session,
+            ctx,
+            document_version_id=version.id,
+            processing_run_id=processing_run_id,
+            latest_only=latest_only,
+        )
+        return DocumentVersionExtractedFieldsResult(
+            document=doc,
+            version=version,
+            latest_extract_run=latest_run,
+            items=items,
+        )
+
+    @staticmethod
+    def list_document_version_evidence(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+        version_id: str,
+        processing_run_id: str | None = None,
+        page_number: int | None = None,
+        field_key: str | None = None,
+        latest_only: bool = False,
+    ) -> DocumentVersionEvidenceResult:
+        _require_actor_permission(session, ctx, RbacPermission.DOCUMENT_READ)
+        doc = CaseAndDocumentRepository.get_document(session, ctx, document_id)
+        if doc is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' was not found inside active organization."
+            )
+        version = CaseAndDocumentRepository.get_document_version_for_document(
+            session, ctx, document_id=doc.id, version_id=version_id
+        )
+        if version is None:
+            raise DocumentNotFoundError(
+                f"DocumentVersion '{version_id}' was not found for document '{document_id}'."
+            )
+        items, latest_run = ProcessingQueueRepository.list_document_version_evidence_references(
+            session,
+            ctx,
+            document_version_id=version.id,
+            processing_run_id=processing_run_id,
+            page_number=page_number,
+            field_key=field_key,
+            latest_only=latest_only,
+        )
+        return DocumentVersionEvidenceResult(
+            document=doc,
+            version=version,
+            latest_extract_run=latest_run,
+            items=items,
         )
 
     @staticmethod

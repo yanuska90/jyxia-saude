@@ -121,6 +121,7 @@ class ProcessingStatus(StrEnum):
 
 class ProcessingStepType(StrEnum):
     VERIFY_OBJECT_INTEGRITY = "verify_object_integrity"
+    EXTRACT_PDF_TEXT = "extract_pdf_text"
 
 
 ACTIVE_PROCESSING_STATUSES: tuple[str, ...] = (
@@ -130,6 +131,7 @@ ACTIVE_PROCESSING_STATUSES: tuple[str, ...] = (
 )
 DEFAULT_PROCESSING_POLICY_VERSION = "3.3.2"
 DEFAULT_INTEGRITY_EXTRACTOR_VERSION = "integrity-verifier-3.3.2"
+DEFAULT_PDF_TEXT_EXTRACTOR_VERSION = "pdfminer-deterministic-3.3.3"
 DEFAULT_WORKER_ID = "jyxia-worker-1"
 DEFAULT_WORKER_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_WORKER_LEASE_SECONDS = 60
@@ -138,6 +140,26 @@ DEFAULT_PROCESSING_RETRY_BACKOFF_MIN_SECONDS = 2.0
 DEFAULT_PROCESSING_RETRY_BACKOFF_MAX_SECONDS = 60.0
 DEFAULT_PROCESSING_RETRY_JITTER_RATIO = 0.2
 DEFAULT_WORKER_MAX_JOBS_PER_CYCLE = 10
+DEFAULT_PDF_MAX_PAGES = 50
+DEFAULT_PDF_MAX_EXTRACTED_CHARS = 250_000
+DEFAULT_PDF_MAX_WORDS_PER_DOC = 50_000
+DEFAULT_PDF_MAX_BLOCKS_PER_PAGE = 1_000
+DEFAULT_PDF_EXTRACTION_TIMEOUT_SECONDS = 10.0
+DEFAULT_PDF_MAX_COMPLEXITY_OBJECTS = 20_000
+
+EXPLICIT_ALLOWLIST_FIELD_KEYS: tuple[str, ...] = (
+    "document_type",
+    "subfamily",
+    "patient",
+    "birth_date",
+    "identifier",
+    "issue_date",
+    "origin",
+    "procedure",
+    "procedure_code_system",
+    "procedure_code",
+    "laterality",
+)
 
 
 class ExtractedFieldStatus(StrEnum):

@@ -75,6 +75,14 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
 
+        # Incremental downgrade 0008 -> 0007
+        command.downgrade(cfg, "20261122_0007")
+        with engine.connect() as conn:
+            ver_0007 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert ver_0007 == "20261122_0007"
+            ef_uqs = {c["name"] for c in inspect(conn).get_unique_constraints("extracted_fields")}
+            assert "uq_extracted_fields_org_run_key" not in ef_uqs
+
         # Incremental downgrade 0007 -> 0006
         command.downgrade(cfg, "20261122_0006")
         with engine.connect() as conn:
@@ -237,11 +245,19 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
         finally:
             session_verify.close()
 
-        # Populate a queued ProcessingRun at head (0007), then verify downgrade 0007 -> 0006 -> 0007
+        # Populate queued verify_object_integrity + extract_pdf_text + ExtractedField/EvidenceReference at head (0008),
+        # then verify downgrade 0008 -> 0007 -> 0006 -> 0008
         session_run = factory()
         try:
-            from app.core.constants import DocumentKind, ProcessingStatus
-            from app.models.entities import Document, DocumentCase, DocumentVersion, ProcessingRun
+            from app.core.constants import DocumentKind, ExtractedFieldStatus, ProcessingStatus
+            from app.models.entities import (
+                Document,
+                DocumentCase,
+                DocumentVersion,
+                EvidenceReference,
+                ExtractedField,
+                ProcessingRun,
+            )
 
             case_mig = DocumentCase(
                 organization_id=org.id,
@@ -280,11 +296,64 @@ def test_populated_db_upgrade_0003_to_0004_and_enum_check_constraint_parity(
                 status=ProcessingStatus.QUEUED.value,
                 started_at=None,
             )
-            session_run.add(queued_run)
+            extract_run = ProcessingRun(
+                organization_id=org.id,
+                document_version_id=ver_mig.id,
+                step_type="extract_pdf_text",
+                policy_version="3.3.2",
+                extractor_version="pdfminer-deterministic-3.3.3",
+                status=ProcessingStatus.SUCCEEDED.value,
+                readable=True,
+            )
+            session_run.add_all([queued_run, extract_run])
+            session_run.flush()
+            field_mig = ExtractedField(
+                organization_id=org.id,
+                processing_run_id=extract_run.id,
+                document_version_id=ver_mig.id,
+                field_key="patient",
+                raw_value="Pessoa Mig",
+                normalized_value="Pessoa Mig",
+                status=ExtractedFieldStatus.EXTRACTED.value,
+                abstained=False,
+            )
+            session_run.add(field_mig)
+            session_run.flush()
+            ev_mig = EvidenceReference(
+                organization_id=org.id,
+                extracted_field_id=field_mig.id,
+                document_version_id=ver_mig.id,
+                page_number=1,
+                bbox_x=0.1,
+                bbox_y=0.2,
+                bbox_w=0.3,
+                bbox_h=0.05,
+                quote_excerpt="Paciente: Pessoa Mig",
+                extraction_method="pdf_text_geometry_pdfminer",
+            )
+            session_run.add(ev_mig)
             session_run.commit()
             queued_run_id = queued_run.id
+            extract_run_id = extract_run.id
+            field_mig_id = field_mig.id
         finally:
             session_run.close()
+
+        command.downgrade(cfg, "20261122_0007")
+        session_0007 = factory()
+        try:
+            remapped_step = session_0007.execute(
+                text("SELECT step_type FROM processing_runs WHERE id = :id"),
+                {"id": extract_run_id},
+            ).scalar()
+            assert remapped_step == "verify_object_integrity"
+            preserved_field = session_0007.execute(
+                text("SELECT field_key FROM extracted_fields WHERE id = :id"),
+                {"id": field_mig_id},
+            ).scalar()
+            assert preserved_field == "patient"
+        finally:
+            session_0007.close()
 
         command.downgrade(cfg, "20261122_0006")
         session_down = factory()
@@ -371,6 +440,7 @@ def test_postgresql_dialect_ddl_compiles_for_all_hardened_tables() -> None:
     assert "fk_document_cases_org_creator" in compiled_tables["document_cases"]
     assert "fk_doc_versions_org_doc_supersede" in compiled_tables["document_versions"]
     assert "fk_extracted_fields_org_ver_run" in compiled_tables["extracted_fields"]
+    assert "uq_extracted_fields_org_run_key" in compiled_tables["extracted_fields"]
     assert "fk_evidence_refs_org_ver_field" in compiled_tables["evidence_references"]
     assert "bbox_x_w_within_page" in compiled_tables["evidence_references"]
     assert "fk_human_reviews_org_reviewer" in compiled_tables["human_reviews"]

@@ -36,6 +36,8 @@ def test_app_initialization_exposes_health_auth_and_org_routes(tmp_path: Path) -
         "/api/v1/organizations/{organization_id}/cases/{case_id}/processing-runs",
         "/api/v1/organizations/{organization_id}/documents/{document_id}",
         "/api/v1/organizations/{organization_id}/documents/{document_id}/versions/{version_id}/content",
+        "/api/v1/organizations/{organization_id}/documents/{document_id}/versions/{version_id}/evidence",
+        "/api/v1/organizations/{organization_id}/documents/{document_id}/versions/{version_id}/extracted-fields",
         "/api/v1/organizations/{organization_id}/documents/{document_id}/versions/{version_id}/reprocess",
         "/api/v1/organizations/{organization_id}/processing-runs/{processing_run_id}",
         "/api/v1/organizations/{organization_id}/members",

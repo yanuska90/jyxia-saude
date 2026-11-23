@@ -895,6 +895,8 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             "documents",
             "document_versions",
             "processing_runs",
+            "extracted_fields",
+            "evidence_references",
             "audit_events",
             "security_auth_events",
         ):
@@ -904,6 +906,14 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
 
         with pytest.raises(Exception):
             w_check.execute(text("DELETE FROM processing_runs"))
+        w_check.rollback()
+        with pytest.raises(Exception):
+            w_check.execute(
+                text(
+                    "INSERT INTO extracted_fields (id, organization_id, processing_run_id, document_version_id, field_key, status, abstained) "
+                    "VALUES ('f1', 'o1', 'r1', 'v1', 'patient', 'extracted', false)"
+                )
+            )
         w_check.rollback()
     finally:
         w_check.close()
@@ -919,6 +929,23 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
                 text(
                     "SELECT * FROM public.jyxia_worker_claim_next_run("
                     "'spoof-worker', repeat('a', 64), 30, 'verify_object_integrity')"
+                )
+            )
+        app_check.rollback()
+        with pytest.raises(Exception):
+            app_check.execute(
+                text(
+                    "SELECT * FROM public.jyxia_worker_prepare_completion_context("
+                    "'nonexistent', 'spoof-worker', repeat('a', 64))"
+                )
+            )
+        app_check.rollback()
+        with pytest.raises(Exception):
+            app_check.execute(
+                text(
+                    "SELECT public.jyxia_worker_complete_extraction_run("
+                    "'nonexistent', 'spoof-worker', repeat('a', 64), true, '{}', '[]', "
+                    "'aid', 1, 'processing_run.succeeded', '{}', repeat('0', 64), repeat('b', 64), now())"
                 )
             )
         app_check.rollback()
@@ -1073,33 +1100,45 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
     finally:
         app_db.close()
 
-    # 4. Concurrent FOR UPDATE SKIP LOCKED processing across two PG jyxia_worker consumers
+    # 4. Concurrent FOR UPDATE SKIP LOCKED processing across two PG jyxia_worker consumers (6 integrity + 6 extract)
     w1 = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-worker-1")
     w2 = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-worker-2")
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fut1 = pool.submit(w1.process_one_cycle, max_jobs=6)
-        fut2 = pool.submit(w2.process_one_cycle, max_jobs=6)
+        fut1 = pool.submit(w1.process_one_cycle, max_jobs=12)
+        fut2 = pool.submit(w2.process_one_cycle, max_jobs=12)
         s1 = fut1.result()
         s2 = fut2.result()
 
-    assert s1.claimed + s2.claimed == 6
-    assert s1.succeeded + s2.succeeded == 6
+    assert s1.claimed + s2.claimed == 12
+    assert s1.succeeded + s2.succeeded == 12
     assert s1.failed == 0 and s2.failed == 0
     assert s1.lease_lost == 0 and s2.lease_lost == 0
 
     app_verify = app_factory()
     try:
         runs_a, total_a = ProcessingQueueRepository.list_case_runs(
-            app_verify, ctx_a, case_id=case_a_id, limit=10
+            app_verify, ctx_a, case_id=case_a_id, limit=20
         )
-        assert total_a == 3
-        for run_row, _doc_id, _c_id in runs_a:
+        assert total_a == 6
+        integrity_runs_a = [r for r, _, _ in runs_a if r.step_type == "verify_object_integrity"]
+        extract_runs_a = [r for r, _, _ in runs_a if r.step_type == "extract_pdf_text"]
+        assert len(integrity_runs_a) == 3
+        assert len(extract_runs_a) == 3
+        for run_row in integrity_runs_a:
             assert run_row.status == ProcessingStatus.SUCCEEDED.value
             assert run_row.attempt_count == 1
             assert run_row.readable is False
             assert run_row.readiness_state is None
             assert run_row.result_json is not None
             assert run_row.result_json["sha256_verified"] is True
+            assert run_row.result_json["clinical_approval"] is False
+            assert run_row.result_json["administrative_only"] is True
+        for run_row in extract_runs_a:
+            assert run_row.status == ProcessingStatus.SUCCEEDED.value
+            assert run_row.attempt_count == 1
+            assert run_row.readiness_state is None
+            assert run_row.result_json is not None
+            assert run_row.result_json["outcome"] == "abstained"
             assert run_row.result_json["clinical_approval"] is False
             assert run_row.result_json["administrative_only"] is True
 
@@ -1179,14 +1218,15 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
     finally:
         w_stale_sess.close()
 
-    # Healthy worker reclaims expired lease and completes run on attempt_count == 2
+    # Healthy worker reclaims expired lease, completes verify_object_integrity (attempt 2),
+    # chains extract_pdf_text atomically, and completes extraction cleanly.
     recovery_worker = ProcessingWorker(
         worker_factory, pg_storage, settings, worker_id="pg-recovery-worker"
     )
     rec_stats = recovery_worker.process_one_cycle(max_jobs=5)
     assert rec_stats.reclaimed_leases == 1
-    assert rec_stats.claimed == 1
-    assert rec_stats.succeeded == 1
+    assert rec_stats.claimed == 2
+    assert rec_stats.succeeded == 2
 
     owner_verify = owner_factory()
     try:

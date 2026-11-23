@@ -313,3 +313,91 @@ class DocumentDetailResponse(BaseModel):
     updated_at: datetime
     current_version: DocumentVersionSummaryResponse | None = None
     versions: list[DocumentVersionSummaryResponse]
+
+
+class EvidenceReferenceSummaryResponse(BaseModel):
+    """Sanitized spatial evidence reference anchored to page geometry and source run."""
+
+    model_config = ConfigDict(frozen=True)
+
+    evidence_reference_id: str
+    organization_id: str
+    extracted_field_id: str
+    field_key: str
+    document_id: str
+    document_version_id: str
+    source_sha256_hex: str
+    processing_run_id: str
+    extractor_version: str
+    policy_version: str
+    page_number: int
+    bbox: list[float]
+    bbox_x: float
+    bbox_y: float
+    bbox_w: float
+    bbox_h: float
+    quote_excerpt: str | None = None
+    extraction_method: str
+    created_at: datetime
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class ExtractedFieldItemResponse(BaseModel):
+    """Canonical extracted field preserving raw value, conservative normalization and origins."""
+
+    model_config = ConfigDict(frozen=True)
+
+    extracted_field_id: str
+    organization_id: str
+    document_id: str
+    document_version_id: str
+    source_sha256_hex: str
+    processing_run_id: str
+    extractor_version: str
+    policy_version: str
+    field_key: str
+    raw_value: str | None = None
+    normalized_value: str | None = None
+    status: str
+    abstained: bool
+    metadata_json: dict[str, Any] | None = None
+    evidences: list[EvidenceReferenceSummaryResponse]
+    created_at: datetime
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class ExtractedFieldsListResponse(BaseModel):
+    """Collection of explicit extracted fields for a specific DocumentVersion."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    document_id: str
+    document_version_id: str
+    source_sha256_hex: str
+    total: int
+    latest_processing_run_id: str | None = None
+    latest_extractor_version: str | None = None
+    latest_outcome: str | None = None
+    extracted_fields: list[ExtractedFieldItemResponse]
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class EvidenceReferencesListResponse(BaseModel):
+    """Collection of spatial evidence references for a specific DocumentVersion."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    document_id: str
+    document_version_id: str
+    source_sha256_hex: str
+    total: int
+    latest_processing_run_id: str | None = None
+    latest_extractor_version: str | None = None
+    evidence_references: list[EvidenceReferenceSummaryResponse]
+    administrative_only: bool = True
+    clinical_approval: bool = False

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.constants import (
     ACTIVE_PROCESSING_STATUSES,
     DEFAULT_INTEGRITY_EXTRACTOR_VERSION,
+    DEFAULT_PDF_TEXT_EXTRACTOR_VERSION,
     DEFAULT_PROCESSING_MAX_ATTEMPTS,
     DEFAULT_PROCESSING_POLICY_VERSION,
     MembershipStatus,
@@ -1109,19 +1110,174 @@ class ProcessingQueueRepository:
         ctx: TenantContext,
         *,
         document_version_id: str,
-        step_type: str = ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+        step_type: str | None = ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
     ) -> ProcessingRun | None:
         apply_pg_rls_context(
             session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
         )
-        return session.scalar(
-            select(ProcessingRun).where(
+        filters = [
+            ProcessingRun.organization_id == ctx.organization_id,
+            ProcessingRun.document_version_id == document_version_id,
+            ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
+        ]
+        if step_type is not None:
+            filters.append(ProcessingRun.step_type == step_type)
+        return session.scalar(select(ProcessingRun).where(*filters).limit(1))
+
+    @staticmethod
+    def has_succeeded_step_for_version(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_version_id: str,
+        step_type: str,
+    ) -> bool:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        row_id = session.scalar(
+            select(ProcessingRun.id)
+            .where(
                 ProcessingRun.organization_id == ctx.organization_id,
                 ProcessingRun.document_version_id == document_version_id,
                 ProcessingRun.step_type == step_type,
-                ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
+                ProcessingRun.status == ProcessingStatus.SUCCEEDED.value,
+            )
+            .limit(1)
+        )
+        return row_id is not None
+
+    @staticmethod
+    def list_document_version_extracted_fields(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_version_id: str,
+        processing_run_id: str | None = None,
+        latest_only: bool = False,
+    ) -> tuple[list[tuple[ExtractedField, ProcessingRun, list[EvidenceReference]]], ProcessingRun | None]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        latest_extract_run = session.scalar(
+            select(ProcessingRun)
+            .where(
+                ProcessingRun.organization_id == ctx.organization_id,
+                ProcessingRun.document_version_id == document_version_id,
+                ProcessingRun.step_type == ProcessingStepType.EXTRACT_PDF_TEXT.value,
+            )
+            .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+            .limit(1)
+        )
+        filters = [
+            ExtractedField.organization_id == ctx.organization_id,
+            ExtractedField.document_version_id == document_version_id,
+            ProcessingRun.organization_id == ctx.organization_id,
+        ]
+        if processing_run_id is not None:
+            filters.append(ExtractedField.processing_run_id == processing_run_id)
+        elif latest_only:
+            if latest_extract_run is None:
+                return [], None
+            filters.append(ExtractedField.processing_run_id == latest_extract_run.id)
+
+        rows = session.execute(
+            select(ExtractedField, ProcessingRun)
+            .join(ProcessingRun, ProcessingRun.id == ExtractedField.processing_run_id)
+            .where(*filters)
+            .order_by(
+                ProcessingRun.created_at.desc(),
+                ExtractedField.created_at.asc(),
+                ExtractedField.field_key.asc(),
+            )
+        ).all()
+        if not rows:
+            return [], latest_extract_run
+
+        field_ids = [row[0].id for row in rows]
+        ev_rows = list(
+            session.scalars(
+                select(EvidenceReference)
+                .where(
+                    EvidenceReference.organization_id == ctx.organization_id,
+                    EvidenceReference.document_version_id == document_version_id,
+                    EvidenceReference.extracted_field_id.in_(field_ids),
+                )
+                .order_by(
+                    EvidenceReference.page_number.asc(),
+                    EvidenceReference.bbox_y.asc(),
+                    EvidenceReference.bbox_x.asc(),
+                    EvidenceReference.created_at.asc(),
+                )
             )
         )
+        ev_by_field: dict[str, list[EvidenceReference]] = defaultdict(list)
+        for ev in ev_rows:
+            ev_by_field[ev.extracted_field_id].append(ev)
+
+        return (
+            [(row[0], row[1], ev_by_field.get(row[0].id, [])) for row in rows],
+            latest_extract_run,
+        )
+
+    @staticmethod
+    def list_document_version_evidence_references(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_version_id: str,
+        processing_run_id: str | None = None,
+        page_number: int | None = None,
+        field_key: str | None = None,
+        latest_only: bool = False,
+    ) -> tuple[
+        list[tuple[EvidenceReference, ExtractedField, ProcessingRun]],
+        ProcessingRun | None,
+    ]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        latest_extract_run = session.scalar(
+            select(ProcessingRun)
+            .where(
+                ProcessingRun.organization_id == ctx.organization_id,
+                ProcessingRun.document_version_id == document_version_id,
+                ProcessingRun.step_type == ProcessingStepType.EXTRACT_PDF_TEXT.value,
+            )
+            .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+            .limit(1)
+        )
+        filters = [
+            EvidenceReference.organization_id == ctx.organization_id,
+            EvidenceReference.document_version_id == document_version_id,
+            ExtractedField.organization_id == ctx.organization_id,
+            ProcessingRun.organization_id == ctx.organization_id,
+        ]
+        if processing_run_id is not None:
+            filters.append(ProcessingRun.id == processing_run_id)
+        elif latest_only:
+            if latest_extract_run is None:
+                return [], None
+            filters.append(ProcessingRun.id == latest_extract_run.id)
+        if page_number is not None:
+            filters.append(EvidenceReference.page_number == page_number)
+        if field_key is not None:
+            filters.append(ExtractedField.field_key == field_key)
+
+        rows = session.execute(
+            select(EvidenceReference, ExtractedField, ProcessingRun)
+            .join(ExtractedField, ExtractedField.id == EvidenceReference.extracted_field_id)
+            .join(ProcessingRun, ProcessingRun.id == ExtractedField.processing_run_id)
+            .where(*filters)
+            .order_by(
+                ProcessingRun.created_at.desc(),
+                EvidenceReference.page_number.asc(),
+                EvidenceReference.bbox_y.asc(),
+                EvidenceReference.bbox_x.asc(),
+                EvidenceReference.created_at.asc(),
+            )
+        ).all()
+        return [(row[0], row[1], row[2]) for row in rows], latest_extract_run
 
     @staticmethod
     def get_latest_run_for_version(
@@ -1245,9 +1401,17 @@ class ProcessingQueueRepository:
         worker_id: str,
         lease_token_hash: str,
         lease_seconds: int,
-        step_type: str = ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+        step_type: str | None = "any",
     ) -> ClaimedProcessingRunRecord | None:
         from datetime import timedelta
+
+        requested_step = (step_type or "any").strip() or "any"
+        allowed_steps = (
+            ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+            ProcessingStepType.EXTRACT_PDF_TEXT.value,
+        )
+        if requested_step != "any" and requested_step not in allowed_steps:
+            raise ValueError(f"Unsupported worker claim step_type: {requested_step}")
 
         if _is_pg_session(session):
             row = (
@@ -1260,7 +1424,7 @@ class ProcessingQueueRepository:
                         "p_worker_id": worker_id,
                         "p_lease_token_hash": lease_token_hash,
                         "p_lease_seconds": lease_seconds,
-                        "p_step_type": step_type,
+                        "p_step_type": requested_step,
                     },
                 )
                 .mappings()
@@ -1284,6 +1448,8 @@ class ProcessingQueueRepository:
                         "document_id": str(row["document_id"]),
                         "document_version_id": str(row["document_version_id"]),
                         "step_type": str(row["step_type"]),
+                        "extractor_version": str(row["extractor_version"]),
+                        "policy_version": str(row["policy_version"]),
                         "attempt_count": int(row["attempt_count"]),
                         "max_attempts": int(row["max_attempts"]),
                         "worker_id": worker_id,
@@ -1341,6 +1507,11 @@ class ProcessingQueueRepository:
         lock_cm = _sqlite_lock_for(ProcessingQueueRepository._WORKER_QUEUE_LOCK_KEY)
         with lock_cm:
             now = utc_now()
+            step_filter = (
+                ProcessingRun.step_type.in_(allowed_steps)
+                if requested_step == "any"
+                else ProcessingRun.step_type == requested_step
+            )
             candidates = list(
                 session.scalars(
                     select(ProcessingRun)
@@ -1349,7 +1520,7 @@ class ProcessingQueueRepository:
                         ProcessingRun.status.in_(
                             (ProcessingStatus.QUEUED.value, ProcessingStatus.RETRY_WAIT.value)
                         ),
-                        ProcessingRun.step_type == step_type,
+                        step_filter,
                         Organization.status == "active",
                     )
                     .order_by(ProcessingRun.available_at.asc(), ProcessingRun.created_at.asc())
@@ -1358,6 +1529,20 @@ class ProcessingQueueRepository:
             chosen: ProcessingRun | None = None
             for cand in candidates:
                 if _as_utc(cand.available_at) <= now and cand.attempt_count < cand.max_attempts:
+                    if cand.step_type == ProcessingStepType.EXTRACT_PDF_TEXT.value:
+                        integrity_ok = session.scalar(
+                            select(ProcessingRun.id)
+                            .where(
+                                ProcessingRun.organization_id == cand.organization_id,
+                                ProcessingRun.document_version_id == cand.document_version_id,
+                                ProcessingRun.step_type
+                                == ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                                ProcessingRun.status == ProcessingStatus.SUCCEEDED.value,
+                            )
+                            .limit(1)
+                        )
+                        if integrity_ok is None:
+                            continue
                     chosen = cand
                     break
             if chosen is None:
@@ -1403,6 +1588,8 @@ class ProcessingQueueRepository:
                     "document_id": ver.document_id,
                     "document_version_id": ver.id,
                     "step_type": chosen.step_type,
+                    "extractor_version": chosen.extractor_version,
+                    "policy_version": chosen.policy_version,
                     "attempt_count": chosen.attempt_count,
                     "max_attempts": chosen.max_attempts,
                     "worker_id": worker_id,
@@ -1445,14 +1632,15 @@ class ProcessingQueueRepository:
         worker_id: str,
         lease_token_hash: str,
         result_json: dict[str, Any],
-    ) -> None:
+        chain_extract_extractor_version: str | None = DEFAULT_PDF_TEXT_EXTRACTOR_VERSION,
+    ) -> str | None:
         safe_result = assert_safe_audit_payload(result_json)
         if _is_pg_session(session):
             try:
-                head = (
+                ctx_row = (
                     session.execute(
                         text(
-                            "SELECT * FROM public.jyxia_worker_prepare_run_audit_head("
+                            "SELECT * FROM public.jyxia_worker_prepare_completion_context("
                             ":p_run_id, :p_worker_id, :p_lease_token_hash)"
                         ),
                         {
@@ -1472,10 +1660,10 @@ class ProcessingQueueRepository:
 
             audit_id, next_seq, prev_hash, event_hash, created_at, safe_payload = (
                 ProcessingQueueRepository._build_worker_audit_metadata(
-                    organization_id=str(head["organization_id"]),
+                    organization_id=str(ctx_row["organization_id"]),
                     run_id=run_id,
-                    last_sequence=int(head["last_sequence"]),
-                    last_event_hash=str(head["last_event_hash"]),
+                    last_sequence=int(ctx_row["last_sequence"]),
+                    last_event_hash=str(ctx_row["last_event_hash"]),
                     event_type="processing_run.succeeded",
                     payload_json={
                         "operation": "processing_run_succeeded",
@@ -1487,6 +1675,81 @@ class ProcessingQueueRepository:
                     },
                 )
             )
+
+            should_chain = (
+                str(ctx_row["step_type"]) == ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value
+                and chain_extract_extractor_version is not None
+                and not bool(ctx_row["has_active_extract_run"])
+            )
+            chained_run_id: str | None = new_uuid() if should_chain else None
+            if should_chain and chained_run_id is not None:
+                chain_idemp = f"chain:{run_id}:extract_pdf_text"[:128]
+                chain_audit_id, chain_seq, chain_prev, chain_hash, chain_ts, chain_payload = (
+                    ProcessingQueueRepository._build_worker_audit_metadata(
+                        organization_id=str(ctx_row["organization_id"]),
+                        run_id=chained_run_id,
+                        last_sequence=next_seq,
+                        last_event_hash=event_hash,
+                        event_type="processing_run.queued",
+                        payload_json={
+                            "operation": "processing_run_queued",
+                            "case_id": ctx_row["case_id"],
+                            "document_id": str(ctx_row["document_id"]),
+                            "document_version_id": str(ctx_row["document_version_id"]),
+                            "processing_run_id": chained_run_id,
+                            "parent_processing_run_id": run_id,
+                            "step_type": ProcessingStepType.EXTRACT_PDF_TEXT.value,
+                            "status": ProcessingStatus.QUEUED.value,
+                            "policy_version": str(ctx_row["policy_version"]),
+                            "extractor_version": chain_extract_extractor_version,
+                            "max_attempts": int(ctx_row["max_attempts"]),
+                            "administrative_only": True,
+                            "clinical_approval": False,
+                        },
+                    )
+                )
+                try:
+                    session.execute(
+                        text(
+                            "SELECT public.jyxia_worker_complete_integrity_and_chain_extract("
+                            ":p_run_id, :p_worker_id, :p_lease_token_hash, :p_result_json, "
+                            ":p_audit_id, :p_audit_sequence_number, :p_audit_payload_json, "
+                            ":p_audit_prev_event_hash, :p_audit_event_hash, :p_audit_created_at, "
+                            ":p_chain_run_id, :p_chain_extractor_version, :p_chain_idempotency_key, "
+                            ":p_chain_audit_id, :p_chain_audit_sequence_number, "
+                            ":p_chain_audit_payload_json, :p_chain_audit_prev_event_hash, "
+                            ":p_chain_audit_event_hash, :p_chain_audit_created_at)"
+                        ),
+                        {
+                            "p_run_id": run_id,
+                            "p_worker_id": worker_id,
+                            "p_lease_token_hash": lease_token_hash,
+                            "p_result_json": json.dumps(safe_result, ensure_ascii=True),
+                            "p_audit_id": audit_id,
+                            "p_audit_sequence_number": next_seq,
+                            "p_audit_payload_json": json.dumps(safe_payload, ensure_ascii=True),
+                            "p_audit_prev_event_hash": prev_hash,
+                            "p_audit_event_hash": event_hash,
+                            "p_audit_created_at": created_at,
+                            "p_chain_run_id": chained_run_id,
+                            "p_chain_extractor_version": chain_extract_extractor_version,
+                            "p_chain_idempotency_key": chain_idemp,
+                            "p_chain_audit_id": chain_audit_id,
+                            "p_chain_audit_sequence_number": chain_seq,
+                            "p_chain_audit_payload_json": json.dumps(chain_payload, ensure_ascii=True),
+                            "p_chain_audit_prev_event_hash": chain_prev,
+                            "p_chain_audit_event_hash": chain_hash,
+                            "p_chain_audit_created_at": chain_ts,
+                        },
+                    )
+                except Exception as exc:
+                    session.rollback()
+                    if "lease invalid or expired" in str(exc).lower():
+                        raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                    raise
+                session.commit()
+                return chained_run_id
+
             try:
                 session.execute(
                     text(
@@ -1514,7 +1777,7 @@ class ProcessingQueueRepository:
                     raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
                 raise
             session.commit()
-            return
+            return None
 
         lock_cm = _sqlite_lock_for(ProcessingQueueRepository._WORKER_QUEUE_LOCK_KEY)
         with lock_cm:
@@ -1556,6 +1819,304 @@ class ProcessingQueueRepository:
                 target_entity_id=run.id,
                 payload_json={
                     "operation": "processing_run_succeeded",
+                    "processing_run_id": run.id,
+                    "worker_id": worker_id,
+                    **safe_result,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
+
+            chained_run_id = None
+            if (
+                run.step_type == ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value
+                and chain_extract_extractor_version is not None
+            ):
+                existing_active_extract = session.scalar(
+                    select(ProcessingRun.id)
+                    .where(
+                        ProcessingRun.organization_id == run.organization_id,
+                        ProcessingRun.document_version_id == run.document_version_id,
+                        ProcessingRun.step_type == ProcessingStepType.EXTRACT_PDF_TEXT.value,
+                        ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
+                    )
+                    .limit(1)
+                )
+                if existing_active_extract is None:
+                    doc_row = session.execute(
+                        select(DocumentVersion.document_id, Document.case_id)
+                        .join(Document, Document.id == DocumentVersion.document_id)
+                        .where(
+                            DocumentVersion.id == run.document_version_id,
+                            DocumentVersion.organization_id == run.organization_id,
+                        )
+                    ).first()
+                    chained_run = ProcessingRun(
+                        organization_id=run.organization_id,
+                        document_version_id=run.document_version_id,
+                        step_type=ProcessingStepType.EXTRACT_PDF_TEXT.value,
+                        triggered_by_user_id=run.triggered_by_user_id,
+                        policy_version=run.policy_version,
+                        extractor_version=chain_extract_extractor_version,
+                        idempotency_key=f"chain:{run.id}:extract_pdf_text"[:128],
+                        status=ProcessingStatus.QUEUED.value,
+                        attempt_count=0,
+                        max_attempts=run.max_attempts,
+                        available_at=now,
+                        readable=False,
+                        readiness_state=None,
+                        started_at=None,
+                        finished_at=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(chained_run)
+                    session.flush()
+                    chained_run_id = chained_run.id
+
+                    AuditEventRepository.append_event(
+                        session,
+                        TenantContext(
+                            organization_id=run.organization_id,
+                            actor_user_id=None,
+                            source="worker",
+                        ),
+                        event_type="processing_run.queued",
+                        target_entity_type="processing_run",
+                        target_entity_id=chained_run.id,
+                        payload_json={
+                            "operation": "processing_run_queued",
+                            "case_id": doc_row[1] if doc_row else None,
+                            "document_id": str(doc_row[0]) if doc_row else None,
+                            "document_version_id": run.document_version_id,
+                            "processing_run_id": chained_run.id,
+                            "parent_processing_run_id": run.id,
+                            "step_type": chained_run.step_type,
+                            "status": chained_run.status,
+                            "policy_version": chained_run.policy_version,
+                            "extractor_version": chained_run.extractor_version,
+                            "max_attempts": chained_run.max_attempts,
+                            "administrative_only": True,
+                            "clinical_approval": False,
+                        },
+                    )
+
+            session.commit()
+            return chained_run_id
+
+    @staticmethod
+    def complete_extraction_run(
+        session: Session,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_token_hash: str,
+        readable: bool,
+        result_json: dict[str, Any],
+        extracted_fields: list[dict[str, Any]],
+        audit_event_type: str,
+    ) -> None:
+        """Atomically persist ExtractedField, EvidenceReference, ProcessingRun completion and AuditEvent."""
+        if audit_event_type not in ("processing_run.succeeded", "processing_run.abstained"):
+            raise ValueError(f"Unsupported extraction audit_event_type: {audit_event_type}")
+
+        safe_result = assert_safe_audit_payload(result_json)
+        prepared_fields: list[dict[str, Any]] = []
+        for field_item in extracted_fields:
+            field_id = new_uuid()
+            prepared_evs: list[dict[str, Any]] = []
+            for ev in field_item.get("evidences", ()):
+                prepared_evs.append(
+                    {
+                        "id": new_uuid(),
+                        "page_number": int(ev["page_number"]),
+                        "bbox_x": float(ev["bbox_x"]),
+                        "bbox_y": float(ev["bbox_y"]),
+                        "bbox_w": float(ev["bbox_w"]),
+                        "bbox_h": float(ev["bbox_h"]),
+                        "quote_excerpt": ev.get("quote_excerpt"),
+                        "extraction_method": str(ev["extraction_method"]),
+                    }
+                )
+            prepared_fields.append(
+                {
+                    "id": field_id,
+                    "field_key": str(field_item["field_key"]),
+                    "raw_value": field_item.get("raw_value"),
+                    "normalized_value": field_item.get("normalized_value"),
+                    "status": str(field_item["status"]),
+                    "abstained": bool(field_item["abstained"]),
+                    "metadata_json": field_item.get("metadata_json"),
+                    "evidences": prepared_evs,
+                }
+            )
+
+        if _is_pg_session(session):
+            try:
+                head = (
+                    session.execute(
+                        text(
+                            "SELECT * FROM public.jyxia_worker_prepare_run_audit_head("
+                            ":p_run_id, :p_worker_id, :p_lease_token_hash)"
+                        ),
+                        {
+                            "p_run_id": run_id,
+                            "p_worker_id": worker_id,
+                            "p_lease_token_hash": lease_token_hash,
+                        },
+                    )
+                    .mappings()
+                    .one()
+                )
+            except Exception as exc:
+                session.rollback()
+                if "lease invalid or expired" in str(exc).lower():
+                    raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                raise
+
+            audit_id, next_seq, prev_hash, event_hash, created_at, safe_payload = (
+                ProcessingQueueRepository._build_worker_audit_metadata(
+                    organization_id=str(head["organization_id"]),
+                    run_id=run_id,
+                    last_sequence=int(head["last_sequence"]),
+                    last_event_hash=str(head["last_event_hash"]),
+                    event_type=audit_event_type,
+                    payload_json={
+                        "operation": audit_event_type.replace(".", "_"),
+                        "processing_run_id": run_id,
+                        "worker_id": worker_id,
+                        **safe_result,
+                        "administrative_only": True,
+                        "clinical_approval": False,
+                    },
+                )
+            )
+            try:
+                session.execute(
+                    text(
+                        "SELECT public.jyxia_worker_complete_extraction_run("
+                        ":p_run_id, :p_worker_id, :p_lease_token_hash, :p_readable, "
+                        ":p_result_json, :p_fields_json, :p_audit_id, "
+                        ":p_audit_sequence_number, :p_audit_event_type, "
+                        ":p_audit_payload_json, :p_audit_prev_event_hash, "
+                        ":p_audit_event_hash, :p_audit_created_at)"
+                    ),
+                    {
+                        "p_run_id": run_id,
+                        "p_worker_id": worker_id,
+                        "p_lease_token_hash": lease_token_hash,
+                        "p_readable": bool(readable),
+                        "p_result_json": json.dumps(safe_result, ensure_ascii=True),
+                        "p_fields_json": json.dumps(prepared_fields, ensure_ascii=True),
+                        "p_audit_id": audit_id,
+                        "p_audit_sequence_number": next_seq,
+                        "p_audit_event_type": audit_event_type,
+                        "p_audit_payload_json": json.dumps(safe_payload, ensure_ascii=True),
+                        "p_audit_prev_event_hash": prev_hash,
+                        "p_audit_event_hash": event_hash,
+                        "p_audit_created_at": created_at,
+                    },
+                )
+            except Exception as exc:
+                session.rollback()
+                if "lease invalid or expired" in str(exc).lower():
+                    raise LeaseOwnershipError("Worker lease is invalid or expired.") from exc
+                raise
+            session.commit()
+            return
+
+        lock_cm = _sqlite_lock_for(ProcessingQueueRepository._WORKER_QUEUE_LOCK_KEY)
+        with lock_cm:
+            now = utc_now()
+            run = session.scalar(select(ProcessingRun).where(ProcessingRun.id == run_id))
+            if (
+                run is None
+                or run.status != ProcessingStatus.RUNNING.value
+                or run.worker_id != worker_id
+                or run.lease_token_hash != lease_token_hash
+                or run.lease_expires_at is None
+                or _as_utc(run.lease_expires_at) < now
+            ):
+                session.rollback()
+                raise LeaseOwnershipError("Worker lease is invalid or expired.")
+            if run.step_type != ProcessingStepType.EXTRACT_PDF_TEXT.value:
+                session.rollback()
+                raise ValueError("complete_extraction_run requires extract_pdf_text step_type.")
+
+            integrity_ok = session.scalar(
+                select(ProcessingRun.id)
+                .where(
+                    ProcessingRun.organization_id == run.organization_id,
+                    ProcessingRun.document_version_id == run.document_version_id,
+                    ProcessingRun.step_type == ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+                    ProcessingRun.status == ProcessingStatus.SUCCEEDED.value,
+                )
+                .limit(1)
+            )
+            if integrity_ok is None:
+                session.rollback()
+                raise LeaseOwnershipError(
+                    "Extraction prerequisite verify_object_integrity has not succeeded."
+                )
+
+            for f_item in prepared_fields:
+                field_row = ExtractedField(
+                    id=f_item["id"],
+                    organization_id=run.organization_id,
+                    processing_run_id=run.id,
+                    document_version_id=run.document_version_id,
+                    field_key=f_item["field_key"],
+                    raw_value=f_item["raw_value"],
+                    normalized_value=f_item["normalized_value"],
+                    status=f_item["status"],
+                    abstained=f_item["abstained"],
+                    metadata_json=f_item["metadata_json"],
+                    created_at=now,
+                )
+                session.add(field_row)
+                session.flush()
+                for ev in f_item["evidences"]:
+                    ev_row = EvidenceReference(
+                        id=ev["id"],
+                        organization_id=run.organization_id,
+                        extracted_field_id=field_row.id,
+                        document_version_id=run.document_version_id,
+                        page_number=ev["page_number"],
+                        bbox_x=ev["bbox_x"],
+                        bbox_y=ev["bbox_y"],
+                        bbox_w=ev["bbox_w"],
+                        bbox_h=ev["bbox_h"],
+                        quote_excerpt=ev["quote_excerpt"],
+                        extraction_method=ev["extraction_method"],
+                        created_at=now,
+                    )
+                    session.add(ev_row)
+
+            run.status = ProcessingStatus.SUCCEEDED.value
+            run.lease_expires_at = None
+            run.lease_token_hash = None
+            run.last_error_code = None
+            run.last_error_detail = None
+            run.result_json = safe_result
+            run.readable = bool(readable)
+            run.readiness_state = None
+            started_utc = _as_utc(run.started_at) if run.started_at is not None else now
+            run.finished_at = max(now, started_utc)
+            run.updated_at = max(now, _as_utc(run.created_at))
+            session.flush()
+
+            AuditEventRepository.append_event(
+                session,
+                TenantContext(
+                    organization_id=run.organization_id,
+                    actor_user_id=None,
+                    source="worker",
+                ),
+                event_type=audit_event_type,
+                target_entity_type="processing_run",
+                target_entity_id=run.id,
+                payload_json={
+                    "operation": audit_event_type.replace(".", "_"),
                     "processing_run_id": run.id,
                     "worker_id": worker_id,
                     **safe_result,

@@ -14,8 +14,15 @@ from app.api.dependencies import (
 )
 from app.core.constants import IDEMPOTENCY_KEY_HEADER_NAME
 from app.core.rbac import RbacPermission
-from app.models.entities import ProcessingRun
-from app.schemas.auth import CaseProcessingRunsListResponse, ProcessingRunSummaryResponse
+from app.models.entities import EvidenceReference, ExtractedField, ProcessingRun
+from app.schemas.auth import (
+    CaseProcessingRunsListResponse,
+    EvidenceReferencesListResponse,
+    EvidenceReferenceSummaryResponse,
+    ExtractedFieldItemResponse,
+    ExtractedFieldsListResponse,
+    ProcessingRunSummaryResponse,
+)
 from app.schemas.tenant import TenantContext, validate_safe_metadata_text
 from app.services.auth_service import AuthorizedMembershipContext
 from app.services.institutional_service import (
@@ -212,4 +219,195 @@ def enqueue_document_version_reprocessing(
         detail.processing_run,
         document_id=detail.document_id,
         case_id=detail.case_id,
+    )
+
+
+def _to_evidence_summary(
+    ev: EvidenceReference,
+    *,
+    field: ExtractedField,
+    run: ProcessingRun,
+    document_id: str,
+    source_sha256_hex: str,
+) -> EvidenceReferenceSummaryResponse:
+    return EvidenceReferenceSummaryResponse(
+        evidence_reference_id=ev.id,
+        organization_id=ev.organization_id,
+        extracted_field_id=ev.extracted_field_id,
+        field_key=field.field_key,
+        document_id=document_id,
+        document_version_id=ev.document_version_id,
+        source_sha256_hex=source_sha256_hex,
+        processing_run_id=run.id,
+        extractor_version=run.extractor_version,
+        policy_version=run.policy_version,
+        page_number=ev.page_number,
+        bbox=[round(ev.bbox_x, 6), round(ev.bbox_y, 6), round(ev.bbox_w, 6), round(ev.bbox_h, 6)],
+        bbox_x=round(ev.bbox_x, 6),
+        bbox_y=round(ev.bbox_y, 6),
+        bbox_w=round(ev.bbox_w, 6),
+        bbox_h=round(ev.bbox_h, 6),
+        quote_excerpt=ev.quote_excerpt,
+        extraction_method=ev.extraction_method,
+        created_at=ev.created_at,
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.get(
+    "/{organization_id}/documents/{document_id}/versions/{version_id}/extracted-fields",
+    response_model=ExtractedFieldsListResponse,
+)
+def list_document_version_extracted_fields(
+    organization_id: str,
+    document_id: str,
+    version_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.DOCUMENT_READ)),
+    ],
+    processing_run_id: Annotated[str | None, Query(min_length=1, max_length=36)] = None,
+    latest_only: bool = False,
+) -> ExtractedFieldsListResponse:
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        res = InstitutionalService.list_document_version_extracted_fields(
+            session,
+            ctx,
+            document_id=document_id,
+            version_id=version_id,
+            processing_run_id=processing_run_id,
+            latest_only=latest_only,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    latest_outcome: str | None = None
+    if res.latest_extract_run and isinstance(res.latest_extract_run.result_json, dict):
+        raw_out = res.latest_extract_run.result_json.get("outcome")
+        latest_outcome = str(raw_out) if raw_out is not None else None
+
+    fields_out = [
+        ExtractedFieldItemResponse(
+            extracted_field_id=field_row.id,
+            organization_id=field_row.organization_id,
+            document_id=res.document.id,
+            document_version_id=res.version.id,
+            source_sha256_hex=res.version.sha256_hex,
+            processing_run_id=run_row.id,
+            extractor_version=run_row.extractor_version,
+            policy_version=run_row.policy_version,
+            field_key=field_row.field_key,
+            raw_value=field_row.raw_value,
+            normalized_value=field_row.normalized_value,
+            status=field_row.status,
+            abstained=field_row.abstained,
+            metadata_json=field_row.metadata_json,
+            evidences=[
+                _to_evidence_summary(
+                    ev,
+                    field=field_row,
+                    run=run_row,
+                    document_id=res.document.id,
+                    source_sha256_hex=res.version.sha256_hex,
+                )
+                for ev in evidences
+            ],
+            created_at=field_row.created_at,
+            administrative_only=True,
+            clinical_approval=False,
+        )
+        for field_row, run_row, evidences in res.items
+    ]
+
+    return ExtractedFieldsListResponse(
+        organization_id=ctx.organization_id,
+        document_id=res.document.id,
+        document_version_id=res.version.id,
+        source_sha256_hex=res.version.sha256_hex,
+        total=len(fields_out),
+        latest_processing_run_id=(
+            res.latest_extract_run.id if res.latest_extract_run is not None else None
+        ),
+        latest_extractor_version=(
+            res.latest_extract_run.extractor_version
+            if res.latest_extract_run is not None
+            else None
+        ),
+        latest_outcome=latest_outcome,
+        extracted_fields=fields_out,
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.get(
+    "/{organization_id}/documents/{document_id}/versions/{version_id}/evidence",
+    response_model=EvidenceReferencesListResponse,
+)
+def list_document_version_evidence(
+    organization_id: str,
+    document_id: str,
+    version_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.DOCUMENT_READ)),
+    ],
+    processing_run_id: Annotated[str | None, Query(min_length=1, max_length=36)] = None,
+    page_number: Annotated[int | None, Query(ge=1)] = None,
+    field_key: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    latest_only: bool = False,
+) -> EvidenceReferencesListResponse:
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        res = InstitutionalService.list_document_version_evidence(
+            session,
+            ctx,
+            document_id=document_id,
+            version_id=version_id,
+            processing_run_id=processing_run_id,
+            page_number=page_number,
+            field_key=field_key,
+            latest_only=latest_only,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    evidences_out = [
+        _to_evidence_summary(
+            ev_row,
+            field=field_row,
+            run=run_row,
+            document_id=res.document.id,
+            source_sha256_hex=res.version.sha256_hex,
+        )
+        for ev_row, field_row, run_row in res.items
+    ]
+
+    return EvidenceReferencesListResponse(
+        organization_id=ctx.organization_id,
+        document_id=res.document.id,
+        document_version_id=res.version.id,
+        source_sha256_hex=res.version.sha256_hex,
+        total=len(evidences_out),
+        latest_processing_run_id=(
+            res.latest_extract_run.id if res.latest_extract_run is not None else None
+        ),
+        latest_extractor_version=(
+            res.latest_extract_run.extractor_version
+            if res.latest_extract_run is not None
+            else None
+        ),
+        evidence_references=evidences_out,
+        administrative_only=True,
+        clinical_approval=False,
     )

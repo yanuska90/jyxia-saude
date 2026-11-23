@@ -15,6 +15,13 @@ from app.core.constants import (
     APP_NAME,
     APP_VERSION,
     DEFAULT_MAX_DOCUMENT_BYTES,
+    DEFAULT_PDF_EXTRACTION_TIMEOUT_SECONDS,
+    DEFAULT_PDF_MAX_BLOCKS_PER_PAGE,
+    DEFAULT_PDF_MAX_COMPLEXITY_OBJECTS,
+    DEFAULT_PDF_MAX_EXTRACTED_CHARS,
+    DEFAULT_PDF_MAX_PAGES,
+    DEFAULT_PDF_MAX_WORDS_PER_DOC,
+    DEFAULT_PDF_TEXT_EXTRACTOR_VERSION,
     DEFAULT_PROCESSING_MAX_ATTEMPTS,
     DEFAULT_PROCESSING_RETRY_BACKOFF_MAX_SECONDS,
     DEFAULT_PROCESSING_RETRY_BACKOFF_MIN_SECONDS,
@@ -236,6 +243,21 @@ class Settings(BaseModel):
     )
     worker_max_jobs_per_cycle: int = Field(
         default=DEFAULT_WORKER_MAX_JOBS_PER_CYCLE, ge=1, le=500
+    )
+    worker_extract_pdf_text_extractor_version: str = Field(
+        default=DEFAULT_PDF_TEXT_EXTRACTOR_VERSION, min_length=1, max_length=64
+    )
+    pdf_max_pages: int = Field(default=DEFAULT_PDF_MAX_PAGES, ge=1, le=500)
+    pdf_max_extracted_chars: int = Field(
+        default=DEFAULT_PDF_MAX_EXTRACTED_CHARS, ge=100, le=5_000_000
+    )
+    pdf_max_words_per_doc: int = Field(default=DEFAULT_PDF_MAX_WORDS_PER_DOC, ge=10, le=500_000)
+    pdf_max_blocks_per_page: int = Field(default=DEFAULT_PDF_MAX_BLOCKS_PER_PAGE, ge=1, le=20_000)
+    pdf_extraction_timeout_seconds: float = Field(
+        default=DEFAULT_PDF_EXTRACTION_TIMEOUT_SECONDS, ge=0.1, le=120.0
+    )
+    pdf_max_complexity_objects: int = Field(
+        default=DEFAULT_PDF_MAX_COMPLEXITY_OBJECTS, ge=50, le=500_000
     )
 
     app_base_url: str = "http://127.0.0.1:8000"
@@ -572,6 +594,39 @@ def load_settings(
                 source.get("JYXIA_WORKER_MAX_JOBS_PER_CYCLE"),
                 default=DEFAULT_WORKER_MAX_JOBS_PER_CYCLE,
                 field_name="JYXIA_WORKER_MAX_JOBS_PER_CYCLE",
+            ),
+            worker_extract_pdf_text_extractor_version=(
+                source.get("JYXIA_PDF_EXTRACTOR_VERSION") or DEFAULT_PDF_TEXT_EXTRACTOR_VERSION
+            ).strip(),
+            pdf_max_pages=_parse_int(
+                source.get("JYXIA_PDF_MAX_PAGES"),
+                default=DEFAULT_PDF_MAX_PAGES,
+                field_name="JYXIA_PDF_MAX_PAGES",
+            ),
+            pdf_max_extracted_chars=_parse_int(
+                source.get("JYXIA_PDF_MAX_EXTRACTED_CHARS"),
+                default=DEFAULT_PDF_MAX_EXTRACTED_CHARS,
+                field_name="JYXIA_PDF_MAX_EXTRACTED_CHARS",
+            ),
+            pdf_max_words_per_doc=_parse_int(
+                source.get("JYXIA_PDF_MAX_WORDS_PER_DOC"),
+                default=DEFAULT_PDF_MAX_WORDS_PER_DOC,
+                field_name="JYXIA_PDF_MAX_WORDS_PER_DOC",
+            ),
+            pdf_max_blocks_per_page=_parse_int(
+                source.get("JYXIA_PDF_MAX_BLOCKS_PER_PAGE"),
+                default=DEFAULT_PDF_MAX_BLOCKS_PER_PAGE,
+                field_name="JYXIA_PDF_MAX_BLOCKS_PER_PAGE",
+            ),
+            pdf_extraction_timeout_seconds=_parse_float(
+                source.get("JYXIA_PDF_EXTRACTION_TIMEOUT_SECONDS"),
+                default=DEFAULT_PDF_EXTRACTION_TIMEOUT_SECONDS,
+                field_name="JYXIA_PDF_EXTRACTION_TIMEOUT_SECONDS",
+            ),
+            pdf_max_complexity_objects=_parse_int(
+                source.get("JYXIA_PDF_MAX_COMPLEXITY_OBJECTS"),
+                default=DEFAULT_PDF_MAX_COMPLEXITY_OBJECTS,
+                field_name="JYXIA_PDF_MAX_COMPLEXITY_OBJECTS",
             ),
             app_base_url=(source.get("JYXIA_APP_BASE_URL") or "http://127.0.0.1:8000").strip().rstrip("/"),
             cors_allowed_origins=_parse_csv(source.get("JYXIA_CORS_ALLOWED_ORIGINS")),

@@ -597,6 +597,12 @@ class ExtractedField(Base):
             "(status <> 'abstained') OR (abstained = TRUE)",
             name="abstained_status_coherent",
         ),
+        UniqueConstraint(
+            "organization_id",
+            "processing_run_id",
+            "field_key",
+            name="uq_extracted_fields_org_run_key",
+        ),
         Index("ix_extracted_fields_org_run", "organization_id", "processing_run_id"),
     )
 
@@ -650,6 +656,12 @@ class EvidenceReference(Base):
         CheckConstraint("bbox_x + bbox_w <= 1.00001", name="bbox_x_w_within_page"),
         CheckConstraint("bbox_y + bbox_h <= 1.00001", name="bbox_y_h_within_page"),
         Index("ix_evidence_refs_org_field", "organization_id", "extracted_field_id"),
+        Index(
+            "ix_evidence_refs_org_docver_page",
+            "organization_id",
+            "document_version_id",
+            "page_number",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

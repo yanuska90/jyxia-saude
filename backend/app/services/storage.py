@@ -68,6 +68,16 @@ class StoredObjectMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredDerivedArtifact:
+    """Metadata for a private derived artifact excluded from public document download routes."""
+
+    storage_driver: str
+    artifact_key: str
+    sha256_hex: str
+    byte_size: int
+
+
+@dataclass(frozen=True, slots=True)
 class StoredObjectIntegrityReport:
     organization_id: str
     mime_type: str
@@ -137,6 +147,21 @@ class DocumentStoragePort(Protocol):
         *,
         organization_id: str,
         storage_key: str,
+    ) -> None: ...
+
+    def store_derived_text_artifact(
+        self,
+        *,
+        organization_id: str,
+        processing_run_id: str,
+        payload_bytes: bytes,
+    ) -> StoredDerivedArtifact: ...
+
+    def delete_derived_artifact(
+        self,
+        *,
+        organization_id: str,
+        artifact_key: str,
     ) -> None: ...
 
 
@@ -984,5 +1009,116 @@ class LocalControlledSyntheticStorage:
         except (OSError, StorageValidationError):
             logger.warning(
                 "Compensating cleanup could not unlink uncommitted object.",
+                extra=build_safe_log_extra(organization_id=safe_org),
+            )
+
+    def store_derived_text_artifact(
+        self,
+        *,
+        organization_id: str,
+        processing_run_id: str,
+        payload_bytes: bytes,
+    ) -> StoredDerivedArtifact:
+        """Persist private derived extraction text JSON outside public download keyspace."""
+        if not self.enabled:
+            raise StorageUnavailableError("Local synthetic storage is disabled by configuration.")
+        if not payload_bytes:
+            raise StorageValidationError("Derived artifact payload cannot be empty.")
+        if len(payload_bytes) > self.max_bytes:
+            raise StoragePayloadTooLargeError(
+                "Derived text artifact exceeds max_bytes safety ceiling."
+            )
+        safe_org, org_dir = self._prepare_org_dir(organization_id)
+        safe_run = re.sub(r"[^A-Za-z0-9_-]", "", processing_run_id)[:36]
+        if not safe_run:
+            raise StorageValidationError("Invalid processing_run_id for derived artifact.")
+
+        derived_dir_raw = org_dir / "derived"
+        _reject_symlink_chain(derived_dir_raw, boundary=self.root_dir)
+        derived_dir_raw.mkdir(parents=True, exist_ok=True)
+        _reject_symlink_chain(derived_dir_raw, boundary=self.root_dir)
+        derived_dir = derived_dir_raw.resolve()
+        if not derived_dir.is_relative_to(org_dir):
+            raise StorageValidationError("Derived artifact directory escaped tenant boundary.")
+
+        artifact_name = f"{safe_run}_{uuid4().hex[:12]}.json"
+        artifact_key = f"{safe_org}/derived/{artifact_name}"
+        target_path = (derived_dir / artifact_name).resolve()
+        if not target_path.is_relative_to(derived_dir):
+            raise StorageValidationError("Derived artifact path escaped tenant directory.")
+
+        expected_sha = hashlib.sha256(payload_bytes).hexdigest()
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=derived_dir,
+                prefix=".tmp_derived_",
+                suffix=".json",
+                delete=False,
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+                hasher = hashlib.sha256()
+                for offset in range(0, len(payload_bytes), 65536):
+                    chunk = payload_bytes[offset : offset + 65536]
+                    tmp.write(chunk)
+                    hasher.update(chunk)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            if hasher.hexdigest() != expected_sha or tmp_path.stat().st_size != len(payload_bytes):
+                raise StorageIntegrityError("Post-write digest verification failed for derived artifact.")
+            os.replace(tmp_path, target_path)
+            tmp_path = None
+            _reject_symlink_chain(target_path, boundary=self.root_dir)
+        except (StorageValidationError, OSError) as exc:
+            if isinstance(exc, StorageValidationError):
+                raise
+            raise StorageValidationError(
+                f"Derived artifact write failed: {type(exc).__name__}"
+            ) from exc
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+        return StoredDerivedArtifact(
+            storage_driver=StorageDriver.LOCAL_CONTROLLED_SYNTHETIC.value,
+            artifact_key=artifact_key,
+            sha256_hex=expected_sha,
+            byte_size=len(payload_bytes),
+        )
+
+    def delete_derived_artifact(
+        self,
+        *,
+        organization_id: str,
+        artifact_key: str,
+    ) -> None:
+        """Delete a private derived artifact (e.g. on worker transaction rollback)."""
+        if not self.enabled:
+            return
+        safe_org = _validate_organization_segment(organization_id)
+        if (
+            not artifact_key
+            or "\x00" in artifact_key
+            or ".." in artifact_key
+            or "\\" in artifact_key
+            or not re.fullmatch(
+                rf"{re.escape(safe_org)}/derived/[A-Za-z0-9_-]+_[a-f0-9]{{12}}\.json",
+                artifact_key,
+            )
+        ):
+            return
+        try:
+            _reject_symlink_chain(self.root_dir)
+            target_raw = self.root_dir / artifact_key
+            org_raw = self.root_dir / safe_org
+            _reject_symlink_chain(target_raw, boundary=self.root_dir)
+            org_dir = org_raw.resolve()
+            target_path = target_raw.resolve()
+            if org_dir.is_relative_to(self.root_dir) and target_path.is_relative_to(org_dir):
+                target_path.unlink(missing_ok=True)
+        except (OSError, StorageValidationError):
+            logger.warning(
+                "Compensating cleanup could not unlink derived artifact.",
                 extra=build_safe_log_extra(organization_id=safe_org),
             )

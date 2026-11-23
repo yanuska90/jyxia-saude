@@ -365,8 +365,8 @@ def test_worker_executes_verify_object_integrity_end_to_end_and_preserves_saniti
         worker_id="unit-integrity-worker",
     )
     stats = worker.process_one_cycle(max_jobs=10)
-    assert stats.claimed == 2
-    assert stats.succeeded == 2
+    assert stats.claimed == 4
+    assert stats.succeeded == 4
     assert stats.failed == 0
 
     with TestClient(app) as client:
@@ -376,7 +376,11 @@ def test_worker_executes_verify_object_integrity_end_to_end_and_preserves_saniti
         )
         assert list_resp.status_code == 200
         payload = list_resp.json()
-        assert payload["total"] == 2
+        assert payload["total"] == 4
+        assert {item["step_type"] for item in payload["processing_runs"]} == {
+            ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+            ProcessingStepType.EXTRACT_PDF_TEXT.value,
+        }
 
         for run_id in (run_pdf_id, run_png_id):
             detail_resp = client.get(
@@ -409,9 +413,10 @@ def test_worker_executes_verify_object_integrity_end_to_end_and_preserves_saniti
             owner_session, TenantContext(organization_id=org_a_id)
         )
         event_types = [e.event_type for e in events]
-        assert event_types.count("processing_run.queued") == 2
-        assert event_types.count("processing_run.started") == 2
+        assert event_types.count("processing_run.queued") == 4
+        assert event_types.count("processing_run.started") == 4
         assert event_types.count("processing_run.succeeded") == 2
+        assert event_types.count("processing_run.abstained") == 2
         assert AuditEventRepository.verify_chain_detailed(
             owner_session, TenantContext(organization_id=org_a_id)
         ).valid
@@ -527,6 +532,7 @@ def test_transient_failure_backoff_retry_recovery_and_max_attempts_exhaustion(
         settings_retry,
         worker_id="retry-worker-2",
         step_executor=_selective_step,
+        step_types=ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
     )
     stats2 = w_up.process_one_cycle(max_jobs=10)
     assert stats2.claimed == 2
@@ -739,7 +745,7 @@ def test_idempotency_active_uniqueness_new_version_and_manual_reprocessing(
         env["settings"],
         worker_id="reprocess-worker",
     )
-    assert worker.process_one_cycle(max_jobs=5).succeeded == 1
+    assert worker.process_one_cycle(max_jobs=5).succeeded == 2
 
     # Reprocess after terminal SUCCEEDED creates a NEW ProcessingRun while preserving history
     with TestClient(app) as client:
@@ -786,21 +792,21 @@ def test_idempotency_active_uniqueness_new_version_and_manual_reprocessing(
         finally:
             owner_db.close()
 
-        assert worker.process_one_cycle(max_jobs=10).succeeded == 2
+        assert worker.process_one_cycle(max_jobs=10).succeeded == 4
         runs_list = client.get(
             f"/api/v1/organizations/{org_a_id}/cases/{case_a_id}/processing-runs"
         ).json()
-        assert runs_list["total"] == 3
+        assert runs_list["total"] == 6
         ver_1_runs = client.get(
             f"/api/v1/organizations/{org_a_id}/cases/{case_a_id}/processing-runs",
             params={"document_version_id": ver_id},
         ).json()
-        assert ver_1_runs["total"] == 2
+        assert ver_1_runs["total"] == 4
         ver_2_runs = client.get(
             f"/api/v1/organizations/{org_a_id}/cases/{case_a_id}/processing-runs",
             params={"document_version_id": ver_2_id},
         ).json()
-        assert ver_2_runs["total"] == 1
+        assert ver_2_runs["total"] == 2
 
 
 def test_lease_expiry_reclaim_stolen_lease_fencing_and_max_attempts_on_expired_lease(
@@ -1085,8 +1091,8 @@ def test_worker_cli_once_graceful_shutdown_and_concurrent_workers(
         f1 = pool.submit(w1.process_one_cycle, max_jobs=10)
         f2 = pool.submit(w2.process_one_cycle, max_jobs=10)
         s1, s2 = f1.result(), f2.result()
-    assert s1.claimed + s2.claimed == 5
-    assert s1.succeeded + s2.succeeded == 5
+    assert s1.claimed + s2.claimed == 10
+    assert s1.succeeded + s2.succeeded == 10
 
     # Standalone worker CLI (--once) execution
     with TestClient(app) as client:

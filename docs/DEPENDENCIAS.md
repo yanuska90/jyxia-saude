@@ -17,6 +17,7 @@
   - `cryptography==50.0.0` (Apache-2.0 / BSD — AES-256-GCM PKCE e validação de chaves assimétricas)
   - `fastapi==0.142.2` (MIT)
   - `httpx==0.28.1` (BSD-3-Clause — cliente HTTP assíncrono/síncrono para discovery, JWKS e token endpoint OIDC)
+  - `pdfminer.six==20260107` (MIT — parser PDF puro em Python, offline, sem execução de JavaScript ou rede, com suporte a texto, caixas delimitadoras por caractere/linha/bloco, `CropBox`, `MediaBox` e rotação)
   - `psycopg==3.3.6` e `psycopg-binary==3.3.6` (LGPL-3.0)
   - `pydantic==2.13.4` (MIT)
   - `PyJWT==2.15.1` (MIT — verificação RS256/ES256 de ID Tokens OIDC com JWKS)
