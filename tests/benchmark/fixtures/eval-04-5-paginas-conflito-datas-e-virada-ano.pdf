@@ -1,0 +1,101 @@
+%PDF-1.4
+% JYXIA Synthetic Benchmark PDF
+1 0 obj
+<< /F1 2 0 R /F2 3 0 R >>
+endobj
+2 0 obj
+<< /BaseFont /Times-Roman /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font >>
+endobj
+3 0 obj
+<< /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font >>
+endobj
+4 0 obj
+<< /Pages 5 0 R /Type /Catalog >>
+endobj
+5 0 obj
+<< /Count 5 /Kids [ 7 0 R 9 0 R 11 0 R 13 0 R 15 0 R ] /Type /Pages >>
+endobj
+6 0 obj
+<< /Length 210 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Tipo documental: termo) Tj
+/F1 10 Tf 1 0 0 1 48 748 Tm (Nome completo: Pessoa Cinco Paginas Acento Águia Conceição) Tj
+/F1 10 Tf 1 0 0 1 48 726 Tm (Nascimento: 31/12/1979) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Contents 6 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+8 0 obj
+<< /Length 63 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Identificador: BM-EV-04) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Contents 8 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+10 0 obj
+<< /Length 123 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Data de emissao: 31/12/2025) Tj
+/F1 10 Tf 1 0 0 1 48 748 Tm (Emitido em: 01/01/2026) Tj
+ET
+endstream
+endobj
+11 0 obj
+<< /Contents 10 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+12 0 obj
+<< /Length 244 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Procedimento solicitado: Colecistectomia aberta) Tj
+/F1 10 Tf 1 0 0 1 48 748 Tm (Codigo do procedimento: SIGTAP: 04.07.03.002-6) Tj
+/F1 10 Tf 1 0 0 1 48 726 Tm (Lateralidade: Nao aplicavel ao procedimento) Tj
+ET
+endstream
+endobj
+13 0 obj
+<< /Contents 12 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+14 0 obj
+<< /Length 149 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Origem: Hospital Regional Fictício de Demonstração Prolongada) Tj
+/F1 10 Tf 1 0 0 1 48 748 Tm (MARCA FICTICIA) Tj
+ET
+endstream
+endobj
+15 0 obj
+<< /Contents 14 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+xref
+0 16
+0000000000 65535 f 
+0000000041 00000 n 
+0000000082 00000 n 
+0000000191 00000 n 
+0000000303 00000 n 
+0000000352 00000 n 
+0000000438 00000 n 
+0000000698 00000 n 
+0000000826 00000 n 
+0000000938 00000 n 
+0000001066 00000 n 
+0000001240 00000 n 
+0000001370 00000 n 
+0000001665 00000 n 
+0000001795 00000 n 
+0000001995 00000 n 
+trailer
+<< /Root 4 0 R /Size 16 >>
+startxref
+2125
+%%EOF

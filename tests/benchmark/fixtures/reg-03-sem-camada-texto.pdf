@@ -1,0 +1,42 @@
+%PDF-1.4
+% JYXIA Synthetic Benchmark PDF
+1 0 obj
+<< /F1 2 0 R /F2 3 0 R >>
+endobj
+2 0 obj
+<< /BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font >>
+endobj
+3 0 obj
+<< /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font >>
+endobj
+4 0 obj
+<< /Pages 5 0 R /Type /Catalog >>
+endobj
+5 0 obj
+<< /Count 1 /Kids [ 7 0 R ] /Type /Pages >>
+endobj
+6 0 obj
+<< /Length 6 >>
+stream
+BT
+ET
+endstream
+endobj
+7 0 obj
+<< /Contents 6 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 0 /Type /Page >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000041 00000 n 
+0000000082 00000 n 
+0000000189 00000 n 
+0000000301 00000 n 
+0000000350 00000 n 
+0000000409 00000 n 
+0000000463 00000 n 
+trailer
+<< /Root 4 0 R /Size 8 >>
+startxref
+591
+%%EOF

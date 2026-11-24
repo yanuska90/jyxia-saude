@@ -1,4 +1,4 @@
-name: Verificacoes de seguranca do prototipo
+name: Verificacoes de seguranca, demonstracao e backend institucional
 on:
   push:
   pull_request:
@@ -12,9 +12,142 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Criptografia e links de teleconsulta
-        run: node --test test_documental.mjs test_security.cjs test_synthetic_import.cjs
-      - name: Integracao com identidades sinteticas
-        run: python3 -m unittest test_integration.py -v
-      - name: Higiene basica da publicacao
-        run: python3 check_publication.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Nucleo documental, laboratorio, benchmark, PDF.js e testes historicos
+        run: node --test tests/frontend/test_documental.mjs tests/frontend/test_documental_pdfjs.mjs tests/frontend/test_lab_and_benchmark.mjs tests/legacy/test_security.cjs tests/legacy/test_synthetic_import.cjs
+      - name: Integracao historica com identidades sinteticas
+        run: python3 -m unittest discover -s tests/legacy -v
+      - name: Higiene basica da publicacao e coerencia de dependencias
+        run: |
+          python3 tools/check_publication.py
+          python3 tools/sync_backend_deps.py --check
+
+  backend-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: jyxia
+          POSTGRES_PASSWORD: jyxia_ci_ephemeral_pw
+          POSTGRES_DB: jyxia_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verificar fonte unica de dependencias, lint Ruff e auditar vulnerabilidades
+        run: |
+          python3 tools/sync_backend_deps.py --check
+          python3 -m venv /tmp/jyxia-ci-venv
+          /tmp/jyxia-ci-venv/bin/pip install --no-cache-dir -r backend/requirements-dev.txt
+          /tmp/jyxia-ci-venv/bin/ruff check --config backend/pyproject.toml backend tests/backend tools
+          /tmp/jyxia-ci-venv/bin/pip-audit
+      - name: Inicializar roles restritas jyxia_app e jyxia_worker no PostgreSQL 16 e verificar migracoes Alembic
+        env:
+          JYXIA_APP_PW: jyxia_ci_app_ephemeral_pw
+          JYXIA_WORKER_PW: jyxia_ci_worker_ephemeral_pw
+          JYXIA_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
+        run: |
+          echo "::add-mask::$JYXIA_APP_PW"
+          echo "::add-mask::$JYXIA_WORKER_PW"
+          /tmp/jyxia-ci-venv/bin/python -c "
+          import os, psycopg
+          with psycopg.connect(os.environ['JYXIA_MIGRATION_DATABASE_URL'].replace('+psycopg', ''), autocommit=True) as conn:
+              with conn.cursor() as cur:
+                  cur.execute(\"\"\"
+                  DO \$\$
+                  BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'jyxia_app') THEN
+                          CREATE ROLE jyxia_app LOGIN PASSWORD 'jyxia_ci_app_ephemeral_pw'
+                              NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+                      END IF;
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'jyxia_worker') THEN
+                          CREATE ROLE jyxia_worker LOGIN PASSWORD 'jyxia_ci_worker_ephemeral_pw'
+                              NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+                      END IF;
+                  END \$\$;
+                  REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+                  GRANT USAGE ON SCHEMA public TO jyxia_app;
+                  GRANT CONNECT ON DATABASE jyxia_test TO jyxia_app;
+                  GRANT USAGE ON SCHEMA public TO jyxia_worker;
+                  GRANT CONNECT ON DATABASE jyxia_test TO jyxia_worker;
+                  \"\"\")
+          "
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0008
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0007
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0006
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0005
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261121_0004
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0003
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0002
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261120_0001
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade base
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+      - name: Iniciar Keycloak 26.8.2 e provisionar realm jyxia-dev + TOTP efemero
+        run: |
+          KC_PW="CiKcAdmin_$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+          echo "::add-mask::$KC_PW"
+          echo "KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin" >> "$GITHUB_ENV"
+          echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$KC_PW" >> "$GITHUB_ENV"
+          docker run -d --name jyxia-keycloak-ci \
+            -p 127.0.0.1:8080:8080 \
+            -p 127.0.0.1:9000:9000 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin \
+            -e "KC_BOOTSTRAP_ADMIN_PASSWORD=$KC_PW" \
+            -e KC_HEALTH_ENABLED=true \
+            -e KC_HTTP_PORT=8080 \
+            -e KC_HOSTNAME_STRICT=false \
+            -v "$GITHUB_WORKSPACE/backend/keycloak/jyxia-dev-realm.json:/opt/keycloak/data/import/jyxia-dev-realm.json:ro" \
+            quay.io/keycloak/keycloak:26.8.2 start-dev --import-realm
+          export KC_BOOTSTRAP_ADMIN_USERNAME=jyxia_ci_admin
+          export KC_BOOTSTRAP_ADMIN_PASSWORD="$KC_PW"
+          /tmp/jyxia-ci-venv/bin/python tools/ci_setup_keycloak_e2e.py || {
+            docker logs jyxia-keycloak-ci | tail -n 80 || true
+            exit 1
+          }
+      - name: Executar suite Pytest completa (PostgreSQL 16 RLS + Keycloak 26.8.2 MFA E2E, zero skips)
+        env:
+          JYXIA_TEST_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_TEST_APP_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_TEST_WORKER_DATABASE_URL: postgresql+psycopg://jyxia_worker:jyxia_ci_worker_ephemeral_pw@127.0.0.1:5432/jyxia_test
+        run: |
+          set -o pipefail
+          if ! /tmp/jyxia-ci-venv/bin/python -u -m pytest tests/backend -v -rs 2>&1 | tee /tmp/pytest_ci.log; then
+            python3 -c "
+          from pathlib import Path
+          raw_lines = Path('/tmp/pytest_ci.log').read_text(errors='replace').splitlines()
+          failed_lines = [l for l in raw_lines if l.startswith(('FAILED ', 'ERROR '))]
+          error_lines = [l for l in raw_lines if l.startswith(('E   ', 'psycopg.', 'sqlalchemy.'))]
+          priority = failed_lines + error_lines
+          if not priority:
+              priority = [l for l in raw_lines if 'Error' in l or 'Traceback' in l][-10:]
+          for line in priority[:10]:
+              print(f'::error::{line}')
+          " || true
+            docker logs jyxia-keycloak-ci | tail -n 60 || true
+            exit 1
+          fi
+          if grep -E "SKIPPED|[0-9]+ skipped" /tmp/pytest_ci.log; then
+            echo "ERROR: Unexpected skipped test in PostgreSQL/Keycloak CI verification."
+            exit 1
+          fi
+      - name: Parar container Keycloak efemero
+        if: always()
+        run: docker rm -f jyxia-keycloak-ci || true

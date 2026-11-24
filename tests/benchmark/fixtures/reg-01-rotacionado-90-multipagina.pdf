@@ -1,0 +1,62 @@
+%PDF-1.4
+% JYXIA Synthetic Benchmark PDF
+1 0 obj
+<< /F1 2 0 R /F2 3 0 R >>
+endobj
+2 0 obj
+<< /BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font >>
+endobj
+3 0 obj
+<< /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font >>
+endobj
+4 0 obj
+<< /Pages 5 0 R /Type /Catalog >>
+endobj
+5 0 obj
+<< /Count 2 /Kids [ 7 0 R 9 0 R ] /Type /Pages >>
+endobj
+6 0 obj
+<< /Length 304 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Tipo documental: laudo) Tj
+/F1 10 Tf 1 0 0 1 48 748 Tm (Nome do paciente: Pessoa Rotacionada Alfa) Tj
+/F1 10 Tf 1 0 0 1 48 726 Tm (Data de nascimento: 29/02/2024) Tj
+/F1 10 Tf 1 0 0 1 48 704 Tm (ID: BM-REG-01) Tj
+/F1 10 Tf 1 0 0 1 48 682 Tm (Emitido em: 01/03/2026) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Contents 6 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 90 /Type /Page >>
+endobj
+8 0 obj
+<< /Length 218 >>
+stream
+BT
+/F1 10 Tf 1 0 0 1 48 770 Tm (Instituicao: Servico Ficticio Norte) Tj
+/F1 10 Tf 1 0 0 1 48 748 Tm (Procedimento solicitado: Artroscopia de joelho) Tj
+/F1 10 Tf 1 0 0 1 48 726 Tm (Regiao lateral: Lado esquerdo) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Contents 8 0 R /MediaBox [ 0 0 595 842 ] /Parent 5 0 R /Resources << /Font 1 0 R >> /Rotate 90 /Type /Page >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000041 00000 n 
+0000000082 00000 n 
+0000000189 00000 n 
+0000000301 00000 n 
+0000000350 00000 n 
+0000000415 00000 n 
+0000000769 00000 n 
+0000000898 00000 n 
+0000001166 00000 n 
+trailer
+<< /Root 4 0 R /Size 10 >>
+startxref
+1295
+%%EOF

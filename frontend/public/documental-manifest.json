@@ -1,0 +1,140 @@
+{
+  "version": "3.2.0",
+  "engine": "regras-documentais-2.0",
+  "referenceDate": "2026-11-14",
+  "case": {
+    "id": "CASO-SYN-001",
+    "patient": "Pessoa Sintetica Alfa",
+    "birthDate": "1986-04-12",
+    "identifier": "SYN-P01",
+    "procedureDate": "2026-11-30"
+  },
+  "files": [
+    {
+      "name": "solicitacao.pdf",
+      "path": "fixtures/solicitacao.pdf",
+      "sha256": "db3d1e37fcf8f3ecdbad7ecad20976096425dd39495733c7a77e2208dc881a35",
+      "size": 2500,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "laudo.pdf",
+      "path": "fixtures/laudo.pdf",
+      "sha256": "bdcc704dd63228664097835827fb05d8e8954112ca847d5b3127d98e012f68df",
+      "size": 2482,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "avaliacao.pdf",
+      "path": "fixtures/avaliacao.pdf",
+      "sha256": "9deb347fd5ffd2009c6b43d8ea98056818a349bd272e303e7e79ad663643fd0c",
+      "size": 2512,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "termo.pdf",
+      "path": "fixtures/termo.pdf",
+      "sha256": "62e0e979b9b7fbfdf2481498b5b065e9e98d7bc33b6b53688a163dbcc718ad9b",
+      "size": 2876,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "laudo-atualizado.pdf",
+      "path": "fixtures/laudo-atualizado.pdf",
+      "sha256": "77c97a6cb898ff9bb0a04bc5d01ac116e6d7aa55a3ae6ab3c89987ed93e47069",
+      "size": 2504,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "identidade-divergente.pdf",
+      "path": "fixtures/identidade-divergente.pdf",
+      "sha256": "25bfc4f32879ab68a23defd09f55f978a1179495d88eecbd9432751128ca4d16",
+      "size": 2508,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "sem-identificador.pdf",
+      "path": "fixtures/sem-identificador.pdf",
+      "sha256": "b8429fe3114af70a6d1827138883d0eb8454f678a96f9f1a119d9ac4c0b23615",
+      "size": 2431,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "laudo-antigo.pdf",
+      "path": "fixtures/laudo-antigo.pdf",
+      "sha256": "fd9ea481c03c6be866b927ee15194d82dda5ece0c62e54f1db7d530a891b5c3b",
+      "size": 2502,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "termo-sem-marca.pdf",
+      "path": "fixtures/termo-sem-marca.pdf",
+      "sha256": "44fe3859ab68a6255fbdf17ef1e99fd5f619e5a9dfff46e0bf1a61bdb0aabb55",
+      "size": 2656,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "imagem-ilegivel.png",
+      "path": "fixtures/imagem-ilegivel.png",
+      "sha256": "bfd92752457cf1834966f318463c4206d4834032526afa62ad5e3d94108df7f7",
+      "size": 30187,
+      "mime": "image/png"
+    },
+    {
+      "name": "casos-ficticios.json",
+      "path": "fixtures/casos-ficticios.json",
+      "sha256": "04f2fa4f747a0a39ea04eb5d4171f2b52c108de667d7ad828eaf8aae20d4213b",
+      "size": 275,
+      "mime": "application/json"
+    },
+    {
+      "name": "casos-ficticios.csv",
+      "path": "fixtures/casos-ficticios.csv",
+      "sha256": "637700e35963770eca22da0bc307c63f83a07e784112ca6cd8487fc5b1c8c383",
+      "size": 113,
+      "mime": "text/csv"
+    },
+    {
+      "name": "solicitacao-od.pdf",
+      "path": "fixtures/solicitacao-od.pdf",
+      "sha256": "ee664dd19a7fccab9d1e6a057ea6139e45a61cf9e6cb99e1f2e11993cb7d75ff",
+      "size": 2678,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "termo-oe.pdf",
+      "path": "fixtures/termo-oe.pdf",
+      "sha256": "f66938b93e00359345b269ec64146b791c2d0e8a6e518e1adfc10676604a9793",
+      "size": 2887,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "solicitacao-completa.pdf",
+      "path": "fixtures/solicitacao-completa.pdf",
+      "sha256": "efde8e4a6d12973b0a6658dc24ba229eaa0e0ef94a3803a06478ec61e8a9f2b6",
+      "size": 2051,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "laudo-completo.pdf",
+      "path": "fixtures/laudo-completo.pdf",
+      "sha256": "d3753f110ec582b40c190b0cae06c149fa2cbcc2efef2478af9e9d09a53d12c0",
+      "size": 2037,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "avaliacao-completa.pdf",
+      "path": "fixtures/avaliacao-completa.pdf",
+      "sha256": "f7f330fe8515c21177f13f2838cfe085ae28a5154c9575405ff4ba031384db42",
+      "size": 2065,
+      "mime": "application/pdf"
+    },
+    {
+      "name": "termo-completo.pdf",
+      "path": "fixtures/termo-completo.pdf",
+      "sha256": "238421b143bd9074996dfd85e986112bef4c0bd1726d53bda212a73fb928b2ba",
+      "size": 2154,
+      "mime": "application/pdf"
+    }
+  ]
+}
