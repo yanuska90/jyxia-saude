@@ -9,7 +9,7 @@ import {
   extractPdfLines,
   isoToBrazil,
   verifyEventsReport,
-} from './documental-core.mjs';
+} from './documental-core.mjs?v=3.2.0';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 const $ = id => document.getElementById(id);
@@ -347,6 +347,78 @@ function renderAxes() {
   const noticeEl = $('pending-notice');
   if (noticeEl) noticeEl.textContent = session.buildPendingNotice();
 }
+function taskGuidance(t) {
+  const parts = String(t.id || '').split(':');
+  const prefix = parts[0];
+  const code = parts[1];
+  if (prefix === 'missing') {
+    return {
+      reason: 'Nenhum documento ativo revisado desta classe foi vinculado ao caso.',
+      next: 'Adicione ou localize o exemplo correspondente, confira a identidade e os campos e registre a revisão humana.',
+    };
+  }
+  if (prefix === 'axis') {
+    if (code === 'procedure') {
+      return {
+        reason: 'Os documentos ativos apresentam divergência, ambiguidade ou código sem sistema de codificação identificado no eixo de procedimento.',
+        next: 'Confira o procedimento, o código e o sistema nos documentos do caso e retire ou substitua o arquivo conflitante (bloqueado para texto livre).',
+      };
+    }
+    if (code === 'laterality') {
+      return {
+        reason: 'Há divergência ou ambiguidade de lateralidade entre os documentos ativos do caso (ex.: OD × OE).',
+        next: 'Compare os trechos originais de lateralidade e retire ou substitua o documento divergente antes de concluir (bloqueado para texto livre).',
+      };
+    }
+  }
+  const guidance = {
+    unreadable: {
+      reason: 'Esta versão pública não extrai texto de imagens nem realiza OCR ou análise visual de assinatura.',
+      next: 'Use “Abrir documento” para inspeção visual e solicite um PDF com camada textual ou retire o arquivo do fluxo.',
+    },
+    identity: {
+      reason: 'Os dados de identidade divergem do cadastro ativo ou são insuficientes para confirmar o vínculo.',
+      next: 'Use “Abrir documento” para comparar os campos originais em quarentena e solicite o documento correto; o vínculo automático permanece bloqueado.',
+    },
+    unknown: {
+      reason: 'O tipo documental não foi reconhecido pelas regras determinísticas desta demonstração.',
+      next: 'Use “Abrir documento” para conferir o original, solicite um exemplo das classes previstas ou retire este arquivo do fluxo.',
+    },
+    review: {
+      reason: 'Os campos foram extraídos, mas ainda precisam de conferência e confirmação humana.',
+      next: 'Use “Abrir documento”, confira a fonte de cada campo, valide a identidade e registre a revisão humana.',
+    },
+    'date-missing': {
+      reason: 'A data de emissão não foi localizada ou não possui formato válido.',
+      next: 'Use “Abrir documento” para conferir a data no original. Se corrigir o campo, registre o motivo (5 a 500 caracteres) ou solicite novo documento.',
+    },
+    future: {
+      reason: `A data de emissão é posterior à data de referência do exemplo (${isoToBrazil(session.manifest.referenceDate) || session.manifest.referenceDate}).`,
+      next: 'Use “Abrir documento” para conferir o trecho de emissão. Corrija com justificativa após revisão ou encaminhe a divergência.',
+    },
+    'window-unknown': {
+      reason: 'A data do procedimento fictício está ausente ou inválida para avaliar a janela temporal ilustrativa.',
+      next: 'Confira o cadastro sintético e a data do laudo; após revisão humana, registre o encaminhamento administrativo.',
+    },
+    window: {
+      reason: `A data do laudo está fora da janela ilustrativa configurada (${session.policy.maxAgeDays} dias em UTC para este exemplo).`,
+      next: 'Use “Abrir documento” para conferir a data e solicite versão atualizada se aplicável. Uma exceção exige revisão humana, responsável, prazo e justificativa.',
+    },
+    'visual-observation': {
+      reason: 'A observação visual humana independente na página do termo ainda não foi registrada como observada.',
+      next: 'Use “Abrir documento” e registre sua observação visual na página. Marca textual ou visual não autentica assinatura.',
+    },
+  };
+  return guidance[code] || {
+    reason: 'Há uma informação documental a conferir segundo as regras administrativas do exemplo.',
+    next: 'Revise o documento ou os quatro eixos e registre o encaminhamento.',
+  };
+}
+function taskDetail(label, value) {
+  const p = el('p', undefined, 'task-detail');
+  p.append(el('strong', label + ' '), document.createTextNode(value));
+  return p;
+}
 function renderTasks() {
   $('tasks').replaceChildren();
   const tasks = session.tasks();
@@ -356,7 +428,42 @@ function renderTasks() {
     : (suggestedDue || session.manifest.referenceDate);
   for (const t of tasks) {
     const row = el('article', undefined, 'task'), text = el('div');
-    text.append(el('h3', t.title), el('p', t.docId ? 'Documento ' + t.docId : 'Conjunto documental do caso'));
+    const guidance = taskGuidance(t);
+    text.append(
+      el('h3', t.title),
+      taskDetail('Motivo:', guidance.reason),
+      taskDetail('Próximo passo:', guidance.next),
+    );
+    if (t.docId) {
+      const doc = session.doc(t.docId);
+      if (doc) {
+        text.append(taskDetail('Documento:', `${doc.name} · ${doc.id}`));
+        const open = el('button', 'Abrir documento', 'task-source');
+        open.type = 'button';
+        open.setAttribute('aria-label', 'Abrir documento da pendência: ' + t.title);
+        open.addEventListener('click', async () => {
+          await run(async () => {
+            if (!session.doc(t.docId)) throw Error('Documento não encontrado na sessão atual.');
+            selected = t.docId;
+            message('Documento aberto para conferir a pendência: ' + t.title);
+          });
+          const area = $('review-area');
+          const heading = $('document-name');
+          if (area && !area.hidden && heading) {
+            heading.focus();
+            area.scrollIntoView({ block: 'start' });
+          }
+        });
+        text.append(open);
+      }
+    } else {
+      text.append(taskDetail(
+        'Fonte:',
+        t.id.startsWith('axis:')
+          ? 'Comparação cruzada dos quatro eixos nos documentos ativos do caso.'
+          : 'Lista de classes exigidas pela regra administrativa do exemplo.',
+      ));
+    }
     if (t.resolution) {
       text.append(el('p', 'Resolução: ' + t.resolution.note), el('p', 'Responsável: ' + t.resolution.assignment.owner + ' · prazo ' + t.resolution.assignment.due));
       row.append(text, el('span', 'Justificativa registrada', 'pill'));

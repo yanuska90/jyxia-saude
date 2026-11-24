@@ -234,11 +234,21 @@ async function main() {
 
     const waitIdle = () => waitUntil(() => cdp.eval(`!document.body.hasAttribute('aria-busy')`));
 
-    // 2. index.html across desktop & mobile viewports
+    // 2. index.html across desktop & mobile viewports + 3.1.0 sections & canonical links
     await cdp.send('Page.navigate', { url: `${baseUrl}/index.html` });
     await waitUntil(() => cdp.eval(`document.readyState === 'complete' && document.body.innerText.includes('JYXIA')`));
-    const indexFavHref = await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`);
-    assert.equal(indexFavHref, 'assets/favicon.svg');
+    const indexChecks = await cdp.eval(`({
+      favHref: document.querySelector('link[rel="icon"]')?.getAttribute('href'),
+      cssHref: document.querySelector('link[rel="stylesheet"]')?.getAttribute('href'),
+      sectionIds: ['problema', 'produto', 'versao-atual', 'demonstracao', 'validacao', 'acessibilidade', 'materiais'].every(id => Boolean(document.getElementById(id))),
+      valLinkHref: document.querySelector('#materiais a[href*="VALIDACAO_DOCUMENTAL.md"]')?.getAttribute('href') || '',
+      hasPlanText: document.body.innerText.includes('Medir antes de ampliar.') && document.body.innerText.includes('9 cenários'),
+    })`);
+    assert.equal(indexChecks.favHref, 'assets/favicon.svg');
+    assert.equal(indexChecks.cssHref, 'documental.css?v=3.2.0');
+    assert.equal(indexChecks.sectionIds, true, 'index.html deve manter todas as seções educativas 3.1.0/3.2.0');
+    assert(indexChecks.valLinkHref.endsWith('/docs/VALIDACAO_DOCUMENTAL.md'), `Link de validação deve apontar para docs/VALIDACAO_DOCUMENTAL.md, obtido ${indexChecks.valLinkHref}`);
+    assert.equal(indexChecks.hasPlanText, true);
     for (const vw of [320, 390, 768, 1024, 1280]) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: vw, height: 844, deviceScaleFactor: 1, mobile: vw < 768 });
       assert.equal(await cdp.eval(`document.documentElement.scrollWidth > window.innerWidth`), false, `Overflow em index.html a ${vw}px`);
@@ -248,7 +258,7 @@ async function main() {
     assert(navMinH >= 44, `Alvos de navegacao desktop devem ter >=44px de altura, obtido ${navMinH}`);
     console.log('E2E_2_INDEX_OK');
 
-    // 3. demo.html (9 scenarios + keyboard navigation)
+    // 3. demo.html (9 scenarios, demo-guide, noscript, cache-busting, tabindex + keyboard navigation)
     await cdp.send('Page.navigate', { url: `${baseUrl}/demo.html` });
     await waitUntil(() => cdp.eval(`
       document.readyState === 'complete' &&
@@ -256,7 +266,24 @@ async function main() {
       document.getElementById('scenario')?.options?.length === 9 &&
       document.getElementById('case-meta')?.textContent?.includes('12/04/1986')
     `));
-    assert.equal(await cdp.eval(`document.querySelector('link[rel="icon"]')?.getAttribute('href')`), 'assets/favicon.svg');
+    const demoMeta = await cdp.eval(`({
+      favHref: document.querySelector('link[rel="icon"]')?.getAttribute('href'),
+      cssHref: document.querySelector('link[rel="stylesheet"]')?.getAttribute('href'),
+      scriptSrc: document.querySelector('script[type="module"]')?.getAttribute('src'),
+      docNameTabIndex: document.getElementById('document-name')?.getAttribute('tabindex'),
+      hasGuide: Boolean(document.querySelector('details.demo-guide a[href="index.html#validacao"]')),
+      hasNoscript: Boolean(document.querySelector('noscript')),
+    })`);
+    assert.equal(demoMeta.favHref, 'assets/favicon.svg');
+    assert.equal(demoMeta.cssHref, 'documental.css?v=3.2.0');
+    assert.equal(demoMeta.scriptSrc, 'documental-ui.mjs?v=3.2.0');
+    assert.equal(demoMeta.docNameTabIndex, '-1');
+    assert.equal(demoMeta.hasGuide, true);
+    assert.equal(demoMeta.hasNoscript, true);
+    await cdp.eval(`document.querySelector('details.demo-guide summary').click()`);
+    assert.equal(await cdp.eval(`document.querySelector('details.demo-guide').open`), true);
+    await cdp.eval(`document.querySelector('details.demo-guide summary').click()`);
+    assert.equal(await cdp.eval(`document.querySelector('details.demo-guide').open`), false);
     await cdp.eval(`document.getElementById('scenario').focus()`);
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
@@ -482,6 +509,21 @@ async function main() {
     await cdp.eval(`document.getElementById('identity-confirm').checked = true; document.getElementById('review-form').requestSubmit();`);
     await waitIdle();
     assert.equal(await cdp.eval(`document.querySelector('#tasks input[type="date"]')?.value`), '2026-11-16');
+
+    const taskCheck = await cdp.eval(`(() => {
+      const card = [...document.querySelectorAll('#tasks .task')].find(el => el.textContent.includes('janela'));
+      const openBtn = card?.querySelector('.task-source');
+      const details = [...(card?.querySelectorAll('.task-detail') || [])].map(p => p.textContent);
+      return { hasReason: details.some(d => d.startsWith('Motivo: ')), hasNext: details.some(d => d.startsWith('Próximo passo: ')), hasDoc: details.some(d => d.startsWith('Documento: ')), hasBtn: Boolean(openBtn) };
+    })()`);
+    assert.deepEqual(taskCheck, { hasReason: true, hasNext: true, hasDoc: true, hasBtn: true });
+
+    await cdp.eval(`[...document.querySelectorAll('#document-list .doc-button')].find(b => b.textContent.includes('solicitacao.pdf')).click()`);
+    await waitIdle();
+    await cdp.eval(`[...document.querySelectorAll('#tasks .task')].find(el => el.textContent.includes('janela'))?.querySelector('.task-source')?.click()`);
+    await waitIdle();
+    assert.equal(await cdp.eval(`document.getElementById('document-name')?.textContent`), 'laudo-antigo.pdf');
+    assert.equal(await cdp.eval(`document.activeElement?.id`), 'document-name');
 
     await cdp.eval(`document.getElementById('reset-confirm').checked = true; document.getElementById('reset').click();`);
     await waitIdle();

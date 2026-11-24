@@ -1,5 +1,18 @@
 # Registro de decisões e versões
 
+## Reconciliação `origin/main` (`3.1.0`) na `jyxia-develop` (`3.2.0` + `backend/` `0.2.0`) — 24 de novembro de 2026
+
+- **Integração Git controlada (`merge --no-ff origin/main` em `jyxia-develop`):** preservação integral dos `74` commits da estrutura canônica (`frontend/public/`, `frontend/lab/`, `backend/`, `docs/`, `legacy/v2/`, `tests/`, `tools/`), mantendo removidos os `9` caminhos legados da raiz (`CHANGELOG.md`, `DEVSECOPS.md`, `SEGURANCA.md`, `VALIDACAO_DOCUMENTAL.md`, `demo.html`, `documental-core.mjs`, `documental-ui.mjs`, `documental.css`, `index.html`) e conciliando [`README.md`](../README.md) e [`docs/`](.).
+- **Funcionalidades portadas e adaptadas da entrega pública `3.1.0` para [`frontend/public/`](../frontend/public/) (`3.2.0`) sem regressão dos `9` cenários / `18` fixtures / `4` eixos:**
+  - Página inicial [`frontend/public/index.html`](../frontend/public/index.html): incorporadas as seções `#problema`, `#versao-atual`, `#demonstracao`, `#validacao`, `#acessibilidade` e `#materiais`, atualizadas com os números reais da `3.2.0` (`9` cenários, `18` fixtures SHA-256, `4` eixos determinísticos, separação de modalidades) e link externo apontando para [`docs/VALIDACAO_DOCUMENTAL.md`](VALIDACAO_DOCUMENTAL.md), mantendo o DOCX de `14/11/2026` identificado como plano base histórico;
+  - Demonstração [`frontend/public/demo.html`](../frontend/public/demo.html), [`documental-ui.mjs`](../frontend/public/documental-ui.mjs) e [`documental.css`](../frontend/public/documental.css): guia `<details class="demo-guide">`, fallback `<noscript>`, `tabindex="-1"` em `#document-name`, `taskGuidance()`/`taskDetail()` adaptados a todos os prefixos da `3.2.0` (incluindo `:v*`, `window-unknown`, `visual-observation`, `axis:procedure` e `axis:laterality`), botão `Abrir documento` (`.task-source`) com foco e rolagem até `#review-area`, escalas tipográficas ampliadas para mobile (`320px`/`390px`), `@media (forced-colors: active)` e cache-busting coerente `?v=3.2.0` (CSS, script e import ES);
+  - **Itens ainda planejados (não executados):** entrevistas de descoberta com `3–5` profissionais, conjunto exploratório independente de `~30` casos sintéticos, OCR para imagens/scans, investigação da hipótese de convênios, interface web conectada ao BFF e validação clínica/hospitalar permanecem explicitamente em planejamento.
+- **Integridade do backend (`0.2.0`, Etapa `3.3.4` / motor `3.3.4.1`):** nenhum componente institucional (`FastAPI`, `PostgreSQL 16`, migrations `0001`–`0009`, OIDC PKCE/MFA, RBAC, `FORCE ROW LEVEL SECURITY`, `jyxia_app`/`jyxia_worker`, storage controlado ou engine `3.3.4.1`) foi alterado ou reduzido.
+
+## Entrega pública `3.1.0` (histórico em `main`) — 22 de novembro de 2026
+
+- Commits `837def7` e `c2479eb` na branch `main` (Yanuska) sobre o layout pré-consolidação: identificação de versão `?v=3.1.0` em CSS/módulos, atualização de texto institucional do site (problema, público, plano de validação e visão de acessibilidade, com convênios como hipótese), guia `<details class="demo-guide">`, pendências com motivo/próximo passo/atalho e ajustes de legibilidade/`forced-colors`, mantendo dados sintéticos, PDF.js local e ausência de OCR/IA/login. Em `24/11/2026`, essas melhorias foram portadas aos destinos canônicos da `v3.2.0` (`frontend/public/` e `docs/`).
+
 ## Etapa 3.3.4 — 23 de novembro de 2026 (`backend/` `0.2.0` — Motor determinístico de consistência dos 4 eixos, rastreabilidade integral de evidências e histórico append-only, Migration `0009`)
 
 - **Motor determinístico de consistência independente de framework (`services/consistency_engine.py`, `core/constants.py`, `core/config.py`):**
