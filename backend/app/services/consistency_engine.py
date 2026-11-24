@@ -332,6 +332,52 @@ def _make_comparison_item(
     return item
 
 
+def _append_field_comparison_items(
+    items: list[dict[str, Any]],
+    *,
+    ctx: _ActiveVersionContext,
+    field_key: str,
+    field_item: ExtractedFieldInput | None,
+    default_role: str = "compared_value",
+) -> None:
+    """Append comparison items preserving raw_value, abstention reason and available evidence links."""
+    if field_item is None:
+        return
+    is_abstained = (
+        field_item.status == ExtractedFieldStatus.ABSTAINED.value or field_item.abstained
+    )
+    is_ambiguous = field_item.status == ExtractedFieldStatus.AMBIGUOUS.value
+    role = "abstained_source" if (is_abstained and not is_ambiguous) else default_role
+    reason_code = (
+        field_item.metadata_json.get("reason_code") if (is_abstained or is_ambiguous) else None
+    )
+    extra = {"reason_code": reason_code} if reason_code is not None else None
+    evs = _all_evs(ctx, field_item)
+    if evs:
+        for ev in evs:
+            items.append(
+                _make_comparison_item(
+                    ctx=ctx,
+                    field_key=field_key,
+                    field_item=field_item,
+                    ev=ev,
+                    role_in_comparison=role,
+                    extra=extra,
+                )
+            )
+    elif is_abstained or is_ambiguous:
+        items.append(
+            _make_comparison_item(
+                ctx=ctx,
+                field_key=field_key,
+                field_item=field_item,
+                ev=None,
+                role_in_comparison=role,
+                extra=extra,
+            )
+        )
+
+
 def _collect_links(
     contexts: list[_ActiveVersionContext],
     field_keys: tuple[str, ...],
@@ -756,6 +802,7 @@ def _evaluate_identity_axis(
     birth_entries: list[tuple[_ActiveVersionContext, ExtractedFieldInput, date]] = []
     abstained_births: list[tuple[_ActiveVersionContext, ExtractedFieldInput]] = []
     patient_entries: list[tuple[_ActiveVersionContext, ExtractedFieldInput, str]] = []
+    abstained_patients: list[tuple[_ActiveVersionContext, ExtractedFieldInput]] = []
     missing_docs_notes: list[str] = []
 
     for ctx in ready:
@@ -764,14 +811,11 @@ def _evaluate_identity_axis(
         i_field = ctx.fields_by_key.get("identifier")
 
         if p_field is not None:
-            for ev in _all_evs(ctx, p_field):
-                items.append(
-                    _make_comparison_item(
-                        ctx=ctx, field_key="patient", field_item=p_field, ev=ev, role_in_comparison="compared_value"
-                    )
-                )
+            _append_field_comparison_items(
+                items, ctx=ctx, field_key="patient", field_item=p_field
+            )
             if p_field.status == ExtractedFieldStatus.AMBIGUOUS.value:
-                for ev in _all_evs(ctx, p_field):
+                for ev in _all_evs(ctx, p_field) or (None,):
                     ambiguous_intra_items.append(
                         _make_comparison_item(
                             ctx=ctx,
@@ -781,9 +825,17 @@ def _evaluate_identity_axis(
                             role_in_comparison="intra_document_ambiguous",
                         )
                     )
-            elif p_field.status == ExtractedFieldStatus.EXTRACTED.value and (p_field.normalized_value or p_field.raw_value):
+            elif (
+                p_field.status == ExtractedFieldStatus.EXTRACTED.value
+                and not p_field.abstained
+            ):
                 p_norm = _conservative_text_key(p_field.normalized_value or p_field.raw_value or "")
-                patient_entries.append((ctx, p_field, p_norm))
+                if not p_norm:
+                    abstained_patients.append((ctx, p_field))
+                else:
+                    patient_entries.append((ctx, p_field, p_norm))
+            else:
+                abstained_patients.append((ctx, p_field))
         else:
             missing_docs_notes.append(f"patient_missing:{ctx.doc.document_id}")
             items.append(
@@ -797,14 +849,11 @@ def _evaluate_identity_axis(
             )
 
         if b_field is not None:
-            for ev in _all_evs(ctx, b_field):
-                items.append(
-                    _make_comparison_item(
-                        ctx=ctx, field_key="birth_date", field_item=b_field, ev=ev, role_in_comparison="compared_value"
-                    )
-                )
+            _append_field_comparison_items(
+                items, ctx=ctx, field_key="birth_date", field_item=b_field
+            )
             if b_field.status == ExtractedFieldStatus.AMBIGUOUS.value:
-                for ev in _all_evs(ctx, b_field):
+                for ev in _all_evs(ctx, b_field) or (None,):
                     ambiguous_intra_items.append(
                         _make_comparison_item(
                             ctx=ctx,
@@ -814,7 +863,10 @@ def _evaluate_identity_axis(
                             role_in_comparison="intra_document_ambiguous",
                         )
                     )
-            elif b_field.status == ExtractedFieldStatus.EXTRACTED.value:
+            elif (
+                b_field.status == ExtractedFieldStatus.EXTRACTED.value
+                and not b_field.abstained
+            ):
                 dt_val = _parse_iso_date(b_field.normalized_value)
                 if dt_val is None:
                     abstained_births.append((ctx, b_field))
@@ -835,14 +887,11 @@ def _evaluate_identity_axis(
             )
 
         if i_field is not None:
-            for ev in _all_evs(ctx, i_field):
-                items.append(
-                    _make_comparison_item(
-                        ctx=ctx, field_key="identifier", field_item=i_field, ev=ev, role_in_comparison="compared_value"
-                    )
-                )
+            _append_field_comparison_items(
+                items, ctx=ctx, field_key="identifier", field_item=i_field
+            )
             if i_field.status == ExtractedFieldStatus.AMBIGUOUS.value:
-                for ev in _all_evs(ctx, i_field):
+                for ev in _all_evs(ctx, i_field) or (None,):
                     ambiguous_intra_items.append(
                         _make_comparison_item(
                             ctx=ctx,
@@ -852,9 +901,12 @@ def _evaluate_identity_axis(
                             role_in_comparison="intra_document_ambiguous",
                         )
                     )
-            elif i_field.status == ExtractedFieldStatus.EXTRACTED.value:
+            elif (
+                i_field.status == ExtractedFieldStatus.EXTRACTED.value
+                and not i_field.abstained
+            ):
                 is_typed, id_type, id_val = _parse_typed_identifier(i_field)
-                if not is_typed or id_type is None or id_val is None:
+                if not is_typed or id_type is None or not id_val:
                     untyped_ids.append((ctx, i_field))
                 else:
                     id_entries.append((ctx, i_field, id_type, id_val))
@@ -973,8 +1025,37 @@ def _evaluate_identity_axis(
             engine_version=engine_version,
         )
 
+    if abstained_patients:
+        patient_reasons = sorted(
+            {
+                str(f.metadata_json.get("reason_code") or "ABSTAINED_PATIENT_FIELD")
+                for _, f in abstained_patients
+            }
+        )
+        limitations.append("PATIENT_FIELD_ABSTAINED_CANNOT_BE_SKIPPED")
+        for r_code in patient_reasons:
+            limitations.append(f"PATIENT_ABSTENTION_REASON:{r_code}")
+        return _build_axis_result(
+            axis=axis,
+            status=AxisStatus.ABSTENCAO,
+            rule_code="IDENTITY_PATIENT_ABSTAINED",
+            justification=(
+                f"Campo de paciente presente com extracao abstida/invalida ({patient_reasons}); "
+                "coincidencia de nascimento ou identificador nao elimina abstencao em paciente."
+            ),
+            fields_used=fields_used,
+            contexts=contexts,
+            items=items,
+            limitations=limitations,
+            engine_version=engine_version,
+        )
+
     if untyped_ids or abstained_id_fields or abstained_births:
         limitations.append("UNTYPED_OR_UNPARSED_IDENTITY_FIELD")
+        for _, f_item in abstained_id_fields + abstained_births:
+            r_code = f_item.metadata_json.get("reason_code")
+            if r_code:
+                limitations.append(f"IDENTITY_ABSTENTION_REASON:{r_code}")
         return _build_axis_result(
             axis=axis,
             status=AxisStatus.ABSTENCAO,
@@ -1039,6 +1120,25 @@ def _evaluate_identity_axis(
             engine_version=engine_version,
         )
 
+    if (
+        len(patient_entries) != len(ready)
+        or len(birth_entries) != len(ready)
+        or len(id_entries) != len(ready)
+    ):
+        return _build_axis_result(
+            axis=axis,
+            status=AxisStatus.ABSTENCAO,
+            rule_code="IDENTITY_INCOMPLETE_EXTRACTED_EVIDENCE",
+            justification=(
+                "Cobertura deterministica incompleta nos campos extraidos de identidade impede atribuicao de 'ok'."
+            ),
+            fields_used=fields_used,
+            contexts=contexts,
+            items=items,
+            limitations=limitations,
+            engine_version=engine_version,
+        )
+
     return _build_axis_result(
         axis=axis,
         status=AxisStatus.OK,
@@ -1082,8 +1182,11 @@ def _evaluate_procedure_axis(
     ambiguous_intra_proc: list[dict[str, Any]] = []
     conflicting_code_system_intra: list[dict[str, Any]] = []
     proc_desc_entries: list[tuple[_ActiveVersionContext, ExtractedFieldInput, str]] = []
+    abstained_proc_descs: list[tuple[_ActiveVersionContext, ExtractedFieldInput]] = []
     code_with_sys_entries: list[tuple[_ActiveVersionContext, ExtractedFieldInput, str, str]] = []
     code_without_sys: list[tuple[_ActiveVersionContext, ExtractedFieldInput]] = []
+    abstained_codes: list[tuple[_ActiveVersionContext, ExtractedFieldInput]] = []
+    abstained_code_systems: list[tuple[_ActiveVersionContext, ExtractedFieldInput]] = []
     missing_proc_docs: list[_ActiveVersionContext] = []
 
     for ctx in ready:
@@ -1096,13 +1199,9 @@ def _evaluate_procedure_axis(
             ("procedure_code_system", sys_field),
             ("procedure_code", code_field),
         ):
-            if f_obj is not None:
-                for ev in _all_evs(ctx, f_obj):
-                    items.append(
-                        _make_comparison_item(
-                            ctx=ctx, field_key=fk_name, field_item=f_obj, ev=ev, role_in_comparison="compared_value"
-                        )
-                    )
+            _append_field_comparison_items(
+                items, ctx=ctx, field_key=fk_name, field_item=f_obj
+            )
 
         if p_field is not None:
             if p_field.status == ExtractedFieldStatus.AMBIGUOUS.value:
@@ -1115,19 +1214,47 @@ def _evaluate_procedure_axis(
                         role_in_comparison="intra_document_ambiguous",
                     )
                 )
-            elif p_field.status == ExtractedFieldStatus.EXTRACTED.value and (p_field.normalized_value or p_field.raw_value):
-                proc_desc_entries.append(
-                    (ctx, p_field, _conservative_text_key(p_field.normalized_value or p_field.raw_value or ""))
+            elif (
+                p_field.status == ExtractedFieldStatus.EXTRACTED.value
+                and not p_field.abstained
+            ):
+                p_norm = _conservative_text_key(
+                    p_field.normalized_value or p_field.raw_value or ""
                 )
+                if not p_norm:
+                    abstained_proc_descs.append((ctx, p_field))
+                else:
+                    proc_desc_entries.append((ctx, p_field, p_norm))
+            else:
+                abstained_proc_descs.append((ctx, p_field))
+
+        explicit_sys: str | None = None
+        if sys_field is not None:
+            if sys_field.status == ExtractedFieldStatus.AMBIGUOUS.value:
+                conflicting_code_system_intra.append(
+                    _make_comparison_item(
+                        ctx=ctx,
+                        field_key="procedure_code_system",
+                        field_item=sys_field,
+                        ev=_first_ev(ctx, sys_field),
+                        role_in_comparison="conflicting_code_system",
+                    )
+                )
+            elif (
+                sys_field.status == ExtractedFieldStatus.EXTRACTED.value
+                and not sys_field.abstained
+            ):
+                raw_sys = sys_field.normalized_value or sys_field.raw_value
+                if raw_sys and _collapse_whitespace(raw_sys):
+                    explicit_sys = _collapse_whitespace(raw_sys).upper()
+                else:
+                    abstained_code_systems.append((ctx, sys_field))
+            else:
+                abstained_code_systems.append((ctx, sys_field))
 
         if code_field is not None:
             reason_code = str(code_field.metadata_json.get("reason_code") or "")
             sys_identified = code_field.metadata_json.get("system_identified")
-            explicit_sys: str | None = None
-            if sys_field is not None and sys_field.status == ExtractedFieldStatus.EXTRACTED.value:
-                raw_sys = sys_field.normalized_value or sys_field.raw_value
-                if raw_sys:
-                    explicit_sys = _collapse_whitespace(raw_sys).upper()
             meta_sys = code_field.metadata_json.get("code_system")
             if explicit_sys is None and isinstance(meta_sys, str) and meta_sys.strip():
                 explicit_sys = _collapse_whitespace(meta_sys).upper()
@@ -1153,17 +1280,29 @@ def _evaluate_procedure_axis(
                             role_in_comparison="intra_document_ambiguous",
                         )
                     )
-            elif code_field.status == ExtractedFieldStatus.ABSTAINED.value:
-                if reason_code == "MISSING_CODE_SYSTEM" or sys_identified is False:
+            elif (
+                code_field.status == ExtractedFieldStatus.ABSTAINED.value
+                or code_field.abstained
+            ):
+                if (
+                    reason_code in ("MISSING_CODE_SYSTEM", "CODE_SYSTEM_UNIDENTIFIED")
+                    or sys_identified is False
+                ):
                     code_without_sys.append((ctx, code_field))
+                else:
+                    abstained_codes.append((ctx, code_field))
             elif code_field.status == ExtractedFieldStatus.EXTRACTED.value:
                 code_val = _collapse_whitespace(
                     code_field.normalized_value or code_field.raw_value or ""
                 ).upper()
-                if not explicit_sys or sys_identified is False:
+                if not code_val:
+                    abstained_codes.append((ctx, code_field))
+                elif not explicit_sys or sys_identified is False:
                     code_without_sys.append((ctx, code_field))
                 else:
                     code_with_sys_entries.append((ctx, code_field, explicit_sys, code_val))
+            else:
+                abstained_codes.append((ctx, code_field))
 
         if p_field is None and code_field is None:
             missing_proc_docs.append(ctx)
@@ -1291,6 +1430,81 @@ def _evaluate_procedure_axis(
             justification=(
                 f"Sistemas de codificacao distintos entre documentos ({sorted(codes_by_sys.keys())}); "
                 "codigos nao sao comparaveis nem equivalentes entre sistemas diferentes sem tabela/revisao."
+            ),
+            fields_used=fields_used,
+            contexts=contexts,
+            items=items,
+            limitations=limitations,
+            engine_version=engine_version,
+        )
+
+    if abstained_proc_descs:
+        desc_reasons = sorted(
+            {
+                str(f.metadata_json.get("reason_code") or "ABSTAINED_PROCEDURE_DESCRIPTION")
+                for _, f in abstained_proc_descs
+            }
+        )
+        limitations.append("PROCEDURE_DESCRIPTION_ABSTAINED_CANNOT_BE_SKIPPED")
+        for r_code in desc_reasons:
+            limitations.append(f"PROCEDURE_ABSTENTION_REASON:{r_code}")
+        return _build_axis_result(
+            axis=axis,
+            status=AxisStatus.ABSTENCAO,
+            rule_code="PROCEDURE_DESCRIPTION_ABSTAINED",
+            justification=(
+                f"Descricao de procedimento presente com extracao abstida/invalida ({desc_reasons}); "
+                "coincidencia de codigo e sistema nao elimina abstencao na descricao."
+            ),
+            fields_used=fields_used,
+            contexts=contexts,
+            items=items,
+            limitations=limitations,
+            engine_version=engine_version,
+        )
+
+    if abstained_codes:
+        code_reasons = sorted(
+            {
+                str(f.metadata_json.get("reason_code") or "ABSTAINED_PROCEDURE_CODE")
+                for _, f in abstained_codes
+            }
+        )
+        limitations.append("PROCEDURE_CODE_ABSTAINED_CANNOT_BE_SKIPPED")
+        for r_code in code_reasons:
+            limitations.append(f"PROCEDURE_ABSTENTION_REASON:{r_code}")
+        return _build_axis_result(
+            axis=axis,
+            status=AxisStatus.ABSTENCAO,
+            rule_code="PROCEDURE_CODE_ABSTAINED",
+            justification=(
+                f"Codigo de procedimento presente com extracao abstida/invalida ({code_reasons}); "
+                "concordancia textual nao ignora nem omite codigo invalido."
+            ),
+            fields_used=fields_used,
+            contexts=contexts,
+            items=items,
+            limitations=limitations,
+            engine_version=engine_version,
+        )
+
+    if abstained_code_systems:
+        sys_reasons = sorted(
+            {
+                str(f.metadata_json.get("reason_code") or "ABSTAINED_PROCEDURE_CODE_SYSTEM")
+                for _, f in abstained_code_systems
+            }
+        )
+        limitations.append("PROCEDURE_CODE_SYSTEM_ABSTAINED_CANNOT_BE_SKIPPED")
+        for r_code in sys_reasons:
+            limitations.append(f"PROCEDURE_ABSTENTION_REASON:{r_code}")
+        return _build_axis_result(
+            axis=axis,
+            status=AxisStatus.ABSTENCAO,
+            rule_code="PROCEDURE_CODE_SYSTEM_ABSTAINED",
+            justification=(
+                f"Sistema de codificacao presente com extracao abstida/invalida ({sys_reasons}); "
+                "nao e permitido presumir concordancia com sistema invalidado."
             ),
             fields_used=fields_used,
             contexts=contexts,

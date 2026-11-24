@@ -19,6 +19,8 @@ from app.core.constants import (
     CaseReadinessState,
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
+    DEFAULT_CONSISTENCY_ENGINE_VERSION,
+    DEFAULT_CONSISTENCY_POLICY_VERSION,
     DocumentKind,
     ExtractedFieldStatus,
     HumanReviewAction,
@@ -53,6 +55,7 @@ from app.services.consistency_engine import (
     HumanReviewInput,
     evaluate_case_consistency,
 )
+from app.services.pdf_extraction import extract_pdf_document
 from app.services.processing_worker import ProcessingWorker
 from app.services.storage import LocalControlledSyntheticStorage
 
@@ -1304,3 +1307,528 @@ def test_rotated_cropbox_pdfs_and_audit_zero_pii(
         assert "Olho Direito" not in serialized
     finally:
         owner_db.close()
+
+
+def _build_minimal_text_pdf(lines: list[str]) -> bytes:
+    """Build deterministic single-page text PDF preserving spaces/control markers for extraction tests."""
+    ops = ["BT /F1 11 Tf"]
+    y = 740
+    for txt in lines:
+        esc = txt.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        ops.append(f"1 0 0 1 56 {y} Tm ({esc}) Tj")
+        y -= 24
+    ops.append("ET")
+    stream = ("\n".join(ops) + "\n").encode("latin1")
+    objs = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        f"5 0 obj\n<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"endstream\nendobj\n",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offs = [0]
+    for obj in objs:
+        offs.append(len(out))
+        out.extend(obj)
+    xref = len(out)
+    out.extend(f"xref\n0 {len(offs)}\n0000000000 65535 f \n".encode("ascii"))
+    for o in offs[1:]:
+        out.extend(f"{o:010d} 00000 n \n".encode("ascii"))
+    out.extend(
+        f"trailer\n<< /Size {len(offs)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(out)
+
+
+def _replace_with_abstained_field(
+    fields: list[ExtractedFieldInput],
+    *,
+    field_key: str,
+    new_field_id: str,
+    raw_value: str,
+    metadata: dict[str, Any],
+) -> list[ExtractedFieldInput]:
+    out: list[ExtractedFieldInput] = []
+    for x in fields:
+        if x.field_key != field_key:
+            out.append(x)
+            continue
+        ev = x.evidences[0]
+        out.append(
+            ExtractedFieldInput(
+                extracted_field_id=new_field_id,
+                organization_id=x.organization_id,
+                document_version_id=x.document_version_id,
+                processing_run_id=x.processing_run_id,
+                field_key=field_key,
+                raw_value=raw_value,
+                normalized_value=None,
+                status=ExtractedFieldStatus.ABSTAINED.value,
+                abstained=True,
+                metadata_json=metadata,
+                evidences=(
+                    _ev(
+                        f"ev-{new_field_id}",
+                        org_id=ev.organization_id,
+                        ver_id=ev.document_version_id,
+                        field_id=new_field_id,
+                        page=ev.page_number,
+                        bbox=ev.bbox,
+                        quote=f"{field_key}: {raw_value}",
+                    ),
+                ),
+            )
+        )
+    return out
+
+
+def test_identity_patient_abstained_regression_empty_and_invalid_chars() -> None:
+    d_ok = _make_doc(
+        "doc-1",
+        DocumentKind.PEDIDO.value,
+        fields=_complete_fields("ver-doc-1-1"),
+        reviewed=True,
+    )
+
+    d_abs = d_ok
+    for reason_code, raw_patient in (
+        ("EMPTY_VALUE", "   "),
+        ("INVALID_CHARACTERS", "Paciente\ufffdAlfa"),
+    ):
+        f_abstained_patient = _replace_with_abstained_field(
+            _complete_fields("ver-doc-2-1"),
+            field_key="patient",
+            new_field_id=f"p-abs-{reason_code}",
+            raw_value=raw_patient,
+            metadata={"reason_code": reason_code},
+        )
+        d_abs = _make_doc(
+            "doc-2",
+            DocumentKind.LAUDO.value,
+            fields=f_abstained_patient,
+            reviewed=True,
+        )
+        res = evaluate_case_consistency(
+            CaseConsistencyInput(
+                organization_id="org-1",
+                case_id=f"c-pat-{reason_code}",
+                case_code=f"PAT-{reason_code}",
+                documents=(d_ok, d_abs),
+            )
+        )
+        ax_id = res.axes[AxisName.IDENTIDADE]
+        assert ax_id.status == AxisStatus.ABSTENCAO
+        assert ax_id.rule_code == "IDENTITY_PATIENT_ABSTAINED"
+        assert f"PATIENT_ABSTENTION_REASON:{reason_code}" in ax_id.limitations
+        assert res.human_review_completed is True
+        assert res.readiness_state == CaseReadinessState.ABSTENCAO
+        assert res.readiness_state != CaseReadinessState.CONFERIDA
+        assert res.clinical_approval is False
+
+        abs_items = [
+            c
+            for c in ax_id.comparison_items
+            if c["field_key"] == "patient" and c["document_id"] == "doc-2"
+        ]
+        assert len(abs_items) == 1
+        assert abs_items[0]["field_status"] == ExtractedFieldStatus.ABSTAINED.value
+        assert abs_items[0]["raw_value"] == raw_patient
+        assert abs_items[0]["reason_code"] == reason_code
+        assert abs_items[0]["evidence_id"] == f"ev-p-abs-{reason_code}"
+        assert f"ev-p-abs-{reason_code}" in ax_id.evidence_reference_ids
+
+    # Both documents with patient abstained -> STILL ABSTENCAO (never OK/CONFERIDA or artificial conflict)
+    f_abs_1 = _replace_with_abstained_field(
+        _complete_fields("ver-doc-1-1"),
+        field_key="patient",
+        new_field_id="p-abs-1",
+        raw_value="",
+        metadata={"reason_code": "EMPTY_VALUE"},
+    )
+    res_both = evaluate_case_consistency(
+        CaseConsistencyInput(
+            organization_id="org-1",
+            case_id="c-pat-both",
+            case_code="PAT-BOTH",
+            documents=(
+                _make_doc("doc-1", DocumentKind.PEDIDO.value, fields=f_abs_1, reviewed=True),
+                d_abs,
+            ),
+        )
+    )
+    assert res_both.axes[AxisName.IDENTIDADE].status == AxisStatus.ABSTENCAO
+    assert res_both.axes[AxisName.IDENTIDADE].rule_code == "IDENTITY_PATIENT_ABSTAINED"
+    assert res_both.readiness_state == CaseReadinessState.ABSTENCAO
+
+    # Real absent patient (None) continues to yield PENDENTE (not coerced to abstencao)
+    d_missing_pat = _make_doc(
+        "doc-2",
+        DocumentKind.LAUDO.value,
+        fields=_complete_fields("ver-doc-2-1", patient=None),
+        reviewed=True,
+    )
+    res_miss = evaluate_case_consistency(
+        CaseConsistencyInput(
+            organization_id="org-1", case_id="c-pat-miss", case_code="PAT-MISS", documents=(d_ok, d_missing_pat)
+        )
+    )
+    assert res_miss.axes[AxisName.IDENTIDADE].status == AxisStatus.PENDENTE
+    assert res_miss.axes[AxisName.IDENTIDADE].rule_code == "IDENTITY_MISSING_REQUIRED_FIELDS"
+    assert res_miss.readiness_state == CaseReadinessState.PENDENTE
+
+    # Valid explicit conflict in identifier is NOT masked by patient abstention, and invalid patient causes no false name conflict
+    f_conflict_id_abs_pat = _replace_with_abstained_field(
+        _complete_fields("ver-doc-2-1", identifier="SYN-P99"),
+        field_key="patient",
+        new_field_id="p-abs-conf",
+        raw_value="Pessoa\ufffdX",
+        metadata={"reason_code": "INVALID_CHARACTERS"},
+    )
+    res_conf = evaluate_case_consistency(
+        CaseConsistencyInput(
+            organization_id="org-1",
+            case_id="c-pat-id-conf",
+            case_code="PAT-ID-CONF",
+            documents=(d_ok, _make_doc("doc-2", DocumentKind.LAUDO.value, fields=f_conflict_id_abs_pat)),
+        )
+    )
+    assert res_conf.axes[AxisName.IDENTIDADE].status == AxisStatus.CONFLITO
+    assert res_conf.axes[AxisName.IDENTIDADE].rule_code == "IDENTITY_IDENTIFIER_CONFLICT"
+
+
+def test_procedure_abstained_description_and_code_regression() -> None:
+    d_ok = _make_doc(
+        "doc-1",
+        DocumentKind.PEDIDO.value,
+        fields=_complete_fields("ver-doc-1-1"),
+        reviewed=True,
+    )
+
+    # Caso A: procedure description abstained (EMPTY_VALUE / INVALID_CHARACTERS) + matching code/system
+    for reason_code, raw_proc in (
+        ("EMPTY_VALUE", "   "),
+        ("INVALID_CHARACTERS", "Faco\ufffdLIO"),
+    ):
+        f_proc_abs = _replace_with_abstained_field(
+            _complete_fields("ver-doc-2-1"),
+            field_key="procedure",
+            new_field_id=f"pr-abs-{reason_code}",
+            raw_value=raw_proc,
+            metadata={"reason_code": reason_code},
+        )
+        res_a = evaluate_case_consistency(
+            CaseConsistencyInput(
+                organization_id="org-1",
+                case_id=f"c-proc-a-{reason_code}",
+                case_code=f"PA-{reason_code}",
+                documents=(d_ok, _make_doc("doc-2", DocumentKind.LAUDO.value, fields=f_proc_abs, reviewed=True)),
+            )
+        )
+        ax_p = res_a.axes[AxisName.PROCEDIMENTO_CODIGO]
+        assert ax_p.status == AxisStatus.ABSTENCAO
+        assert ax_p.rule_code == "PROCEDURE_DESCRIPTION_ABSTAINED"
+        assert f"PROCEDURE_ABSTENTION_REASON:{reason_code}" in ax_p.limitations
+        assert res_a.readiness_state == CaseReadinessState.ABSTENCAO
+        assert res_a.readiness_state != CaseReadinessState.CONFERIDA
+        abs_it = [c for c in ax_p.comparison_items if c["field_key"] == "procedure" and c["document_id"] == "doc-2"]
+        assert len(abs_it) == 1
+        assert abs_it[0]["raw_value"] == raw_proc
+        assert abs_it[0]["reason_code"] == reason_code
+        assert abs_it[0]["evidence_id"] in ax_p.evidence_reference_ids
+
+    # Caso B: procedure_code abstained by non-system reason (EMPTY_VALUE / INVALID_CHARACTERS) + matching description
+    for reason_code, raw_code in (
+        ("EMPTY_VALUE", "  "),
+        ("INVALID_CHARACTERS", "04.05\ufffd"),
+    ):
+        f_code_abs = _replace_with_abstained_field(
+            _complete_fields("ver-doc-2-1"),
+            field_key="procedure_code",
+            new_field_id=f"cd-abs-{reason_code}",
+            raw_value=raw_code,
+            metadata={"reason_code": reason_code},
+        )
+        res_b = evaluate_case_consistency(
+            CaseConsistencyInput(
+                organization_id="org-1",
+                case_id=f"c-proc-b-{reason_code}",
+                case_code=f"PB-{reason_code}",
+                documents=(d_ok, _make_doc("doc-2", DocumentKind.LAUDO.value, fields=f_code_abs, reviewed=True)),
+            )
+        )
+        ax_p = res_b.axes[AxisName.PROCEDIMENTO_CODIGO]
+        assert ax_p.status == AxisStatus.ABSTENCAO
+        assert ax_p.rule_code == "PROCEDURE_CODE_ABSTAINED"
+        assert f"PROCEDURE_ABSTENTION_REASON:{reason_code}" in ax_p.limitations
+        assert res_b.readiness_state == CaseReadinessState.ABSTENCAO
+        assert res_b.readiness_state != CaseReadinessState.CONFERIDA
+        abs_it = [c for c in ax_p.comparison_items if c["field_key"] == "procedure_code" and c["document_id"] == "doc-2"]
+        assert len(abs_it) == 1
+        assert abs_it[0]["raw_value"] == raw_code
+        assert abs_it[0]["reason_code"] == reason_code
+        assert abs_it[0]["evidence_id"] in ax_p.evidence_reference_ids
+
+    # Preservation 1: code without coding system -> PROCEDURE_CODE_WITHOUT_SYSTEM (both MISSING_CODE_SYSTEM and CODE_SYSTEM_UNIDENTIFIED)
+    for sys_reason in ("MISSING_CODE_SYSTEM", "CODE_SYSTEM_UNIDENTIFIED"):
+        f_nosys = _replace_with_abstained_field(
+            _complete_fields("ver-doc-2-1", code_system=None),
+            field_key="procedure_code",
+            new_field_id=f"cd-nosys-{sys_reason}",
+            raw_value="04.05.05.011-9",
+            metadata={"reason_code": sys_reason, "system_identified": False},
+        )
+        res_ns = evaluate_case_consistency(
+            CaseConsistencyInput(
+                organization_id="org-1",
+                case_id=f"c-ns-{sys_reason}",
+                case_code=f"NS-{sys_reason}",
+                documents=(d_ok, _make_doc("doc-2", DocumentKind.LAUDO.value, fields=f_nosys, reviewed=True)),
+            )
+        )
+        assert res_ns.axes[AxisName.PROCEDIMENTO_CODIGO].status == AxisStatus.ABSTENCAO
+        assert res_ns.axes[AxisName.PROCEDIMENTO_CODIGO].rule_code == "PROCEDURE_CODE_WITHOUT_SYSTEM"
+
+    # Preservation 2: truly absent procedure_code (None) with matching description keeps limited textual OK
+    d_no_code = _make_doc(
+        "doc-2",
+        DocumentKind.LAUDO.value,
+        fields=_complete_fields("ver-doc-2-1", code_system=None, code=None),
+        reviewed=True,
+    )
+    res_txt = evaluate_case_consistency(
+        CaseConsistencyInput(
+            organization_id="org-1", case_id="c-proc-txt", case_code="PR-TXT", documents=(d_ok, d_no_code)
+        )
+    )
+    assert res_txt.axes[AxisName.PROCEDIMENTO_CODIGO].status == AxisStatus.OK
+    assert res_txt.axes[AxisName.PROCEDIMENTO_CODIGO].rule_code == "PROCEDURE_TEXTUAL_MATCH_NO_COMMON_CODE"
+    assert (
+        "CODE_NOT_PRESENT_IN_ALL_DOCUMENTS_TEXTUAL_ONLY"
+        in res_txt.axes[AxisName.PROCEDIMENTO_CODIGO].limitations
+    )
+
+    # Preservation 3: both procedure and procedure_code truly absent -> PENDENTE
+    d_no_proc = _make_doc(
+        "doc-2",
+        DocumentKind.LAUDO.value,
+        fields=_complete_fields("ver-doc-2-1", procedure=None, code_system=None, code=None),
+        reviewed=True,
+    )
+    res_pend = evaluate_case_consistency(
+        CaseConsistencyInput(
+            organization_id="org-1", case_id="c-proc-miss", case_code="PR-MISS", documents=(d_ok, d_no_proc)
+        )
+    )
+    assert res_pend.axes[AxisName.PROCEDIMENTO_CODIGO].status == AxisStatus.PENDENTE
+    assert res_pend.axes[AxisName.PROCEDIMENTO_CODIGO].rule_code == "PROCEDURE_MISSING_IN_DOCUMENT"
+
+
+def test_real_pdf_abstained_fields_end_to_end_pipeline_and_engine_version_distinction(
+    migrated_engine, app_engine, worker_engine, tmp_path: Path
+) -> None:
+    assert DEFAULT_CONSISTENCY_ENGINE_VERSION == "3.3.4.1"
+    assert DEFAULT_CONSISTENCY_POLICY_VERSION == "3.3.4"
+
+    # 1. Verify pdf_extraction -> consistency_engine directly on blank patient, blank procedure and blank code PDFs
+    pdf_base = _build_minimal_text_pdf(
+        [
+            "Tipo: Solicitacao",
+            "Paciente: Pessoa Sintetica Alfa",
+            "Nascimento: 12/04/1986",
+            "Identificador: SYN-P01",
+            "Emissao: 11/11/2026",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: SIGTAP-FICTICIO",
+            "Codigo: 04.05.05.011-9",
+            "Lateralidade: OD",
+        ]
+    )
+    pdf_blank_patient = _build_minimal_text_pdf(
+        [
+            "Tipo: Laudo",
+            "Paciente:   ",
+            "Nascimento: 12/04/1986",
+            "Identificador: SYN-P01",
+            "Emissao: 11/11/2026",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: SIGTAP-FICTICIO",
+            "Codigo: 04.05.05.011-9",
+            "Lateralidade: OD",
+        ]
+    )
+    pdf_blank_proc = _build_minimal_text_pdf(
+        [
+            "Tipo: Laudo",
+            "Paciente: Pessoa Sintetica Alfa",
+            "Nascimento: 12/04/1986",
+            "Identificador: SYN-P01",
+            "Emissao: 11/11/2026",
+            "Procedimento:   ",
+            "Sistema: SIGTAP-FICTICIO",
+            "Codigo: 04.05.05.011-9",
+            "Lateralidade: OD",
+        ]
+    )
+    pdf_blank_code = _build_minimal_text_pdf(
+        [
+            "Tipo: Laudo",
+            "Paciente: Pessoa Sintetica Alfa",
+            "Nascimento: 12/04/1986",
+            "Identificador: SYN-P01",
+            "Emissao: 11/11/2026",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: SIGTAP-FICTICIO",
+            "Codigo:   ",
+            "Lateralidade: OD",
+        ]
+    )
+    assert extract_pdf_document(pdf_blank_patient).outcome == "executed"
+
+    # 2. Verify historical distinction between engine_version "3.3.4" and "3.3.4.1" + end-to-end persistence
+    env = _seed_api_environment(migrated_engine, app_engine, tmp_path)
+    storage = LocalControlledSyntheticStorage(env["storage_root"], enabled=True, max_bytes=20 * 1024 * 1024)
+    org_a_id = env["org_a_id"]
+    admin_id = env["actors"]["admin_a"]["user_id"]
+    reviewer_id = env["actors"]["reviewer_a"]["user_id"]
+
+    app_v1 = create_app(env["settings"])
+    worker = ProcessingWorker(create_session_factory(worker_engine), storage, env["settings"], worker_id="reg-wrk")
+
+    def _run_case_pair(case_code: str, second_pdf: bytes) -> tuple[str, dict[str, Any]]:
+        seed_db = create_session_factory(migrated_engine)()
+        try:
+            case_obj = CaseAndDocumentRepository.create_case(
+                seed_db,
+                TenantContext(organization_id=org_a_id, actor_user_id=admin_id),
+                case_code=case_code,
+                external_reference=None,
+                procedure_reference=f"Regression {case_code}",
+                declared_laterality=None,
+                readiness_state=CaseReadinessState.PENDENTE.value,
+            )
+            seed_db.commit()
+            cid = case_obj.id
+        finally:
+            seed_db.close()
+
+        headers = {CSRF_HEADER_NAME: env["actors"]["admin_a"]["csrf_cookie"], "Origin": "http://127.0.0.1:8000"}
+        with TestClient(app_v1) as client:
+            client.cookies.set(SESSION_COOKIE_NAME, env["actors"]["admin_a"]["session_cookie"])
+            client.cookies.set(CSRF_COOKIE_NAME, env["actors"]["admin_a"]["csrf_cookie"])
+            for idx, (fname, kind, raw_b) in enumerate(
+                [
+                    ("base.pdf", DocumentKind.PEDIDO, pdf_base),
+                    ("abstained.pdf", DocumentKind.LAUDO, second_pdf),
+                ]
+            ):
+                up = client.post(
+                    f"/api/v1/organizations/{org_a_id}/cases/{cid}/documents",
+                    headers=headers,
+                    data={"document_kind": kind.value, "source_label": f"{case_code}:{idx}"},
+                    files={"file": (fname, raw_b, "application/pdf")},
+                )
+                assert up.status_code == 201
+
+        for _ in range(6):
+            if worker.process_one_cycle(max_jobs=10).claimed == 0:
+                break
+
+        # Record human review on all active versions and re-run consistency to prove abstention still blocks CONFERIDA
+        rev_db = create_session_factory(migrated_engine)()
+        try:
+            apply_pg_rls_context(rev_db, organization_id=org_a_id)
+            vers = rev_db.execute(
+                text(
+                    "SELECT dv.id FROM document_versions dv "
+                    "JOIN documents d ON d.id = dv.document_id AND d.organization_id = dv.organization_id "
+                    "WHERE d.organization_id = :org AND d.case_id = :cid AND dv.is_current = TRUE"
+                ),
+                {"org": org_a_id, "cid": cid},
+            ).scalars().all()
+            assert len(vers) == 2
+            for vid in vers:
+                InstitutionalService.record_human_review(
+                    rev_db,
+                    TenantContext(organization_id=org_a_id, actor_user_id=reviewer_id),
+                    HumanReviewCreateInput(
+                        document_version_id=vid,
+                        reviewer_user_id=reviewer_id,
+                        action_type=HumanReviewAction.OBSERVED,
+                        justification="Revisao administrativa de regressao de campo abstido.",
+                        policy_version=DEFAULT_CONSISTENCY_POLICY_VERSION,
+                    ),
+                )
+            rev_db.commit()
+        finally:
+            rev_db.close()
+
+        with TestClient(app_v1) as client:
+            client.cookies.set(SESSION_COOKIE_NAME, env["actors"]["reviewer_a"]["session_cookie"])
+            client.cookies.set(CSRF_COOKIE_NAME, env["actors"]["reviewer_a"]["csrf_cookie"])
+            re_post = client.post(
+                f"/api/v1/organizations/{org_a_id}/cases/{cid}/consistency-assessments",
+                headers={CSRF_HEADER_NAME: env["actors"]["reviewer_a"]["csrf_cookie"], "Origin": "http://127.0.0.1:8000"},
+            )
+            assert re_post.status_code == 201
+        assert worker.process_one_cycle(max_jobs=5).succeeded == 1
+
+        with TestClient(app_v1) as client:
+            client.cookies.set(SESSION_COOKIE_NAME, env["actors"]["auditor_a"]["session_cookie"])
+            lst = client.get(f"/api/v1/organizations/{org_a_id}/cases/{cid}/consistency-assessments").json()
+            assert lst["total"] == 2
+            det = client.get(
+                f"/api/v1/organizations/{org_a_id}/cases/{cid}/consistency-assessments/{lst['assessments'][0]['assessment_id']}"
+            ).json()
+            return cid, det
+
+    _, det_pat = _run_case_pair("REG-PAT-EMPTY", pdf_blank_patient)
+    axes_pat = {a["axis"]: a for a in det_pat["axes"]}
+    assert det_pat["engine_version"] == "3.3.4.1"
+    assert det_pat["policy_version"] == "3.3.4"
+    assert det_pat["human_review_completed"] is True
+    assert det_pat["readiness_state"] == CaseReadinessState.ABSTENCAO.value
+    assert axes_pat[AxisName.IDENTIDADE.value]["status"] == AxisStatus.ABSTENCAO.value
+    assert axes_pat[AxisName.IDENTIDADE.value]["rule"] == "IDENTITY_PATIENT_ABSTAINED"
+    assert axes_pat[AxisName.PROCEDIMENTO_CODIGO.value]["status"] == AxisStatus.OK.value
+    assert axes_pat[AxisName.LATERALIDADE.value]["status"] == AxisStatus.OK.value
+    assert axes_pat[AxisName.TEMPORALIDADE.value]["status"] == AxisStatus.OK.value
+
+    _, det_proc = _run_case_pair("REG-PROC-EMPTY", pdf_blank_proc)
+    axes_proc = {a["axis"]: a for a in det_proc["axes"]}
+    assert det_proc["readiness_state"] == CaseReadinessState.ABSTENCAO.value
+    assert axes_proc[AxisName.PROCEDIMENTO_CODIGO.value]["status"] == AxisStatus.ABSTENCAO.value
+    assert axes_proc[AxisName.PROCEDIMENTO_CODIGO.value]["rule"] == "PROCEDURE_DESCRIPTION_ABSTAINED"
+
+    c_code_id, det_code = _run_case_pair("REG-CODE-EMPTY", pdf_blank_code)
+    axes_code = {a["axis"]: a for a in det_code["axes"]}
+    assert det_code["readiness_state"] == CaseReadinessState.ABSTENCAO.value
+    assert axes_code[AxisName.PROCEDIMENTO_CODIGO.value]["status"] == AxisStatus.ABSTENCAO.value
+    assert axes_code[AxisName.PROCEDIMENTO_CODIGO.value]["rule"] == "PROCEDURE_CODE_ABSTAINED"
+
+    # Re-evaluate identical case snapshot under legacy version "3.3.4" vs "3.3.4.1" and confirm distinct fingerprints/history
+    settings_legacy_ver = env["settings"].model_copy(update={"consistency_engine_version": "3.3.4"})
+    app_legacy = create_app(settings_legacy_ver)
+    worker_legacy = ProcessingWorker(
+        create_session_factory(worker_engine), storage, settings_legacy_ver, worker_id="reg-wrk-334"
+    )
+    with TestClient(app_legacy) as client:
+        client.cookies.set(SESSION_COOKIE_NAME, env["actors"]["reviewer_a"]["session_cookie"])
+        client.cookies.set(CSRF_COOKIE_NAME, env["actors"]["reviewer_a"]["csrf_cookie"])
+        r_leg = client.post(
+            f"/api/v1/organizations/{org_a_id}/cases/{c_code_id}/consistency-assessments",
+            headers={CSRF_HEADER_NAME: env["actors"]["reviewer_a"]["csrf_cookie"], "Origin": "http://127.0.0.1:8000"},
+        )
+        assert r_leg.status_code == 201
+    assert worker_legacy.process_one_cycle(max_jobs=5).succeeded == 1
+
+    with TestClient(app_v1) as client:
+        client.cookies.set(SESSION_COOKIE_NAME, env["actors"]["auditor_a"]["session_cookie"])
+        hist = client.get(f"/api/v1/organizations/{org_a_id}/cases/{c_code_id}/consistency-assessments").json()
+        assert hist["total"] == 3
+        versions = [a["engine_version"] for a in hist["assessments"]]
+        fps = [a["input_fingerprint_sha256"] for a in hist["assessments"]]
+        assert versions == ["3.3.4", "3.3.4.1", "3.3.4.1"]
+        assert fps[0] != fps[1]
+        assert len({ax["engine_version"] for ax in det_code["axes"]}) == 1
+        assert det_code["axes"][0]["engine_version"] == "3.3.4.1"
