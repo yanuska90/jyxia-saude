@@ -18,14 +18,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT))
 
-from alembic import command  # noqa: E402
-from alembic.config import Config  # noqa: E402
-
 from app.core.config import Settings  # noqa: E402
 from app.core.constants import DocumentKind, OrganizationRole  # noqa: E402
 from app.core.session_crypto import hmac_token_digest  # noqa: E402
+from app.db.base import Base  # noqa: E402
 from app.db.session import create_db_engine, create_session_factory  # noqa: E402
 from app.main import create_app  # noqa: E402
+import app.models.entities  # noqa: F401, E402
 from app.repositories.identity import IdentityAndSessionRepository  # noqa: E402
 from app.repositories.institutional import OrganizationRepository  # noqa: E402
 from app.schemas.tenant import DocumentCaseCreateInput, TenantContext  # noqa: E402
@@ -49,11 +48,6 @@ def main() -> None:
         db_url = f"sqlite:///{(tmp_path / 'inst_e2e.sqlite3').as_posix()}"
         storage_dir = tmp_path / "synthetic_storage"
 
-        cfg = Config(str(ROOT / "backend" / "alembic.ini"))
-        cfg.set_main_option("script_location", str(ROOT / "backend" / "migrations"))
-        cfg.set_main_option("sqlalchemy.url", db_url)
-        command.upgrade(cfg, "head")
-
         settings = Settings(
             env="test",
             app_base_url=f"http://127.0.0.1:{args.port}",
@@ -66,6 +60,7 @@ def main() -> None:
             oidc_enabled=False,
         )
         engine = create_db_engine(db_url)
+        Base.metadata.create_all(engine)
         factory = create_session_factory(engine)
         storage = LocalControlledSyntheticStorage(
             storage_dir,

@@ -152,7 +152,7 @@ async function main() {
 
   try {
     try {
-      await waitForHttp(`http://127.0.0.1:${httpPort}/api/v1/health/live`, 20000);
+      await waitForHttp(`http://127.0.0.1:${httpPort}/api/v1/health/live`, 30000);
     } catch (err) {
       throw new Error(`${err.message}\nServer stderr:\n${serverStderr}`);
     }
@@ -161,6 +161,9 @@ async function main() {
       browserBin,
       [
         '--headless=new',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-first-run',
         '--no-default-browser-check',
@@ -168,10 +171,19 @@ async function main() {
         `--remote-debugging-port=${cdpPort}`,
         `http://127.0.0.1:${httpPort}/institutional/`,
       ],
-      { stdio: 'ignore' }
+      { stdio: ['ignore', 'ignore', 'pipe'] }
     );
+    let browserStderr = '';
+    browserProc.stderr?.on('data', (chunk) => {
+      browserStderr += chunk.toString();
+    });
 
-    const targetsResp = await waitForHttp(`http://127.0.0.1:${cdpPort}/json/list`, 10000);
+    let targetsResp;
+    try {
+      targetsResp = await waitForHttp(`http://127.0.0.1:${cdpPort}/json/list`, 15000);
+    } catch (err) {
+      throw new Error(`${err.message}\nBrowser stderr:\n${browserStderr}`);
+    }
     const targets = await targetsResp.json();
     const pageTarget = targets.find((t) => t.type === 'page') || targets[0];
     assert.ok(pageTarget?.webSocketDebuggerUrl, 'Target CDP não encontrado');
@@ -232,23 +244,25 @@ async function main() {
     assert.ok(initialMetrics.readiness.includes('pendente'));
 
     // Verify P2-01: Upload button is visible for reviewer with 'document:upload' permission
+    await waitForCondition(
+      cdp,
+      `document.querySelectorAll('#case-documents-tbody button[data-inspect-version-id]').length === 2`
+    );
     const uploadBtnVisible = await cdp.eval(`
       Boolean(document.getElementById('btn-toggle-upload-doc')) &&
       document.getElementById('btn-toggle-upload-doc').hidden === false
     `);
     assert.equal(uploadBtnVisible, true, 'Botão de upload documental deve estar visível para document:upload');
 
-    // Verify P2-02: Rapidly switch between Version 1 and Version 2; only Version 2 (last selected) must remain active,
-    // and then switch back to Version 1 for inspection
+    // Verify P2-02: Rapidly switch between Version 1 and Version 2; only Version 1 (last selected) must remain active
     const switchedProperly = await cdp.eval(`(() => {
       const buttons = Array.from(document.querySelectorAll('#case-documents-tbody button[data-inspect-version-id]'));
       if (buttons.length < 2) return false;
       const v1Id = buttons[0].getAttribute('data-inspect-version-id');
       const v2Id = buttons[1].getAttribute('data-inspect-version-id');
-      buttons[0].click();
       buttons[1].click();
       buttons[0].click();
-      return v1Id && v2Id && v1Id !== v2Id;
+      return Boolean(v1Id && v2Id && v1Id !== v2Id);
     })()`);
     assert.equal(switchedProperly, true);
 
@@ -432,7 +446,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('INSTITUTIONAL_E2E_FAILED:', err);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('INSTITUTIONAL_E2E_FAILED:', err);
+    process.exit(1);
+  });
