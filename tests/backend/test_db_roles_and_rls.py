@@ -1331,11 +1331,38 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
     from app.schemas.tenant import DocumentCaseCreateInput
     from app.services.consistency_engine import evaluate_case_consistency
     from app.services.institutional_service import HumanReviewStateConflictError
+    from tests.backend.test_human_review_and_institutional_ui import _build_synthetic_selectable_pdf
 
-    repo_root = Path(__file__).resolve().parents[2]
-    fixtures_dir = repo_root / "frontend" / "public" / "fixtures"
-    coh_pdf1 = (fixtures_dir / "caso_coerente_01_solicitacao.pdf").read_bytes()
-    coh_pdf2 = (fixtures_dir / "caso_coerente_01_biometria.pdf").read_bytes()
+    coh_pdf1 = _build_synthetic_selectable_pdf(
+        [
+            "Tipo: solicitacao",
+            "Subfamilia: oftalmologia",
+            "Origem: Ambulatorio Sintetico Alpha",
+            "Paciente: Helena Sintetica Oliveira",
+            "Nascimento: 1975-08-14",
+            "Identificador: CPF-SYN-335-01",
+            "Emissao: 2026-10-10",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: TUSS",
+            "Codigo: 31309054",
+            "Lateralidade: OD",
+        ]
+    )
+    coh_pdf2 = _build_synthetic_selectable_pdf(
+        [
+            "Tipo: laudo",
+            "Subfamilia: oftalmologia",
+            "Origem: Centro Diagnostico Sintetico Alpha",
+            "Paciente: Helena Sintetica Oliveira",
+            "Nascimento: 1975-08-14",
+            "Identificador: CPF-SYN-335-01",
+            "Emissao: 2026-10-12",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: TUSS",
+            "Codigo: 31309054",
+            "Lateralidade: Olho Direito (OD)",
+        ]
+    )
 
     # Setup second active reviewer in Org A and create a coherent 2-document case in Org A
     owner_setup_hr = owner_factory()
