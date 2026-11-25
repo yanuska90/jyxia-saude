@@ -157,7 +157,16 @@ jobs:
         env:
           JYXIA_PYTHON_BIN: /tmp/jyxia-ci-venv/bin/python
         run: |
-          node tests/e2e/test_institutional_e2e.mjs
+          set -o pipefail
+          if ! node tests/e2e/test_institutional_e2e.mjs 2>&1 | tee /tmp/inst_e2e.log; then
+            python3 -c "
+          from pathlib import Path
+          for line in Path('/tmp/inst_e2e.log').read_text(errors='replace').splitlines()[-12:]:
+              if line.strip():
+                  print(f'::error::{line}')
+          " || true
+            exit 1
+          fi
       - name: Parar container Keycloak efemero
         if: always()
         run: docker rm -f jyxia-keycloak-ci || true

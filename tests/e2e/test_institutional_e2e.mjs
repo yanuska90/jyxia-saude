@@ -21,12 +21,14 @@ import { fileURLToPath } from 'node:url';
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MSEDGE_CANDIDATES = [
   process.env.JYXIA_BROWSER_BIN,
+  process.env.CHROME_PATH,
   String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
   String.raw`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
   String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
-  '/usr/bin/google-chrome',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
 ].filter(Boolean);
 
@@ -169,7 +171,7 @@ async function main() {
         '--no-default-browser-check',
         `--user-data-dir=${userDataDir}`,
         `--remote-debugging-port=${cdpPort}`,
-        `http://127.0.0.1:${httpPort}/institutional/`,
+        'about:blank',
       ],
       { stdio: ['ignore', 'ignore', 'pipe'] }
     );
@@ -180,9 +182,10 @@ async function main() {
 
     let targetsResp;
     try {
+      await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, 15000);
       targetsResp = await waitForHttp(`http://127.0.0.1:${cdpPort}/json/list`, 15000);
     } catch (err) {
-      throw new Error(`${err.message}\nBrowser stderr:\n${browserStderr}`);
+      throw new Error(`${err.message}\nBrowser (${browserBin}) stderr:\n${browserStderr}`);
     }
     const targets = await targetsResp.json();
     const pageTarget = targets.find((t) => t.type === 'page') || targets[0];
@@ -193,6 +196,8 @@ async function main() {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Network.enable');
+
+    await cdp.send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/institutional/` });
 
     // 1. Verify Unauthenticated Gate renders when no BFF session cookie is set
     await waitForCondition(
