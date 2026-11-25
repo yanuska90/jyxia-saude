@@ -8,6 +8,7 @@ import {
   buildCasePipelineStages,
   buildSideBySideFieldComparison,
   computeDashboardMetrics,
+  createPdfLoadSequencer,
   filterInstitutionalCases,
   formatFourAxesFromBackend,
   getAxisStatusMeta,
@@ -324,3 +325,77 @@ test('Etapa 3.3.5: buildCasePipelineStages and validateAndBuildHumanReviewPayloa
     'justification',
   ]);
 });
+
+test('Etapa 3.3.5 (P2-02): createPdfLoadSequencer prevents slow stale PDF load from overwriting newer PDF selection', () => {
+  const sequencer = createPdfLoadSequencer();
+  const destroyed = [];
+
+  // 1. User selects Version A (slow load starts)
+  const tokenA = sequencer.beginLoad({
+    organizationId: 'org-1',
+    caseId: 'case-1',
+    versionId: 'ver-slow-a',
+  });
+  const taskA = {
+    id: 'task-a',
+    destroy() {
+      destroyed.push('task-a');
+      return Promise.resolve();
+    },
+  };
+  assert.equal(sequencer.registerLoadingTask(tokenA, taskA), true);
+
+  // 2. Before Version A finishes, user selects Version B (fast load starts and cancels taskA)
+  const tokenB = sequencer.beginLoad({
+    organizationId: 'org-1',
+    caseId: 'case-1',
+    versionId: 'ver-fast-b',
+  });
+  assert.deepEqual(destroyed, ['task-a']);
+  assert.equal(
+    sequencer.isCurrent(tokenA, {
+      organizationId: 'org-1',
+      caseId: 'case-1',
+      versionId: 'ver-fast-b',
+    }),
+    false
+  );
+  assert.equal(
+    sequencer.isCurrent(tokenB, {
+      organizationId: 'org-1',
+      caseId: 'case-1',
+      versionId: 'ver-fast-b',
+    }),
+    true
+  );
+
+  // 3. Version B finishes first and commits its pdfDoc
+  const pdfDocB = {
+    id: 'doc-b',
+    destroy() {
+      destroyed.push('doc-b');
+      return Promise.resolve();
+    },
+  };
+  assert.equal(sequencer.commitLoadedDocument(tokenB, pdfDocB), true);
+
+  // 4. Slow Version A resolves late; commitLoadedDocument MUST reject it and destroy pdfDocA without touching pdfDocB
+  const pdfDocA = {
+    id: 'doc-a',
+    destroy() {
+      destroyed.push('doc-a');
+      return Promise.resolve();
+    },
+  };
+  assert.equal(sequencer.commitLoadedDocument(tokenA, pdfDocA), false);
+  assert.deepEqual(destroyed, ['task-a', 'doc-a']);
+  assert.equal(
+    sequencer.isCurrent(tokenB, {
+      organizationId: 'org-1',
+      caseId: 'case-1',
+      versionId: 'ver-fast-b',
+    }),
+    true
+  );
+});
+

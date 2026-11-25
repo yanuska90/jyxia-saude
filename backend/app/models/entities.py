@@ -498,8 +498,14 @@ class ProcessingRun(Base):
             "document_version_id",
             "step_type",
             unique=True,
-            sqlite_where=text("status IN ('queued', 'running', 'retry_wait')"),
-            postgresql_where=text("status IN ('queued', 'running', 'retry_wait')"),
+            sqlite_where=text(
+                "step_type <> 'compare_consistency' "
+                "AND status IN ('queued', 'running', 'retry_wait')"
+            ),
+            postgresql_where=text(
+                "step_type <> 'compare_consistency' "
+                "AND status IN ('queued', 'running', 'retry_wait')"
+            ),
         ),
         Index(
             "uq_processing_runs_active_case_compare",
@@ -507,10 +513,14 @@ class ProcessingRun(Base):
             "case_id",
             unique=True,
             sqlite_where=text(
-                "step_type = 'compare_consistency' AND status IN ('queued', 'running', 'retry_wait') AND case_id IS NOT NULL"
+                "step_type = 'compare_consistency' "
+                "AND status IN ('queued', 'retry_wait') "
+                "AND case_id IS NOT NULL"
             ),
             postgresql_where=text(
-                "step_type = 'compare_consistency' AND status IN ('queued', 'running', 'retry_wait') AND case_id IS NOT NULL"
+                "step_type = 'compare_consistency' "
+                "AND status IN ('queued', 'retry_wait') "
+                "AND case_id IS NOT NULL"
             ),
         ),
     )
@@ -735,6 +745,25 @@ class HumanReview(Base):
         ),
         CheckConstraint("length(trim(justification)) >= 5", name="justification_min_len"),
         Index("ix_human_reviews_org_docver", "organization_id", "document_version_id"),
+        Index(
+            "uq_human_reviews_general_ver_action",
+            "organization_id",
+            "document_version_id",
+            "action_type",
+            unique=True,
+            sqlite_where=text("field_key IS NULL"),
+            postgresql_where=text("field_key IS NULL"),
+        ),
+        Index(
+            "uq_human_reviews_field_ver_action",
+            "organization_id",
+            "document_version_id",
+            "action_type",
+            "field_key",
+            unique=True,
+            sqlite_where=text("field_key IS NOT NULL"),
+            postgresql_where=text("field_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

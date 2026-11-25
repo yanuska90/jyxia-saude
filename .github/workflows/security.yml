@@ -90,6 +90,7 @@ jobs:
                   \"\"\")
           "
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini upgrade head
+          /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0009
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0008
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0007
           /tmp/jyxia-ci-venv/bin/alembic -c backend/alembic.ini downgrade 20261122_0006
@@ -148,6 +149,15 @@ jobs:
             echo "ERROR: Unexpected skipped test in PostgreSQL/Keycloak CI verification."
             exit 1
           fi
+      - name: Configurar Node.js 24 para E2E institucional headless
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Executar E2E institucional headless (FastAPI + Worker + PDF.js via CDP com sessao pre-semeada)
+        env:
+          JYXIA_PYTHON_BIN: /tmp/jyxia-ci-venv/bin/python
+        run: |
+          node tests/e2e/test_institutional_e2e.mjs
       - name: Parar container Keycloak efemero
         if: always()
         run: docker rm -f jyxia-keycloak-ci || true

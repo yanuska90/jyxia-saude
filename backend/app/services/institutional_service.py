@@ -1190,6 +1190,141 @@ class InstitutionalService:
         return review
 
     @staticmethod
+    def _is_exact_human_review_replay(
+        existing: HumanReview,
+        *,
+        actor_user_id: str,
+        validated_input: HumanReviewCreateInput,
+    ) -> bool:
+        return (
+            existing.reviewer_user_id == actor_user_id
+            and existing.action_type == validated_input.action_type.value
+            and existing.field_key == validated_input.field_key
+            and existing.original_value == validated_input.original_value
+            and existing.revised_value == validated_input.revised_value
+            and existing.justification == validated_input.justification
+            and existing.evidence_reference_id == validated_input.evidence_reference_id
+            and existing.policy_version == validated_input.policy_version
+        )
+
+    @staticmethod
+    def _enqueue_post_review_comparison_in_tx(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        review_id: str,
+        engine_version: str,
+        policy_version: str,
+        max_attempts: int,
+    ) -> ProcessingRun | None:
+        unclaimed = ProcessingQueueRepository.get_unclaimed_case_compare_run(
+            session, ctx, case_id=case_id
+        )
+        if unclaimed is not None:
+            return unclaimed
+
+        anchor = ProcessingQueueRepository.get_latest_active_case_document_version(
+            session, ctx, case_id=case_id
+        )
+        if anchor is None:
+            return None
+        _, anchor_ver = anchor
+        scoped_idemp_key = f"compare:{case_id}:post-human-review-{review_id}"[:128]
+        existing_idemp = ProcessingQueueRepository.get_by_idempotency_key(
+            session, ctx, idempotency_key=scoped_idemp_key
+        )
+        if existing_idemp is not None and existing_idemp.status in (
+            "queued",
+            "retry_wait",
+            "running",
+        ):
+            return existing_idemp
+        if existing_idemp is not None:
+            scoped_idemp_key = f"compare:{case_id}:post-human-review-{review_id}-{new_uuid()[:8]}"[:128]
+
+        comp_run = CaseAndDocumentRepository.create_processing_run(
+            session,
+            ctx,
+            document_version_id=anchor_ver.id,
+            case_id=case_id,
+            step_type=ProcessingStepType.COMPARE_CONSISTENCY.value,
+            triggered_by_user_id=ctx.actor_user_id,
+            policy_version=policy_version,
+            extractor_version=engine_version,
+            idempotency_key=scoped_idemp_key,
+            status="queued",
+            readable=False,
+            readiness_state=None,
+            axes_summary=None,
+            started_at=None,
+            finished_at=None,
+            max_attempts=max_attempts,
+        )
+        AuditEventRepository.append_event(
+            session,
+            ctx,
+            event_type="processing_run.compare_queued",
+            target_entity_type="processing_run",
+            target_entity_id=comp_run.id,
+            payload_json={
+                "operation": "processing_run_compare_queued",
+                "case_id": case_id,
+                "anchor_document_version_id": anchor_ver.id,
+                "processing_run_id": comp_run.id,
+                "step_type": comp_run.step_type,
+                "status": comp_run.status,
+                "policy_version": comp_run.policy_version,
+                "extractor_version": comp_run.extractor_version,
+                "max_attempts": comp_run.max_attempts,
+                "triggered_by_human_review_id": review_id,
+                "administrative_only": True,
+                "clinical_approval": False,
+            },
+        )
+        return comp_run
+
+    @staticmethod
+    def _ensure_post_review_comparison_for_replay(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str | None,
+        review_id: str,
+        enqueue_comparison: bool,
+        engine_version: str,
+        policy_version: str,
+        max_attempts: int,
+    ) -> ProcessingRun | None:
+        if case_id is None:
+            return None
+        unclaimed = ProcessingQueueRepository.get_unclaimed_case_compare_run(
+            session, ctx, case_id=case_id
+        )
+        if unclaimed is not None:
+            return unclaimed
+        active = ProcessingQueueRepository.get_active_case_compare_run(
+            session, ctx, case_id=case_id
+        )
+        if not enqueue_comparison:
+            return active
+        if ProcessingQueueRepository.case_has_assessment_reflecting_review(
+            session, ctx, case_id=case_id, review_id=review_id
+        ):
+            return active
+        comp_run = InstitutionalService._enqueue_post_review_comparison_in_tx(
+            session,
+            ctx,
+            case_id=case_id,
+            review_id=review_id,
+            engine_version=engine_version,
+            policy_version=policy_version,
+            max_attempts=max_attempts,
+        )
+        session.commit()
+        return comp_run
+
+    @staticmethod
     def record_document_version_human_review(
         session: Session,
         ctx: TenantContext,
@@ -1210,8 +1345,19 @@ class InstitutionalService:
         role = _require_actor_permission(session, ctx, RbacPermission.FIELD_REVIEW)
         assert ctx.actor_user_id is not None
 
-        doc = CaseAndDocumentRepository.get_document(
+        initial_doc = CaseAndDocumentRepository.get_document(
             session, ctx, document_id, include_discarded=True
+        )
+        if initial_doc is None:
+            raise DocumentNotFoundError(
+                f"Document '{document_id}' was not found inside active organization."
+            )
+        doc, version = CaseAndDocumentRepository.lock_document_version_for_review(
+            session,
+            ctx,
+            document_id=initial_doc.id,
+            version_id=version_id,
+            case_id=initial_doc.case_id,
         )
         if doc is None:
             raise DocumentNotFoundError(
@@ -1221,9 +1367,6 @@ class InstitutionalService:
             raise HumanReviewStateConflictError(
                 f"Document '{document_id}' is discarded and cannot receive human administrative reviews."
             )
-        version = CaseAndDocumentRepository.get_document_version_for_document(
-            session, ctx, document_id=doc.id, version_id=version_id
-        )
         if version is None:
             raise DocumentNotFoundError(
                 f"DocumentVersion '{version_id}' was not found for document '{document_id}'."
@@ -1283,91 +1426,129 @@ class InstitutionalService:
             if (
                 ex_rev.action_type == validated_input.action_type.value
                 and ex_rev.field_key == validated_input.field_key
-                and ex_rev.evidence_reference_id == validated_input.evidence_reference_id
-                and (
-                    ex_rev.field_key is None
-                    or (
-                        ex_rev.reviewer_user_id == ctx.actor_user_id
-                        and ex_rev.original_value == validated_input.original_value
-                        and ex_rev.revised_value == validated_input.revised_value
-                        and ex_rev.justification == validated_input.justification
-                    )
-                )
             ):
-                active_compare = (
-                    ProcessingQueueRepository.get_active_case_compare_run(
-                        session, ctx, case_id=doc.case_id
-                    )
-                    if doc.case_id is not None
-                    else None
-                )
-                return HumanReviewWithContextResult(
-                    review=ex_rev,
-                    document=ex_doc,
-                    version=ex_ver,
-                    reviewer_user=ex_user,
-                    reviewer_role=ex_role or role.value,
-                    idempotent_replay=True,
-                    comparison_processing_run=active_compare,
-                )
-
-        review = CaseAndDocumentRepository.create_human_review(
-            session,
-            ctx,
-            document_version_id=validated_input.document_version_id,
-            reviewer_user_id=ctx.actor_user_id,
-            action_type=validated_input.action_type.value,
-            field_key=validated_input.field_key,
-            original_value=validated_input.original_value,
-            revised_value=validated_input.revised_value,
-            justification=validated_input.justification,
-            evidence_reference_id=validated_input.evidence_reference_id,
-            policy_version=validated_input.policy_version,
-        )
-        AuditEventRepository.append_event(
-            session,
-            ctx,
-            event_type="human_review.recorded",
-            target_entity_type="human_review",
-            target_entity_id=review.id,
-            payload_json={
-                "operation": "human_review_recorded",
-                "case_id": doc.case_id,
-                "document_id": doc.id,
-                "document_version_id": version.id,
-                "action_type": review.action_type,
-                "field_key": review.field_key,
-                "evidence_reference_id": review.evidence_reference_id,
-                "policy_version": review.policy_version,
-                "administrative_only": True,
-                "clinical_approval": False,
-            },
-        )
-        session.commit()
-
-        comp_run: ProcessingRun | None = None
-        if enqueue_comparison and doc.case_id is not None:
-            active_compare = ProcessingQueueRepository.get_active_case_compare_run(
-                session, ctx, case_id=doc.case_id
-            )
-            if active_compare is not None:
-                comp_run = active_compare
-            else:
-                try:
-                    comp_res = InstitutionalService.enqueue_case_consistency_comparison(
+                if InstitutionalService._is_exact_human_review_replay(
+                    ex_rev,
+                    actor_user_id=ctx.actor_user_id,
+                    validated_input=validated_input,
+                ):
+                    comp_run = InstitutionalService._ensure_post_review_comparison_for_replay(
                         session,
                         ctx,
                         case_id=doc.case_id,
+                        review_id=ex_rev.id,
+                        enqueue_comparison=enqueue_comparison,
                         engine_version=engine_version,
                         policy_version=policy_version,
-                        idempotency_key=f"post-human-review-{review.id}",
                         max_attempts=max_attempts,
                     )
-                    comp_run = comp_res.processing_run
-                except ProcessingRunActiveConflictError:
-                    comp_run = ProcessingQueueRepository.get_active_case_compare_run(
-                        session, ctx, case_id=doc.case_id
+                    return HumanReviewWithContextResult(
+                        review=ex_rev,
+                        document=ex_doc,
+                        version=ex_ver,
+                        reviewer_user=ex_user,
+                        reviewer_role=ex_role or role.value,
+                        idempotent_replay=True,
+                        comparison_processing_run=comp_run,
                     )
+                raise HumanReviewStateConflictError(
+                    f"A conflicting human review for action '{validated_input.action_type.value}'"
+                    + (
+                        f" and field '{validated_input.field_key}'"
+                        if validated_input.field_key is not None
+                        else ""
+                    )
+                    + f" already exists on DocumentVersion '{version.id}'."
+                )
+
+        try:
+            review = CaseAndDocumentRepository.create_human_review(
+                session,
+                ctx,
+                document_version_id=validated_input.document_version_id,
+                reviewer_user_id=ctx.actor_user_id,
+                action_type=validated_input.action_type.value,
+                field_key=validated_input.field_key,
+                original_value=validated_input.original_value,
+                revised_value=validated_input.revised_value,
+                justification=validated_input.justification,
+                evidence_reference_id=validated_input.evidence_reference_id,
+                policy_version=validated_input.policy_version,
+            )
+            AuditEventRepository.append_event(
+                session,
+                ctx,
+                event_type="human_review.recorded",
+                target_entity_type="human_review",
+                target_entity_id=review.id,
+                payload_json={
+                    "operation": "human_review_recorded",
+                    "case_id": doc.case_id,
+                    "document_id": doc.id,
+                    "document_version_id": version.id,
+                    "action_type": review.action_type,
+                    "field_key": review.field_key,
+                    "evidence_reference_id": review.evidence_reference_id,
+                    "policy_version": review.policy_version,
+                    "administrative_only": True,
+                    "clinical_approval": False,
+                },
+            )
+            comp_run: ProcessingRun | None = None
+            if enqueue_comparison and doc.case_id is not None:
+                comp_run = InstitutionalService._enqueue_post_review_comparison_in_tx(
+                    session,
+                    ctx,
+                    case_id=doc.case_id,
+                    review_id=review.id,
+                    engine_version=engine_version,
+                    policy_version=policy_version,
+                    max_attempts=max_attempts,
+                )
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            winner_rows = CaseAndDocumentRepository.list_human_reviews_by_version(
+                session, ctx, document_version_id=validated_input.document_version_id
+            )
+            for ex_rev, ex_doc, ex_ver, ex_user, ex_role in winner_rows:
+                if (
+                    ex_rev.action_type == validated_input.action_type.value
+                    and ex_rev.field_key == validated_input.field_key
+                ):
+                    if InstitutionalService._is_exact_human_review_replay(
+                        ex_rev,
+                        actor_user_id=ctx.actor_user_id,
+                        validated_input=validated_input,
+                    ):
+                        comp_run = InstitutionalService._ensure_post_review_comparison_for_replay(
+                            session,
+                            ctx,
+                            case_id=ex_doc.case_id,
+                            review_id=ex_rev.id,
+                            enqueue_comparison=enqueue_comparison,
+                            engine_version=engine_version,
+                            policy_version=policy_version,
+                            max_attempts=max_attempts,
+                        )
+                        return HumanReviewWithContextResult(
+                            review=ex_rev,
+                            document=ex_doc,
+                            version=ex_ver,
+                            reviewer_user=ex_user,
+                            reviewer_role=ex_role or role.value,
+                            idempotent_replay=True,
+                            comparison_processing_run=comp_run,
+                        )
+                    raise HumanReviewStateConflictError(
+                        "Concurrent human review conflicted with an existing review on this version."
+                    ) from exc
+            raise HumanReviewStateConflictError(
+                "Concurrent human review state conflict detected."
+            ) from exc
+        except Exception:
+            session.rollback()
+            raise
 
         refreshed = CaseAndDocumentRepository.list_human_reviews_by_version(
             session, ctx, document_version_id=version.id

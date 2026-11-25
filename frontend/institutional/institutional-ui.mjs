@@ -10,6 +10,7 @@ import {
   buildCasePipelineStages,
   buildSideBySideFieldComparison,
   computeDashboardMetrics,
+  createPdfLoadSequencer,
   filterInstitutionalCases,
   formatFourAxesFromBackend,
   getAxisStatusMeta,
@@ -56,6 +57,8 @@ const state = {
   pdfLib: null,
   pdfDoc: null,
   pdfLoadedVersionId: null,
+  pdfLoadSequencer: createPdfLoadSequencer(),
+  pdfActiveLoadToken: null,
   pdfPageNum: 1,
   pdfPageCount: 0,
   pdfScale: 1.2,
@@ -431,7 +434,7 @@ async function openCaseWorkspace(caseId) {
   const workspace = document.getElementById('case-workspace');
   workspace.hidden = false;
 
-  document.getElementById('btn-toggle-upload-doc').hidden = !hasPermission('document:write');
+  document.getElementById('btn-toggle-upload-doc').hidden = !hasPermission('document:upload');
   document.getElementById('btn-trigger-compare').hidden = !hasPermission('case:write');
 
   try {
@@ -761,22 +764,28 @@ function renderCaseDocumentsTable() {
     });
     tdAct.appendChild(inspectBtn);
 
-    if (!extractRun && hasPermission('document:write')) {
+    if (!extractRun && hasPermission('document:upload')) {
       const enqueueExtBtn = createEl('button', {
         className: 'inst-btn inst-btn-sm inst-btn-secondary',
-        text: 'Extrair texto',
-        attrs: { type: 'button' },
+        text: 'Reprocessar versão',
+        attrs: {
+          type: 'button',
+          'data-reprocess-version-id': ver.version_id,
+        },
       });
       enqueueExtBtn.addEventListener('click', async () => {
+        if (enqueueExtBtn.disabled) return;
+        enqueueExtBtn.disabled = true;
         try {
           await apiFetch(
-            `/api/v1/organizations/${state.activeOrgId}/documents/${doc.document_id}/versions/${ver.version_id}/extract-text`,
+            `/api/v1/organizations/${state.activeOrgId}/documents/${doc.document_id}/versions/${ver.version_id}/reprocess`,
             { method: 'POST' }
           );
-          showAlert('Extração textual enfileirada com sucesso.', 'success');
+          showAlert('Reprocessamento da versão documental enfileirado com sucesso.', 'success');
           await openCaseWorkspace(state.selectedCaseId);
         } catch (err) {
-          showAlert(`Não foi possível enfileirar extração: ${err.message}`, 'error');
+          enqueueExtBtn.disabled = false;
+          showAlert(`Não foi possível enfileirar reprocessamento: ${err.message}`, 'error');
         }
       });
       tdAct.appendChild(enqueueExtBtn);
@@ -1200,12 +1209,27 @@ async function loadPdfIntoViewer(doc, ver) {
   const canvasWrap = document.getElementById('pdf-canvas-wrapper');
   const downloadLink = document.getElementById('btn-pdf-download');
 
+  const loadToken = state.pdfLoadSequencer.beginLoad({
+    organizationId: state.activeOrgId,
+    caseId: state.selectedCaseId,
+    versionId: ver.version_id,
+  });
+  state.pdfActiveLoadToken = loadToken;
+
+  const isCurrentLoad = () =>
+    state.pdfLoadSequencer.isCurrent(loadToken, {
+      organizationId: state.activeOrgId,
+      caseId: state.selectedCaseId,
+      versionId: state.selectedVersionId,
+    });
+
   titleEl.textContent = `${doc.source_label} · ${ver.original_filename || doc.document_kind} (v${ver.version_number})`;
   const contentUrl = `/api/v1/organizations/${state.activeOrgId}/documents/${doc.document_id}/versions/${ver.version_id}/content`;
   downloadLink.href = contentUrl;
   downloadLink.hidden = false;
 
   if (ver.mime_type !== 'application/pdf') {
+    state.pdfLoadSequencer.clearDocument(loadToken);
     state.pdfDoc = null;
     state.pdfLoadedVersionId = ver.version_id;
     canvasWrap.hidden = true;
@@ -1224,9 +1248,19 @@ async function loadPdfIntoViewer(doc, ver) {
       ensurePdfJsLoaded(),
       apiFetch(contentUrl, { isBinary: true }),
     ]);
+    if (!isCurrentLoad()) {
+      return;
+    }
 
     const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer) });
+    if (!state.pdfLoadSequencer.registerLoadingTask(loadToken, loadingTask)) {
+      return;
+    }
     const pdfDoc = await loadingTask.promise;
+    if (!isCurrentLoad() || !state.pdfLoadSequencer.commitLoadedDocument(loadToken, pdfDoc)) {
+      return;
+    }
+
     state.pdfDoc = pdfDoc;
     state.pdfLoadedVersionId = ver.version_id;
     state.pdfPageCount = pdfDoc.numPages;
@@ -1237,8 +1271,12 @@ async function loadPdfIntoViewer(doc, ver) {
 
     emptyMsg.hidden = true;
     canvasWrap.hidden = false;
-    await renderCurrentPdfPage();
+    await renderCurrentPdfPage(loadToken);
   } catch (err) {
+    if (!isCurrentLoad()) {
+      return;
+    }
+    state.pdfLoadSequencer.clearDocument(loadToken);
     state.pdfDoc = null;
     canvasWrap.hidden = true;
     emptyMsg.hidden = false;
@@ -1247,12 +1285,27 @@ async function loadPdfIntoViewer(doc, ver) {
   }
 }
 
-async function renderCurrentPdfPage() {
+async function renderCurrentPdfPage(expectedToken = state.pdfActiveLoadToken) {
   if (!state.pdfDoc) {
     updatePdfControls();
     return;
   }
-  const page = await state.pdfDoc.getPage(state.pdfPageNum);
+  const isCurrentToken = () =>
+    !expectedToken ||
+    state.pdfLoadSequencer.isCurrent(expectedToken, {
+      organizationId: state.activeOrgId,
+      caseId: state.selectedCaseId,
+      versionId: state.selectedVersionId,
+    });
+  if (!isCurrentToken()) {
+    return;
+  }
+  const targetDoc = state.pdfDoc;
+  const targetPageNum = state.pdfPageNum;
+  const page = await targetDoc.getPage(targetPageNum);
+  if (!isCurrentToken() || state.pdfDoc !== targetDoc) {
+    return;
+  }
   const viewport = page.getViewport({ scale: state.pdfScale });
   const canvas = document.getElementById('pdf-render-canvas');
   const ctx = canvas.getContext('2d');
@@ -1260,6 +1313,9 @@ async function renderCurrentPdfPage() {
   canvas.height = Math.floor(viewport.height);
 
   await page.render({ canvasContext: ctx, viewport }).promise;
+  if (!isCurrentToken() || state.pdfDoc !== targetDoc) {
+    return;
+  }
   renderPdfBboxOverlays(canvas.width, canvas.height);
   updatePdfControls();
 }

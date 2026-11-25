@@ -659,3 +659,113 @@ export function validateAndBuildHumanReviewPayload({
     payload,
   };
 }
+
+/**
+ * Monotonic asynchronous PDF load sequencer to prevent out-of-order PDF responses
+ * from overwriting the active viewer state, canvas, or spatial BBox overlays.
+ */
+export function createPdfLoadSequencer() {
+  let currentSeq = 0;
+  let activeContext = {
+    organizationId: null,
+    caseId: null,
+    versionId: null,
+  };
+  let activeLoadingTask = null;
+  let activePdfDoc = null;
+
+  function safeDestroy(resource) {
+    if (!resource || typeof resource.destroy !== 'function') return;
+    try {
+      const res = resource.destroy();
+      if (res && typeof res.catch === 'function') {
+        res.catch(() => {});
+      }
+    } catch (_err) {
+      // ignore disposal errors
+    }
+  }
+
+  return {
+    beginLoad({ organizationId = null, caseId = null, versionId = null } = {}) {
+      currentSeq += 1;
+      const seq = currentSeq;
+      activeContext = { organizationId, caseId, versionId };
+      if (activeLoadingTask) {
+        safeDestroy(activeLoadingTask);
+        activeLoadingTask = null;
+      }
+      return {
+        seq,
+        organizationId,
+        caseId,
+        versionId,
+      };
+    },
+    registerLoadingTask(token, loadingTask) {
+      if (!this.isCurrent(token)) {
+        safeDestroy(loadingTask);
+        return false;
+      }
+      activeLoadingTask = loadingTask;
+      return true;
+    },
+    commitLoadedDocument(token, pdfDoc) {
+      if (!this.isCurrent(token)) {
+        safeDestroy(pdfDoc);
+        return false;
+      }
+      if (activePdfDoc && activePdfDoc !== pdfDoc) {
+        safeDestroy(activePdfDoc);
+      }
+      activeLoadingTask = null;
+      activePdfDoc = pdfDoc;
+      return true;
+    },
+    clearDocument(token) {
+      if (token && !this.isCurrent(token)) {
+        return false;
+      }
+      if (activeLoadingTask) {
+        safeDestroy(activeLoadingTask);
+        activeLoadingTask = null;
+      }
+      if (activePdfDoc) {
+        safeDestroy(activePdfDoc);
+        activePdfDoc = null;
+      }
+      return true;
+    },
+    isCurrent(token, currentState = null) {
+      if (!token || token.seq !== currentSeq) {
+        return false;
+      }
+      if (
+        token.organizationId !== activeContext.organizationId ||
+        token.caseId !== activeContext.caseId ||
+        token.versionId !== activeContext.versionId
+      ) {
+        return false;
+      }
+      if (currentState) {
+        if (
+          currentState.organizationId !== undefined &&
+          currentState.organizationId !== token.organizationId
+        ) {
+          return false;
+        }
+        if (currentState.caseId !== undefined && currentState.caseId !== token.caseId) {
+          return false;
+        }
+        if (currentState.versionId !== undefined && currentState.versionId !== token.versionId) {
+          return false;
+        }
+      }
+      return true;
+    },
+    getCurrentSeq() {
+      return currentSeq;
+    },
+  };
+}
+

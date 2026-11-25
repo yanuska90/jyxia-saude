@@ -7,11 +7,13 @@ from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 import pytest
+from sqlalchemy import text
 
 from app.core.constants import (
     CSRF_HEADER_NAME,
     CaseReadinessState,
     DocumentKind,
+    HumanReviewAction,
     OrganizationRole,
 )
 from app.core.oidc import StandardOidcProviderAdapter
@@ -23,6 +25,7 @@ from app.repositories.institutional import (
     AuditEventRepository,
     CaseAndDocumentRepository,
     OrganizationRepository,
+    ProcessingQueueRepository,
 )
 from app.schemas.tenant import DocumentCaseCreateInput, TenantContext
 from app.services.institutional_service import InstitutionalService
@@ -590,18 +593,60 @@ def test_human_review_e2e_flow_and_all_mandatory_negative_security_controls(
         assert rev1_body["clinical_approval"] is False
         assert rev1_body["administrative_only"] is True
 
-        # Idempotent replay of general version review returns 200 without duplicating row
+        # Idempotent replay of general version review with identical reviewer & payload returns 200 without duplicating row
         rev1_dup_resp = reviewer_client.post(
             f"/api/v1/organizations/{org_a_id}/documents/{doc1_id}/versions/{ver1_id}/human-reviews",
             headers=rev_headers,
             json={
                 "action_type": "observed",
-                "justification": "Segundo envio repetido para a mesma versao.",
+                "justification": "Conferencia administrativa da Solicitacao Medica v1 realizada.",
             },
         )
         assert rev1_dup_resp.status_code == 200
         assert rev1_dup_resp.json()["idempotent_replay"] is True
         assert rev1_dup_resp.json()["review_id"] == rev1_body["review_id"]
+
+        # Same reviewer attempting a conflicting review with a DIFFERENT justification for the same action_type -> 409 Conflict
+        rev1_conflict_just_resp = reviewer_client.post(
+            f"/api/v1/organizations/{org_a_id}/documents/{doc1_id}/versions/{ver1_id}/human-reviews",
+            headers=rev_headers,
+            json={
+                "action_type": "observed",
+                "justification": "Segundo envio conflitante com justificativa diferente para a mesma versao.",
+            },
+        )
+        assert rev1_conflict_just_resp.status_code == 409
+
+        # Same reviewer recording a different action_type (e.g. case_link_confirmation) or field-specific reviews is allowed
+        rev1_action_b_resp = reviewer_client.post(
+            f"/api/v1/organizations/{org_a_id}/documents/{doc1_id}/versions/{ver1_id}/human-reviews",
+            headers=rev_headers,
+            json={
+                "action_type": "case_link_confirmation",
+                "justification": "Vinculo administrativo do documento com o caso confirmado.",
+            },
+        )
+        assert rev1_action_b_resp.status_code == 201
+        rev1_field_a_resp = reviewer_client.post(
+            f"/api/v1/organizations/{org_a_id}/documents/{doc1_id}/versions/{ver1_id}/human-reviews",
+            headers=rev_headers,
+            json={
+                "action_type": "observed",
+                "field_key": "patient",
+                "justification": "Conferencia do campo patient observada administrativamente.",
+            },
+        )
+        assert rev1_field_a_resp.status_code == 201
+        rev1_field_b_resp = reviewer_client.post(
+            f"/api/v1/organizations/{org_a_id}/documents/{doc1_id}/versions/{ver1_id}/human-reviews",
+            headers=rev_headers,
+            json={
+                "action_type": "observed",
+                "field_key": "laterality",
+                "justification": "Conferencia do campo laterality observada administrativamente.",
+            },
+        )
+        assert rev1_field_b_resp.status_code == 201
 
         # Worker runs queued comparison after 1st review -> still PENDENTE because Doc 2 is unreviewed
         worker.process_one_cycle(max_jobs=5)
@@ -882,5 +927,214 @@ def test_human_review_e2e_flow_and_all_mandatory_negative_security_controls(
         assert AuditEventRepository.verify_chain(db4, TenantContext(organization_id=org_a_id))
         assert AuditEventRepository.verify_chain(db4, TenantContext(organization_id=org_b_id))
         assert SecurityAuditRepository.verify_chain(db4)
+
+        # Negative Test 11 (P1-01): Direct SQL UPDATE and DELETE bypassing ORM listeners MUST be blocked by DB triggers
+        target_rev_id = db4.query(HumanReview.id).first()[0]
+        with pytest.raises(Exception, match="strictly append-only"):
+            db4.execute(
+                text("UPDATE human_reviews SET justification = 'Adulterado via SQL direto' WHERE id = :id"),
+                {"id": target_rev_id},
+            )
+        db4.rollback()
+
+        with pytest.raises(Exception, match="strictly append-only"):
+            db4.execute(
+                text("DELETE FROM human_reviews WHERE id = :id"),
+                {"id": target_rev_id},
+            )
+        db4.rollback()
     finally:
         db4.close()
+
+    # Negative Test 12 (P1-03): Transactional atomicity of human review + audit event + post-review comparison enqueue,
+    # and worker-in-progress re-queueing without lost re-evaluations
+    db5 = factory()
+    try:
+        ctx_rev_a = TenantContext(
+            organization_id=org_a_id,
+            actor_user_id=user_ids["reviewer_a"],
+            source="test",
+        )
+        # Create a fresh case with 2 documents to test transactional rollback and running-worker re-enqueue
+        atom_case = InstitutionalService.create_case(
+            db5,
+            TenantContext(
+                organization_id=org_a_id,
+                actor_user_id=user_ids["admin_a"],
+                source="test",
+            ),
+            DocumentCaseCreateInput(
+                case_code="CASO-ATOMIC-335",
+                procedure_reference="Facoemulsificacao com LIO",
+                declared_laterality="OD",
+            ),
+        )
+        atom_doc1 = InstitutionalService.ingest_case_document(
+            db5,
+            TenantContext(
+                organization_id=org_a_id,
+                actor_user_id=user_ids["admin_a"],
+                source="test",
+            ),
+            storage=storage,
+            case_id=atom_case.id,
+            content=pdf_doc_1,
+            mime_type="application/pdf",
+            original_filename="atom-pedido.pdf",
+            document_kind=DocumentKind.PEDIDO,
+            source_label="atom_pedido",
+        )
+        atom_doc2 = InstitutionalService.ingest_case_document(
+            db5,
+            TenantContext(
+                organization_id=org_a_id,
+                actor_user_id=user_ids["admin_a"],
+                source="test",
+            ),
+            storage=storage,
+            case_id=atom_case.id,
+            content=pdf_doc_2,
+            mime_type="application/pdf",
+            original_filename="atom-biometria.pdf",
+            document_kind=DocumentKind.LAUDO,
+            source_label="atom_laudo",
+        )
+    finally:
+        db5.close()
+
+    worker.process_one_cycle(max_jobs=15)
+
+    # 12a. Simulate failure during post-review comparison enqueue: HumanReview MUST roll back atomically!
+    db_fail = factory()
+    try:
+        from unittest.mock import patch
+
+        ctx_rev_a = TenantContext(
+            organization_id=org_a_id,
+            actor_user_id=user_ids["reviewer_a"],
+            source="test",
+        )
+        with patch.object(
+            InstitutionalService,
+            "_enqueue_post_review_comparison_in_tx",
+            side_effect=RuntimeError("Simulated queue persistence failure"),
+        ):
+            with pytest.raises(RuntimeError, match="Simulated queue persistence failure"):
+                InstitutionalService.record_document_version_human_review(
+                    db_fail,
+                    ctx_rev_a,
+                    document_id=atom_doc1.document.id,
+                    version_id=atom_doc1.version.id,
+                    action_type=HumanReviewAction.OBSERVED,
+                    justification="Revisao que deve sofrer rollback se a fila falhar.",
+                )
+        revs_after_fail = CaseAndDocumentRepository.list_human_reviews_by_version(
+            db_fail, ctx_rev_a, document_version_id=atom_doc1.version.id
+        )
+        assert len(revs_after_fail) == 0, "HumanReview must not remain committed if comparison enqueue fails"
+    finally:
+        db_fail.close()
+
+    # 12b. Record Review 1 normally (queues Comparison Run #1), claim Run #1 so it is RUNNING,
+    # then record Review 2 while Run #1 is RUNNING -> Run #2 MUST be atomically queued!
+    db_run = factory()
+    try:
+        ctx_rev_a = TenantContext(
+            organization_id=org_a_id,
+            actor_user_id=user_ids["reviewer_a"],
+            source="test",
+        )
+        r1_res = InstitutionalService.record_document_version_human_review(
+            db_run,
+            ctx_rev_a,
+            document_id=atom_doc1.document.id,
+            version_id=atom_doc1.version.id,
+            action_type=HumanReviewAction.OBSERVED,
+            justification="Revisao 1 antes do claim do worker.",
+        )
+        assert r1_res.comparison_processing_run is not None
+        run1_id = r1_res.comparison_processing_run.id
+
+        # Worker claims Run #1 (now status == 'running') and captures snapshot BEFORE Review 2 exists
+        _raw_lease, lease_hash = ProcessingQueueRepository.generate_lease_proof()
+        claimed_r1 = ProcessingQueueRepository.claim_next_run(
+            db_run,
+            worker_id="atomic-test-worker-1",
+            lease_token_hash=lease_hash,
+            lease_seconds=60,
+            step_type="compare_consistency",
+        )
+        assert claimed_r1 is not None
+        assert claimed_r1.run_id == run1_id
+
+        snap_r1, last_seq_r1 = ProcessingQueueRepository.prepare_case_comparison_input(
+            db_run,
+            run_id=run1_id,
+            worker_id="atomic-test-worker-1",
+            lease_token_hash=lease_hash,
+            engine_version="3.3.4.1",
+            policy_version="2026.11-etapa-3.3.4",
+            max_issue_date_spread_days=180,
+        )
+
+        # While Run #1 is RUNNING with pre-Review-2 snapshot, Reviewer records Review 2 on Document 2
+        r2_res = InstitutionalService.record_document_version_human_review(
+            db_run,
+            ctx_rev_a,
+            document_id=atom_doc2.document.id,
+            version_id=atom_doc2.version.id,
+            action_type=HumanReviewAction.OBSERVED,
+            justification="Revisao 2 registrada enquanto Run 1 estava running.",
+        )
+        assert r2_res.comparison_processing_run is not None
+        assert r2_res.comparison_processing_run.id != run1_id
+        assert r2_res.comparison_processing_run.status == "queued"
+
+        # A second worker attempting to claim compare_consistency while Run #1 is still running for the same case gets None
+        _raw_lease2, lease_hash2 = ProcessingQueueRepository.generate_lease_proof()
+        concurrent_claim = ProcessingQueueRepository.claim_next_run(
+            db_run,
+            worker_id="atomic-test-worker-2",
+            lease_token_hash=lease_hash2,
+            lease_seconds=60,
+            step_type="compare_consistency",
+        )
+        assert concurrent_claim is None
+
+        # Worker 1 completes Run #1 (using the old snapshot where human_review_completed=False)
+        from app.services.consistency_engine import evaluate_case_consistency
+
+        eval_r1 = evaluate_case_consistency(snap_r1)
+        assert eval_r1.human_review_completed is False
+        ProcessingQueueRepository.complete_comparison_run(
+            db_run,
+            run_id=run1_id,
+            worker_id="atomic-test-worker-1",
+            lease_token_hash=lease_hash,
+            evaluation=eval_r1,
+            assessment_sequence=last_seq_r1 + 1,
+        )
+    finally:
+        db_run.close()
+
+    # Now Worker processes the queued Run #2 and produces the final assessment with human_review_completed=True and readiness_state='conferida'
+    worker.process_one_cycle(max_jobs=5)
+
+    db_check = factory()
+    try:
+        ctx_rev_a = TenantContext(
+            organization_id=org_a_id,
+            actor_user_id=user_ids["reviewer_a"],
+            source="test",
+        )
+        final_case = CaseAndDocumentRepository.get_case(db_check, ctx_rev_a, atom_case.id)
+        assert final_case is not None
+        assert final_case.readiness_state == CaseReadinessState.CONFERIDA.value
+        assessments, total_assess = ProcessingQueueRepository.list_case_consistency_assessments(
+            db_check, ctx_rev_a, case_id=atom_case.id
+        )
+        assert total_assess == 3
+        assert assessments[0][0].human_review_completed is True
+        assert assessments[0][0].readiness_state == CaseReadinessState.CONFERIDA.value
+    finally:
+        db_check.close()

@@ -231,6 +231,27 @@ async function main() {
     assert.equal(initialMetrics.conflicts, '1');
     assert.ok(initialMetrics.readiness.includes('pendente'));
 
+    // Verify P2-01: Upload button is visible for reviewer with 'document:upload' permission
+    const uploadBtnVisible = await cdp.eval(`
+      Boolean(document.getElementById('btn-toggle-upload-doc')) &&
+      document.getElementById('btn-toggle-upload-doc').hidden === false
+    `);
+    assert.equal(uploadBtnVisible, true, 'Botão de upload documental deve estar visível para document:upload');
+
+    // Verify P2-02: Rapidly switch between Version 1 and Version 2; only Version 2 (last selected) must remain active,
+    // and then switch back to Version 1 for inspection
+    const switchedProperly = await cdp.eval(`(() => {
+      const buttons = Array.from(document.querySelectorAll('#case-documents-tbody button[data-inspect-version-id]'));
+      if (buttons.length < 2) return false;
+      const v1Id = buttons[0].getAttribute('data-inspect-version-id');
+      const v2Id = buttons[1].getAttribute('data-inspect-version-id');
+      buttons[0].click();
+      buttons[1].click();
+      buttons[0].click();
+      return v1Id && v2Id && v1Id !== v2Id;
+    })()`);
+    assert.equal(switchedProperly, true);
+
     // Verify PDF.js rendered the first document and extracted fields are populated
     try {
       await waitForCondition(

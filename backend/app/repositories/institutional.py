@@ -975,6 +975,59 @@ class CaseAndDocumentRepository:
         return evidence
 
     @staticmethod
+    def lock_document_version_for_review(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+        version_id: str,
+        case_id: str | None = None,
+    ) -> tuple[Document | None, DocumentVersion | None]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        is_pg = _is_pg_session(session)
+        if case_id is not None and is_pg:
+            session.execute(
+                select(DocumentCase.id)
+                .where(
+                    DocumentCase.organization_id == ctx.organization_id,
+                    DocumentCase.id == case_id,
+                )
+                .with_for_update()
+            ).first()
+
+        doc_stmt = select(Document).where(
+            Document.organization_id == ctx.organization_id,
+            Document.id == document_id,
+        )
+        if is_pg:
+            doc_stmt = doc_stmt.with_for_update()
+        doc = session.scalar(doc_stmt)
+        if doc is None:
+            return None, None
+
+        if doc.case_id is not None and doc.case_id != case_id and is_pg:
+            session.execute(
+                select(DocumentCase.id)
+                .where(
+                    DocumentCase.organization_id == ctx.organization_id,
+                    DocumentCase.id == doc.case_id,
+                )
+                .with_for_update()
+            ).first()
+
+        ver_stmt = select(DocumentVersion).where(
+            DocumentVersion.organization_id == ctx.organization_id,
+            DocumentVersion.document_id == doc.id,
+            DocumentVersion.id == version_id,
+        )
+        if is_pg:
+            ver_stmt = ver_stmt.with_for_update()
+        version = session.scalar(ver_stmt)
+        return doc, version
+
+    @staticmethod
     def create_human_review(
         session: Session,
         ctx: TenantContext,
@@ -1844,6 +1897,23 @@ class ProcessingQueueRepository:
                             .limit(1)
                         )
                         if integrity_ok is None:
+                            continue
+                    if (
+                        cand.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value
+                        and cand.case_id is not None
+                    ):
+                        running_compare = session.scalar(
+                            select(ProcessingRun.id)
+                            .where(
+                                ProcessingRun.organization_id == cand.organization_id,
+                                ProcessingRun.case_id == cand.case_id,
+                                ProcessingRun.step_type
+                                == ProcessingStepType.COMPARE_CONSISTENCY.value,
+                                ProcessingRun.status == ProcessingStatus.RUNNING.value,
+                            )
+                            .limit(1)
+                        )
+                        if running_compare is not None:
                             continue
                     chosen = cand
                     break
@@ -2994,8 +3064,69 @@ class ProcessingQueueRepository:
                 ProcessingRun.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value,
                 ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
             )
+            .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
             .limit(1)
         )
+
+    @staticmethod
+    def get_unclaimed_case_compare_run(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+    ) -> ProcessingRun | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        return session.scalar(
+            select(ProcessingRun)
+            .where(
+                ProcessingRun.organization_id == ctx.organization_id,
+                ProcessingRun.case_id == case_id,
+                ProcessingRun.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value,
+                ProcessingRun.status.in_(
+                    (ProcessingStatus.QUEUED.value, ProcessingStatus.RETRY_WAIT.value)
+                ),
+            )
+            .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+            .limit(1)
+        )
+
+    @staticmethod
+    def case_has_assessment_reflecting_review(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        review_id: str,
+    ) -> bool:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        latest = session.scalar(
+            select(ConsistencyAssessment)
+            .where(
+                ConsistencyAssessment.organization_id == ctx.organization_id,
+                ConsistencyAssessment.case_id == case_id,
+            )
+            .order_by(
+                ConsistencyAssessment.assessment_sequence.desc(),
+                ConsistencyAssessment.created_at.desc(),
+            )
+            .limit(1)
+        )
+        if latest is None or not isinstance(latest.compared_snapshot_json, list):
+            return False
+        for doc_snap in latest.compared_snapshot_json:
+            if not isinstance(doc_snap, dict):
+                continue
+            for ver_snap in doc_snap.get("versions", []) or []:
+                if not isinstance(ver_snap, dict):
+                    continue
+                for rev_snap in ver_snap.get("human_reviews", []) or []:
+                    if isinstance(rev_snap, dict) and rev_snap.get("review_id") == review_id:
+                        return True
+        return False
 
     @staticmethod
     def get_latest_active_case_document_version(
