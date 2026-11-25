@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JYXIA — Revisão Documental Institucional (Etapa 3.3.5)</title>
+  <link rel="icon" type="image/svg+xml" href="/institutional/assets/favicon.svg" />
+  <link rel="stylesheet" href="/institutional/institutional.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Pular para o conteúdo principal</a>
+
+  <!-- Top Institutional Bar -->
+  <header class="inst-topbar" role="banner">
+    <div class="inst-topbar-brand">
+      <div class="inst-logo-badge" aria-hidden="true">JX</div>
+      <div>
+        <div class="inst-brand-row">
+          <span class="inst-brand-title">JYXIA</span>
+          <span class="inst-brand-tag">PLATAFORMA INSTITUCIONAL · BFF + RLS</span>
+          <span class="inst-scope-pill" title="Escopo estritamente administrativo; nunca representa aprovação clínica.">
+            ADMINISTRATIVO · SEM DECISÃO CLÍNICA
+          </span>
+        </div>
+        <p class="inst-brand-subtitle">
+          Conferência documental determinística dos 4 eixos, evidências espaciais e revisão humana auditável
+        </p>
+      </div>
+    </div>
+
+    <div class="inst-session-controls" id="session-controls" aria-live="polite">
+      <div class="inst-user-summary" id="user-summary-box" hidden>
+        <span class="inst-mfa-badge" id="user-mfa-badge" title="Sessão autenticada com MFA verificado">✓ MFA ATIVO</span>
+        <span class="inst-user-name" id="user-display-name">—</span>
+        <span class="inst-user-role" id="user-role-badge">—</span>
+      </div>
+
+      <div class="inst-org-switcher-wrap" id="org-switcher-wrap" hidden>
+        <label for="org-select" class="sr-only">Organização ativa</label>
+        <select id="org-select" class="inst-select" aria-label="Selecionar organização ativa"></select>
+      </div>
+
+      <button type="button" id="btn-refresh-all" class="inst-btn inst-btn-secondary" hidden>
+        ↻ Atualizar dados
+      </button>
+      <a id="btn-login-oidc" href="/api/v1/auth/login?next=/institutional/" class="inst-btn inst-btn-primary" hidden>
+        Entrar via OIDC + MFA
+      </a>
+      <button type="button" id="btn-logout" class="inst-btn inst-btn-danger-outline" hidden>
+        Encerrar sessão
+      </button>
+    </div>
+  </header>
+
+  <!-- Global Alert / Status Banner -->
+  <div id="global-alert-region" class="inst-alert-region" role="status" aria-live="polite"></div>
+
+  <main id="main-content" class="inst-main" role="main">
+    <!-- Unauthenticated Gate -->
+    <section id="unauth-gate" class="inst-card inst-auth-gate" hidden aria-labelledby="unauth-title">
+      <h1 id="unauth-title">Autenticação institucional OIDC + PKCE + MFA obrigatória</h1>
+      <p>
+        Esta interface opera exclusivamente sobre a API real da JYXIA com sessão BFF same-origin,
+        cookies seguros <code>HttpOnly</code>, proteção CSRF e isolamento multi-tenant via PostgreSQL RLS.
+      </p>
+      <ul class="inst-gate-list">
+        <li>Nenhum token OIDC é armazenado em <code>localStorage</code> ou <code>sessionStorage</code>.</li>
+        <li>A conferência documental é estritamente administrativa (<code>clinical_approval: false</code>).</li>
+        <li>O registro de revisão humana exige papel autorizado (<code>org_admin</code> ou <code>document_reviewer</code>).</li>
+      </ul>
+      <div class="inst-gate-actions">
+        <a id="gate-login-link" href="/api/v1/auth/login?next=/institutional/" class="inst-btn inst-btn-primary">
+          Iniciar login institucional (OIDC + MFA)
+        </a>
+      </div>
+    </section>
+
+    <!-- Authenticated Workspace -->
+    <div id="authenticated-app" hidden>
+      <!-- 1. Institutional Dashboard Metrics -->
+      <section class="inst-section" aria-labelledby="dashboard-heading">
+        <div class="inst-section-header">
+          <div>
+            <h1 id="dashboard-heading" class="inst-section-title">Painel Institucional de Casos Documentais</h1>
+            <p class="inst-section-desc" id="active-org-caption">Organização ativa: carregando...</p>
+          </div>
+          <div class="inst-header-actions">
+            <button type="button" id="btn-toggle-new-case" class="inst-btn inst-btn-primary" hidden>
+              + Novo caso administrativo
+            </button>
+          </div>
+        </div>
+
+        <!-- New Case Drawer -->
+        <form id="new-case-form" class="inst-card inst-new-case-form" hidden aria-label="Criar novo caso administrativo">
+          <h2 class="inst-card-subtitle">Abrir novo caso administrativo</h2>
+          <div class="inst-form-grid">
+            <div class="inst-field">
+              <label for="input-case-code">Código do caso *</label>
+              <input id="input-case-code" name="case_code" type="text" required minlength="3" maxlength="80" placeholder="Ex.: CASO-SYN-2026-01" />
+            </div>
+            <div class="inst-field">
+              <label for="input-proc-ref">Referência de procedimento (opcional)</label>
+              <input id="input-proc-ref" name="procedure_reference" type="text" maxlength="120" placeholder="Ex.: TUSS:31309054" />
+            </div>
+            <div class="inst-field">
+              <label for="input-ext-ref">Referência externa / guia (opcional)</label>
+              <input id="input-ext-ref" name="external_reference" type="text" maxlength="120" placeholder="Ex.: GUIA-SYN-0001" />
+            </div>
+            <div class="inst-field">
+              <label for="input-laterality-ref">Lateralidade declarada (opcional)</label>
+              <select id="input-laterality-ref" name="declared_laterality" class="inst-select">
+                <option value="">Não declarada na abertura</option>
+                <option value="OD">Olho Direito (OD)</option>
+                <option value="OE">Olho Esquerdo (OE)</option>
+                <option value="AO">Ambos os Olhos / Bilateral (AO)</option>
+                <option value="NA">Não aplicável (NA)</option>
+              </select>
+            </div>
+          </div>
+          <div class="inst-form-actions">
+            <button type="submit" id="btn-submit-new-case" class="inst-btn inst-btn-primary">Criar caso</button>
+            <button type="button" id="btn-cancel-new-case" class="inst-btn inst-btn-secondary">Cancelar</button>
+          </div>
+        </form>
+
+        <!-- Metrics Grid -->
+        <div class="inst-metrics-grid" id="dashboard-metrics-grid" aria-label="Métricas operacionais reais da organização">
+          <article class="inst-metric-card">
+            <span class="inst-metric-label">Total de casos</span>
+            <strong class="inst-metric-value" id="metric-total-cases">0</strong>
+          </article>
+          <article class="inst-metric-card">
+            <span class="inst-metric-label">Aguardando processamento</span>
+            <strong class="inst-metric-value" id="metric-awaiting-processing">0</strong>
+          </article>
+          <article class="inst-metric-card inst-metric-highlight">
+            <span class="inst-metric-label">Aguardando revisão humana</span>
+            <strong class="inst-metric-value" id="metric-awaiting-review">0</strong>
+          </article>
+          <article class="inst-metric-card inst-metric-conflict">
+            <span class="inst-metric-label">Com conflito documental</span>
+            <strong class="inst-metric-value" id="metric-with-conflicts">0</strong>
+          </article>
+          <article class="inst-metric-card inst-metric-abstention">
+            <span class="inst-metric-label">Com abstenção explícita</span>
+            <strong class="inst-metric-value" id="metric-with-abstentions">0</strong>
+          </article>
+          <article class="inst-metric-card">
+            <span class="inst-metric-label">Processamento concluído</span>
+            <strong class="inst-metric-value" id="metric-processing-completed">0</strong>
+          </article>
+          <article class="inst-metric-card inst-metric-ok">
+            <span class="inst-metric-label">Com revisão registrada</span>
+            <strong class="inst-metric-value" id="metric-with-review">0</strong>
+          </article>
+        </div>
+      </section>
+
+      <!-- 2. Case List & Filters -->
+      <section class="inst-section" aria-labelledby="cases-list-heading">
+        <div class="inst-cases-toolbar">
+          <h2 id="cases-list-heading" class="inst-subsection-title">Casos da Organização</h2>
+          <div class="inst-filter-bar" role="tablist" aria-label="Filtros de casos" id="case-filter-tabs"></div>
+          <div class="inst-search-box">
+            <label for="case-search-input" class="sr-only">Filtrar por código ou referência</label>
+            <input id="case-search-input" type="search" placeholder="Buscar código ou referência..." />
+          </div>
+        </div>
+
+        <div class="inst-table-wrap">
+          <table class="inst-table" aria-describedby="cases-list-heading">
+            <thead>
+              <tr>
+                <th scope="col">Código do Caso</th>
+                <th scope="col">Criação</th>
+                <th scope="col">Docs Ativos</th>
+                <th scope="col">Status do Processamento</th>
+                <th scope="col">Consistência (4 Eixos)</th>
+                <th scope="col">Revisão Humana</th>
+                <th scope="col">Prontidão Administrativa</th>
+                <th scope="col">Última Atualização</th>
+                <th scope="col">Ação</th>
+              </tr>
+            </thead>
+            <tbody id="cases-table-body">
+              <tr>
+                <td colspan="9" class="inst-empty-cell">Carregando casos...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 3. Active Case Detail Workspace -->
+      <section id="case-workspace" class="inst-section inst-workspace" hidden aria-labelledby="workspace-case-title">
+        <!-- Section A: Case Identification & Status Summary -->
+        <div class="inst-card inst-case-header-card">
+          <div class="inst-case-header-top">
+            <div>
+              <span class="inst-eyebrow">SEÇÃO A · IDENTIFICAÇÃO E ESTADO DO CASO</span>
+              <h2 id="workspace-case-title" class="inst-workspace-title">Caso —</h2>
+              <p id="workspace-case-sub" class="inst-workspace-sub">—</p>
+            </div>
+            <div class="inst-case-header-badges">
+              <span id="workspace-readiness-badge" class="inst-status-badge">—</span>
+              <button type="button" id="btn-trigger-compare" class="inst-btn inst-btn-secondary">
+                ⟳ Enfileirar comparação dos 4 eixos
+              </button>
+              <button type="button" id="btn-refresh-case" class="inst-btn inst-btn-secondary">
+                ↻ Atualizar caso
+              </button>
+            </div>
+          </div>
+
+          <dl class="inst-summary-kv-grid" id="case-summary-kv">
+            <div>
+              <dt>ID do Caso</dt>
+              <dd id="kv-case-id">—</dd>
+            </div>
+            <div>
+              <dt>Status / Prontidão Administrativa</dt>
+              <dd id="kv-case-readiness">—</dd>
+            </div>
+            <div>
+              <dt>Documentos Ativos / Versões</dt>
+              <dd id="kv-case-docs-count">0 / 0</dd>
+            </div>
+            <div>
+              <dt>Último Processamento</dt>
+              <dd id="kv-case-last-run">—</dd>
+            </div>
+            <div>
+              <dt>Última Avaliação de Consistência</dt>
+              <dd id="kv-case-last-assessment">—</dd>
+            </div>
+            <div>
+              <dt>Estado da Revisão Humana</dt>
+              <dd id="kv-case-review-state">—</dd>
+            </div>
+          </dl>
+        </div>
+
+        <!-- Section C: 5-Stage Processing Pipeline Stepper -->
+        <div class="inst-card">
+          <span class="inst-eyebrow">SEÇÃO C · HISTÓRICO E ETAPAS DO PROCESSAMENTO DOCUMENTAL</span>
+          <h3 class="inst-card-subtitle">Fluxo operacional auditável em 5 etapas</h3>
+          <ol class="inst-pipeline-list" id="case-pipeline-stepper" aria-label="Etapas do pipeline documental"></ol>
+        </div>
+
+        <!-- Section B: Case Documents, Version History & Authenticated Upload -->
+        <div class="inst-card">
+          <div class="inst-section-header">
+            <div>
+              <span class="inst-eyebrow">SEÇÃO B · DOCUMENTOS DO CASO E HISTÓRICO DE VERSÕES</span>
+              <h3 class="inst-card-subtitle">Documentos ativos e rastreabilidade de versões</h3>
+            </div>
+            <div>
+              <button type="button" id="btn-toggle-upload-doc" class="inst-btn inst-btn-primary" hidden>
+                + Enviar documento PDF sintético
+              </button>
+            </div>
+          </div>
+
+          <!-- Upload Document Form -->
+          <form id="upload-doc-form" class="inst-upload-form" hidden aria-label="Enviar documento ao caso">
+            <div class="inst-form-grid">
+              <div class="inst-field">
+                <label for="upload-doc-kind">Tipo documental *</label>
+                <select id="upload-doc-kind" name="document_kind" class="inst-select" required>
+                  <option value="pedido">Pedido / Solicitação Clínica (pedido)</option>
+                  <option value="laudo">Laudo Clínico / Exame (laudo)</option>
+                  <option value="termo">Termo de Consentimento (termo)</option>
+                  <option value="imagem">Imagem Sintética (imagem)</option>
+                  <option value="desconhecido">Outro / Desconhecido (desconhecido)</option>
+                </select>
+              </div>
+              <div class="inst-field">
+                <label for="upload-source-label">Rótulo de origem *</label>
+                <input id="upload-source-label" name="source_label" type="text" required minlength="2" maxlength="160" placeholder="Ex.: Pedido Médico Sintético A" />
+              </div>
+              <div class="inst-field">
+                <label for="upload-file-input">Arquivo PDF ou PNG sintético *</label>
+                <input id="upload-file-input" name="file" type="file" accept=".pdf,.png,application/pdf,image/png" required />
+              </div>
+            </div>
+            <p class="inst-scope-notice">
+              Aviso obrigatório: utilizar exclusivamente documentos sintéticos de teste; é proibido o envio de dados pessoais ou clínicos reais (PHI/PII).
+            </p>
+            <div class="inst-form-actions">
+              <button type="submit" id="btn-submit-upload-doc" class="inst-btn inst-btn-primary">Enviar e enfileirar verificação</button>
+              <button type="button" id="btn-cancel-upload-doc" class="inst-btn inst-btn-secondary">Cancelar</button>
+            </div>
+          </form>
+
+          <div class="inst-table-wrap">
+            <table class="inst-table" aria-label="Documentos ativos do caso">
+              <thead>
+                <tr>
+                  <th scope="col">Arquivo Original / Rótulo</th>
+                  <th scope="col">Tipo</th>
+                  <th scope="col">Versão</th>
+                  <th scope="col">Upload</th>
+                  <th scope="col">Data de Emissão Extraída</th>
+                  <th scope="col">Tamanho / SHA-256</th>
+                  <th scope="col">Integridade Binária</th>
+                  <th scope="col">Extração Textual</th>
+                  <th scope="col">Revisão Humana</th>
+                  <th scope="col">Ações</th>
+                </tr>
+              </thead>
+              <tbody id="case-documents-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Part 6: Four Consistency Axes Panel -->
+        <div class="inst-card" aria-labelledby="axes-panel-title">
+          <div class="inst-section-header">
+            <div>
+              <span class="inst-eyebrow">MOTOR DETERMINÍSTICO · QUATRO EIXOS DOCUMENTAIS</span>
+              <h3 id="axes-panel-title" class="inst-card-subtitle">Avaliação determinística dos 4 eixos (verdade exclusiva da API)</h3>
+            </div>
+            <div class="inst-assessment-selector-wrap">
+              <label for="assessment-history-select">Histórico append-only de avaliações:</label>
+              <select id="assessment-history-select" class="inst-select" aria-label="Selecionar avaliação histórica de consistência"></select>
+            </div>
+          </div>
+          <div id="four-axes-grid" class="inst-axes-grid" aria-live="polite"></div>
+        </div>
+
+        <!-- Part 5: Side-by-Side Document Comparison (Documento A | Documento B) -->
+        <div class="inst-card" aria-labelledby="side-by-side-title">
+          <div class="inst-section-header">
+            <div>
+              <span class="inst-eyebrow">COMPARAÇÃO LADO A LADO · EVIDÊNCIAS ENTRE DOCUMENTOS</span>
+              <h3 id="side-by-side-title" class="inst-card-subtitle">Documento A vs. Documento B (campos extraídos, valores brutos e normalizados)</h3>
+            </div>
+            <div class="inst-doc-pair-selectors">
+              <label for="compare-doc-a-select">Documento A:</label>
+              <select id="compare-doc-a-select" class="inst-select"></select>
+              <label for="compare-doc-b-select">Documento B:</label>
+              <select id="compare-doc-b-select" class="inst-select"></select>
+            </div>
+          </div>
+          <div class="inst-table-wrap">
+            <table class="inst-table inst-comparison-table" aria-labelledby="side-by-side-title">
+              <thead>
+                <tr>
+                  <th scope="col">Campo / Eixo</th>
+                  <th scope="col">Documento A (Bruto / Normalizado / Evidência)</th>
+                  <th scope="col">Documento B (Bruto / Normalizado / Evidência)</th>
+                  <th scope="col">Diagnóstico Determinístico</th>
+                </tr>
+              </thead>
+              <tbody id="side-by-side-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Part 5 & Part 7: Split Workspace: PDF Viewer + Extracted Fields + Human Review Panel -->
+        <div class="inst-split-workspace">
+          <!-- Left Column: Integrated PDF Viewer with Spatial Bbox Overlay -->
+          <div class="inst-card inst-pdf-card" aria-labelledby="pdf-viewer-title">
+            <div class="inst-pdf-toolbar">
+              <div>
+                <span class="inst-eyebrow">VISUALIZADOR DOCUMENTAL INTEGRADO (PDF.js LOCAL)</span>
+                <h3 id="pdf-viewer-title" class="inst-card-subtitle">Nenhum documento selecionado</h3>
+              </div>
+              <div class="inst-pdf-controls">
+                <button type="button" id="btn-pdf-prev" class="inst-btn inst-btn-sm" disabled aria-label="Página anterior">◀ Ant.</button>
+                <span id="pdf-page-indicator" class="inst-pdf-page-indicator">Pág. 0 / 0</span>
+                <button type="button" id="btn-pdf-next" class="inst-btn inst-btn-sm" disabled aria-label="Próxima página">Próx. ▶</button>
+                <button type="button" id="btn-pdf-zoom-out" class="inst-btn inst-btn-sm" disabled aria-label="Reduzir zoom">−</button>
+                <span id="pdf-zoom-indicator" class="inst-pdf-page-indicator">100%</span>
+                <button type="button" id="btn-pdf-zoom-in" class="inst-btn inst-btn-sm" disabled aria-label="Aumentar zoom">+</button>
+                <button type="button" id="btn-pdf-clear-highlight" class="inst-btn inst-btn-sm" hidden>Limpar destaque</button>
+                <a id="btn-pdf-download" href="#" class="inst-btn inst-btn-sm inst-btn-secondary" hidden download>⬇ Baixar original</a>
+              </div>
+            </div>
+
+            <div id="pdf-highlight-banner" class="inst-highlight-banner" hidden aria-live="polite"></div>
+
+            <div id="pdf-stage-container" class="inst-pdf-stage-container">
+              <div id="pdf-empty-message" class="inst-pdf-empty">
+                Selecione um documento na Seção B para visualizar o PDF original e destacar evidências espaciais.
+              </div>
+              <div id="pdf-canvas-wrapper" class="inst-pdf-canvas-wrapper" hidden>
+                <canvas id="pdf-render-canvas"></canvas>
+                <div id="pdf-bbox-overlay-layer" class="inst-pdf-overlay-layer" aria-hidden="true"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Column: Extracted Fields & Administrative Human Review Panel -->
+          <div class="inst-right-column">
+            <!-- Extracted Fields & Spatial Evidences for Selected Document Version -->
+            <div class="inst-card" aria-labelledby="extracted-fields-title">
+              <span class="inst-eyebrow">CAMPOS EXTRAÍDOS E EVIDÊNCIAS ESPACIAIS DA VERSÃO</span>
+              <h3 id="extracted-fields-title" class="inst-card-subtitle">Campos extraídos (valor bruto literal vs. valor normalizado)</h3>
+              <p id="selected-doc-version-meta" class="inst-section-desc">Selecione uma versão documental ativa.</p>
+
+              <div class="inst-table-wrap">
+                <table class="inst-table" aria-labelledby="extracted-fields-title">
+                  <thead>
+                    <tr>
+                      <th scope="col">Campo</th>
+                      <th scope="col">Valor Bruto (Literal)</th>
+                      <th scope="col">Valor Normalizado</th>
+                      <th scope="col">Status / Motivo</th>
+                      <th scope="col">Página &amp; BBox</th>
+                      <th scope="col">Evidência</th>
+                    </tr>
+                  </thead>
+                  <tbody id="version-extracted-fields-tbody">
+                    <tr>
+                      <td colspan="6" class="inst-empty-cell">Selecione um documento para inspecionar seus campos extraídos.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Part 7: Administrative Human Review Registration & Ledger -->
+            <div class="inst-card inst-review-card" aria-labelledby="human-review-panel-title">
+              <span class="inst-eyebrow">REVISÃO HUMANA ADMINISTRATIVA · APPEND-ONLY</span>
+              <h3 id="human-review-panel-title" class="inst-card-subtitle">Registrar Revisão Administrativa da Versão</h3>
+              <p class="inst-scope-notice">
+                A revisão humana administrativa registra que um operador autenticado conferiu os campos e evidências
+                da versão documental ativa. Ela <strong>não sobrescreve conflitos ou abstenções</strong> dos 4 eixos e
+                <strong>nunca representa aprovação clínica</strong> (<code>clinical_approval = false</code>).
+              </p>
+
+              <div id="review-version-target-box" class="inst-review-target-box">
+                Nenhuma versão documental selecionada.
+              </div>
+
+              <!-- Review Form -->
+              <form id="human-review-form" class="inst-review-form" hidden>
+                <div class="inst-form-grid">
+                  <div class="inst-field">
+                    <label for="review-action-type">Tipo de ação administrativa *</label>
+                    <select id="review-action-type" name="action_type" class="inst-select" required>
+                      <option value="observed">Conferência documental observada (observed)</option>
+                      <option value="abstention_review">Ciência administrativa de abstenção (abstention_review)</option>
+                      <option value="case_link_confirmation">Confirmação de vínculo ao caso (case_link_confirmation)</option>
+                      <option value="not_observed">Elemento não observado no documento (not_observed)</option>
+                    </select>
+                  </div>
+                  <div class="inst-field">
+                    <label for="review-field-key">Escopo do registro</label>
+                    <select id="review-field-key" name="field_key" class="inst-select">
+                      <option value="">Versão documental completa (todos os campos)</option>
+                      <option value="patient">Paciente (patient)</option>
+                      <option value="birth_date">Data de nascimento (birth_date)</option>
+                      <option value="identifier">Identificador CPF/CNS (identifier)</option>
+                      <option value="procedure">Procedimento (procedure)</option>
+                      <option value="procedure_code_system">Sistema de código (procedure_code_system)</option>
+                      <option value="procedure_code">Código do procedimento (procedure_code)</option>
+                      <option value="laterality">Lateralidade (laterality)</option>
+                      <option value="issue_date">Data de emissão (issue_date)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="inst-field">
+                  <label for="review-justification">Observação / Justificativa administrativa (mín. 5 caracteres) *</label>
+                  <textarea
+                    id="review-justification"
+                    name="justification"
+                    rows="3"
+                    required
+                    minlength="5"
+                    maxlength="2000"
+                    placeholder="Descreva a conferência administrativa realizada sobre as evidências desta versão documental..."
+                  ></textarea>
+                </div>
+
+                <div class="inst-checkbox-row">
+                  <input type="checkbox" id="review-confirm-checkbox" required />
+                  <label for="review-confirm-checkbox">
+                    Confirmo que conferi os campos extraídos, as evidências espaciais e os 4 eixos desta versão documental,
+                    ciente de que este registro é estritamente administrativo e imutável (append-only).
+                  </label>
+                </div>
+
+                <div class="inst-form-actions">
+                  <button type="submit" id="btn-submit-human-review" class="inst-btn inst-btn-primary">
+                    ✓ Registrar revisão administrativa
+                  </button>
+                </div>
+              </form>
+
+              <div id="review-already-recorded-notice" class="inst-review-recorded-banner" hidden></div>
+
+              <!-- Append-only ledger of recorded human reviews for this case -->
+              <div class="inst-reviews-ledger-wrap">
+                <h4 class="inst-ledger-title">Trilha Append-Only de Revisões Humanas do Caso</h4>
+                <div id="case-human-reviews-list" class="inst-reviews-list">
+                  <p class="inst-empty-cell">Nenhuma revisão humana registrada neste caso até o momento.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="inst-footer" role="contentinfo">
+    <span>JYXIA · Etapa 3.3.5 · Interface Institucional de Revisão Humana</span>
+    <span>Motor de Consistência 3.3.4.1 · Migration 20261122_0009 · <code>administrative_only: true</code> · <code>clinical_approval: false</code></span>
+  </footer>
+
+  <script type="module" src="/institutional/institutional-ui.mjs"></script>
+</body>
+</html>

@@ -757,6 +757,16 @@ class HumanReview(Base):
     )
 
 
+@event.listens_for(HumanReview, "before_update")
+def _forbid_human_review_update(_mapper: Any, _connection: Any, _target: HumanReview) -> None:
+    raise ValueError("HumanReview records are strictly append-only and cannot be updated.")
+
+
+@event.listens_for(HumanReview, "before_delete")
+def _forbid_human_review_delete(_mapper: Any, _connection: Any, _target: HumanReview) -> None:
+    raise ValueError("HumanReview records are strictly append-only and cannot be deleted.")
+
+
 class AuditEvent(Base):
     """Organization-scoped append-only hash-chained ledger.
 

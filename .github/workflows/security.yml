@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Nucleo documental, laboratorio, benchmark, PDF.js e testes historicos
-        run: node --test tests/frontend/test_documental.mjs tests/frontend/test_documental_pdfjs.mjs tests/frontend/test_lab_and_benchmark.mjs tests/legacy/test_security.cjs tests/legacy/test_synthetic_import.cjs
+        run: node --test tests/frontend/test_documental.mjs tests/frontend/test_documental_pdfjs.mjs tests/frontend/test_lab_and_benchmark.mjs tests/frontend/test_institutional_ui.mjs tests/legacy/test_security.cjs tests/legacy/test_synthetic_import.cjs
       - name: Integracao historica com identidades sinteticas
         run: python3 -m unittest discover -s tests/legacy -v
       - name: Higiene basica da publicacao e coerencia de dependencias

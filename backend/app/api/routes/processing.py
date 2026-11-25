@@ -19,26 +19,35 @@ from app.core.rbac import RbacPermission
 from app.models.entities import (
     ConsistencyAssessment,
     ConsistencyAxisResult,
+    Document,
+    DocumentVersion,
     EvidenceReference,
     ExtractedField,
+    HumanReview,
     ProcessingRun,
+    User,
 )
 from app.schemas.auth import (
+    CaseHumanReviewsResponse,
     CaseProcessingRunsListResponse,
     ConsistencyAssessmentDetailResponse,
     ConsistencyAssessmentsListResponse,
     ConsistencyAssessmentSummaryResponse,
     ConsistencyAxisResultResponse,
+    CreateHumanReviewRequest,
+    DocumentVersionHumanReviewsResponse,
     EvidenceReferencesListResponse,
     EvidenceReferenceSummaryResponse,
     ExtractedFieldItemResponse,
     ExtractedFieldsListResponse,
+    HumanReviewResponse,
     ProcessingRunSummaryResponse,
 )
 from app.schemas.tenant import TenantContext, validate_safe_metadata_text
 from app.services.auth_service import AuthorizedMembershipContext
 from app.services.institutional_service import (
     DocumentNotFoundError,
+    HumanReviewStateConflictError,
     IdempotencyConflictError,
     InstitutionalService,
     ProcessingRunActiveConflictError,
@@ -628,4 +637,190 @@ def get_case_consistency_assessment_detail(
         assessed_at=res.assessment.assessed_at,
         administrative_only=True,
         clinical_approval=False,
+    )
+
+
+def _to_human_review_response(
+    review: HumanReview,
+    doc: Document,
+    ver: DocumentVersion,
+    reviewer_user: User | None,
+    reviewer_role: str | None,
+    *,
+    idempotent_replay: bool = False,
+    comparison_run: ProcessingRun | None = None,
+) -> HumanReviewResponse:
+    return HumanReviewResponse(
+        review_id=review.id,
+        organization_id=review.organization_id,
+        case_id=doc.case_id,
+        document_id=doc.id,
+        document_version_id=ver.id,
+        version_number=ver.version_number,
+        reviewer_user_id=review.reviewer_user_id,
+        reviewer_display_name=reviewer_user.display_name if reviewer_user is not None else None,
+        reviewer_email=reviewer_user.email if reviewer_user is not None else None,
+        reviewer_role=reviewer_role,
+        action_type=review.action_type,
+        field_key=review.field_key,
+        original_value=review.original_value,
+        revised_value=review.revised_value,
+        justification=review.justification,
+        evidence_reference_id=review.evidence_reference_id,
+        policy_version=review.policy_version,
+        created_at=review.created_at,
+        idempotent_replay=idempotent_replay,
+        comparison_processing_run=(
+            to_processing_run_summary(
+                comparison_run,
+                document_id=doc.id,
+                case_id=doc.case_id,
+            )
+            if comparison_run is not None
+            else None
+        ),
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.get(
+    "/{organization_id}/cases/{case_id}/human-reviews",
+    response_model=CaseHumanReviewsResponse,
+)
+def list_case_human_reviews(
+    organization_id: str,
+    case_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.DOCUMENT_READ)),
+    ],
+) -> CaseHumanReviewsResponse:
+    """List append-only administrative human reviews across a tenant DocumentCase."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        res = InstitutionalService.list_case_human_reviews(
+            session, ctx, case_id=case_id
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return CaseHumanReviewsResponse(
+        organization_id=ctx.organization_id,
+        case_id=res.case.id,
+        active_document_versions_count=res.active_document_versions_count,
+        reviewed_active_versions_count=res.reviewed_active_versions_count,
+        human_review_completed=res.human_review_completed,
+        total=len(res.items),
+        reviews=[
+            _to_human_review_response(rev, doc, ver, usr, rl)
+            for rev, doc, ver, usr, rl in res.items
+        ],
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.get(
+    "/{organization_id}/documents/{document_id}/versions/{version_id}/human-reviews",
+    response_model=DocumentVersionHumanReviewsResponse,
+)
+def list_document_version_human_reviews(
+    organization_id: str,
+    document_id: str,
+    version_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.DOCUMENT_READ)),
+    ],
+) -> DocumentVersionHumanReviewsResponse:
+    """List append-only administrative human reviews for a specific document version."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        res = InstitutionalService.list_document_version_human_reviews(
+            session, ctx, document_id=document_id, version_id=version_id
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return DocumentVersionHumanReviewsResponse(
+        organization_id=ctx.organization_id,
+        case_id=res.document.case_id,
+        document_id=res.document.id,
+        document_version_id=res.version.id,
+        version_number=res.version.version_number,
+        is_current=res.version.is_current,
+        total=len(res.items),
+        reviews=[
+            _to_human_review_response(rev, doc, ver, usr, rl)
+            for rev, doc, ver, usr, rl in res.items
+        ],
+        administrative_only=True,
+        clinical_approval=False,
+    )
+
+
+@router.post(
+    "/{organization_id}/documents/{document_id}/versions/{version_id}/human-reviews",
+    response_model=HumanReviewResponse,
+)
+def record_document_version_human_review(
+    organization_id: str,
+    document_id: str,
+    version_id: str,
+    payload: CreateHumanReviewRequest,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    _csrf: Annotated[object, Depends(require_csrf_protection)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.FIELD_REVIEW)),
+    ],
+) -> HumanReviewResponse:
+    """Record an append-only administrative human review on an active DocumentVersion."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    try:
+        res = InstitutionalService.record_document_version_human_review(
+            session,
+            ctx,
+            document_id=document_id,
+            version_id=version_id,
+            action_type=payload.action_type,
+            justification=payload.justification,
+            field_key=payload.field_key,
+            original_value=payload.original_value,
+            revised_value=payload.revised_value,
+            evidence_reference_id=payload.evidence_reference_id,
+            policy_version=payload.policy_version,
+            enqueue_comparison=payload.enqueue_comparison,
+            engine_version=settings.consistency_engine_version,
+            max_attempts=settings.worker_max_attempts,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HumanReviewStateConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    response.status_code = 200 if res.idempotent_replay else 201
+    return _to_human_review_response(
+        res.review,
+        res.document,
+        res.version,
+        res.reviewer_user,
+        res.reviewer_role,
+        idempotent_replay=res.idempotent_replay,
+        comparison_run=res.comparison_processing_run,
     )

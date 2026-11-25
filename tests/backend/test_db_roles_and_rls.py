@@ -357,6 +357,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             "processing_runs",
             "extracted_fields",
             "evidence_references",
+            "human_reviews",
             "consistency_assessments",
             "consistency_axis_results",
             "consistency_axis_evidences",
@@ -830,6 +831,38 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         )
         app_db.rollback()
 
+        # Verify PG16 RLS on human_reviews: Org A can record & read its review; Org B cannot see or mutate it
+        from app.core.constants import HumanReviewAction
+
+        ctx_rls_a = TenantContext(
+            organization_id=org_a_id,
+            actor_user_id=user_a_id,
+            session_token_hash="a" * 64,
+        )
+        rev_res = InstitutionalService.record_document_version_human_review(
+            app_db,
+            ctx_rls_a,
+            document_id=r1[0],
+            version_id=r1[1],
+            action_type=HumanReviewAction.OBSERVED,
+            justification="Conferencia administrativa PG16 RLS verificada.",
+            enqueue_comparison=False,
+        )
+        assert rev_res.review.reviewer_user_id == user_a_id
+        assert rev_res.review.organization_id == org_a_id
+
+        clear_pg_rls_context(app_db)
+        apply_pg_rls_context(app_db, organization_id=org_b_id, user_id=user_b_id)
+        apply_pg_identity_context(app_db, session_token_hash="b" * 64)
+        assert (
+            app_db.execute(
+                text("SELECT count(*) FROM human_reviews WHERE id = :rid"),
+                {"rid": rev_res.review.id},
+            ).scalar()
+            == 0
+        )
+        app_db.rollback()
+
         # Verify jyxia_app can revoke its own authenticated session via revoke_session, after which SELECT returns 0 rows
         IdentityAndSessionRepository.revoke_session(
             app_db,
@@ -900,6 +933,7 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             "processing_runs",
             "extracted_fields",
             "evidence_references",
+            "human_reviews",
             "consistency_assessments",
             "consistency_axis_results",
             "consistency_axis_evidences",
