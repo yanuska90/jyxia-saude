@@ -314,7 +314,7 @@ def _downgrade_pg_human_reviews_and_worker_claim() -> None:
             DO $$
             BEGIN
                 IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'jyxia_app') THEN
-                    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.human_reviews TO jyxia_app;
+                    GRANT SELECT, INSERT, UPDATE ON TABLE public.human_reviews TO jyxia_app;
                 END IF;
             END
             $$;
