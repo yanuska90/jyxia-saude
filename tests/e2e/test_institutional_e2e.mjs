@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,6 +29,11 @@ const MSEDGE_CANDIDATES = [
   '/usr/bin/google-chrome-stable',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
+  'google-chrome',
+  'google-chrome-stable',
+  'chromium',
+  'chromium-browser',
+  'msedge',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
 ].filter(Boolean);
 
@@ -43,7 +48,19 @@ const PYTHON_CANDIDATES = [
 async function findExecutable(candidates, label) {
   for (const candidate of candidates) {
     if (!candidate.includes(path.sep) && !candidate.includes('/')) {
-      return candidate;
+      try {
+        const lookupCmd = process.platform === 'win32' ? 'where' : 'which';
+        const resolved = execFileSync(lookupCmd, [candidate], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+          .split(/\r?\n/)[0]
+          .trim();
+        if (resolved) {
+          return resolved;
+        }
+      } catch {}
+      continue;
     }
     try {
       await fs.access(candidate);

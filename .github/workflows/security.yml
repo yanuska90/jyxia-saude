@@ -149,10 +149,12 @@ jobs:
             echo "ERROR: Unexpected skipped test in PostgreSQL/Keycloak CI verification."
             exit 1
           fi
-      - name: Configurar Node.js 24 para E2E institucional headless
+      - name: Configurar Node.js 24 e Chrome para E2E institucional headless
         uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - name: Provisionar Chrome headless no runner CI
+        uses: browser-actions/setup-chrome@v1
       - name: Executar E2E institucional headless (FastAPI + Worker + PDF.js via CDP com sessao pre-semeada)
         env:
           JYXIA_PYTHON_BIN: /tmp/jyxia-ci-venv/bin/python
@@ -161,9 +163,8 @@ jobs:
           if ! node tests/e2e/test_institutional_e2e.mjs 2>&1 | tee /tmp/inst_e2e.log; then
             python3 -c "
           from pathlib import Path
-          for line in Path('/tmp/inst_e2e.log').read_text(errors='replace').splitlines()[-12:]:
-              if line.strip():
-                  print(f'::error::{line}')
+          lines = [l.strip() for l in Path('/tmp/inst_e2e.log').read_text(errors='replace').splitlines() if l.strip()]
+          print('::error::' + ' | '.join(lines[:6]))
           " || true
             exit 1
           fi
