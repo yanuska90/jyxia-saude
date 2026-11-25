@@ -1411,13 +1411,13 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
         organization_id=org_a_id,
         actor_user_id=user_a_id,
         session_token_hash="1" * 64,
-        source="pg_hr_test",
+        source="authenticated_request",
     )
     ctx_rev2 = TenantContext(
         organization_id=org_a_id,
         actor_user_id=user_a2_id,
         session_token_hash="5" * 64,
-        source="pg_hr_test",
+        source="authenticated_request",
     )
 
     app_hr_setup = app_factory()
