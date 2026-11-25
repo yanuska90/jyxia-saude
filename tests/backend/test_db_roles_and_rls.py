@@ -1352,13 +1352,46 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             user_id=user_a2.id,
             role=OrganizationRole.DOCUMENT_REVIEWER.value,
         )
+        ext_a2 = IdentityAndSessionRepository.bind_external_identity(
+            owner_setup_hr,
+            user_id=user_a2.id,
+            issuer="https://idp.jyxia.local/realms/wrk",
+            subject="sub-wrk-a2",
+            email_at_binding=user_a2.email,
+        )
+        IdentityAndSessionRepository.create_auth_session(
+            owner_setup_hr,
+            user_id=user_a2.id,
+            external_identity_id=ext_a2.id,
+            active_organization_id=org_a_id,
+            session_token_hash="5" * 64,
+            csrf_token_hash="6" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
         owner_setup_hr.commit()
         user_a2_id = user_a2.id
     finally:
         owner_setup_hr.close()
 
-    ctx_rev1 = TenantContext(organization_id=org_a_id, actor_user_id=user_a_id, source="pg_hr_test")
-    ctx_rev2 = TenantContext(organization_id=org_a_id, actor_user_id=user_a2_id, source="pg_hr_test")
+    ctx_rev1 = TenantContext(
+        organization_id=org_a_id,
+        actor_user_id=user_a_id,
+        session_token_hash="1" * 64,
+        source="pg_hr_test",
+    )
+    ctx_rev2 = TenantContext(
+        organization_id=org_a_id,
+        actor_user_id=user_a2_id,
+        session_token_hash="5" * 64,
+        source="pg_hr_test",
+    )
 
     app_hr_setup = app_factory()
     try:
