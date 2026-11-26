@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import ValidationError
@@ -39,6 +39,7 @@ from app.schemas.auth import (
     AuditEventSummaryResponse,
     CaseDocumentsListResponse,
     CaseSummaryResponse,
+    CreateCaseRequest,
     DocumentDetailResponse,
     DocumentIngestionResponse,
     DocumentSummaryResponse,
@@ -49,7 +50,11 @@ from app.schemas.auth import (
     OrganizationMembersResponse,
     SecurityAuditEventSummaryResponse,
 )
-from app.schemas.tenant import TenantContext, validate_safe_metadata_text
+from app.schemas.tenant import (
+    DocumentCaseCreateInput,
+    TenantContext,
+    validate_safe_metadata_text,
+)
 from app.services.auth_service import AuthorizedMembershipContext
 from app.services.institutional_service import (
     DocumentNotFoundError,
@@ -160,6 +165,37 @@ def get_organization_access_context(
     )
 
 
+def _to_case_summary(
+    c: Any,
+    ops: dict[str, Any] | None = None,
+) -> CaseSummaryResponse:
+    meta = ops or {}
+    return CaseSummaryResponse(
+        case_id=c.id,
+        organization_id=c.organization_id,
+        case_code=c.case_code,
+        external_reference=c.external_reference,
+        procedure_reference=c.procedure_reference,
+        declared_laterality=c.declared_laterality,
+        readiness_state=c.readiness_state,
+        active_documents_count=int(meta.get("active_documents_count", 0)),
+        active_versions_count=int(meta.get("active_versions_count", 0)),
+        reviewed_active_versions_count=int(meta.get("reviewed_active_versions_count", 0)),
+        human_review_completed=bool(meta.get("human_review_completed", False)),
+        human_review_state=str(meta.get("human_review_state", "awaiting_documents")),
+        processing_status=str(meta.get("processing_status", "idle")),
+        consistency_status=str(meta.get("consistency_status", "not_evaluated")),
+        has_conflict=bool(meta.get("has_conflict", c.readiness_state == "bloqueado")),
+        has_abstention=bool(meta.get("has_abstention", c.readiness_state == "abstencao")),
+        latest_assessment_id=meta.get("latest_assessment_id"),
+        latest_assessment_sequence=meta.get("latest_assessment_sequence"),
+        administrative_only=c.administrative_only,
+        clinical_approval=c.clinical_approval,
+        created_at=c.created_at,
+        updated_at=meta.get("updated_at") or c.updated_at,
+    )
+
+
 @router.get("/{organization_id}/cases", response_model=OrganizationCasesResponse)
 def list_organization_cases(
     response: Response,
@@ -173,24 +209,91 @@ def list_organization_cases(
     _set_no_store(response)
     ctx = _to_tenant_ctx(auth_ctx)
     cases = CaseAndDocumentRepository.list_cases(session, ctx)
+    ops_by_case = CaseAndDocumentRepository.summarize_cases_operational_state(
+        session, ctx, cases=cases
+    )
     return OrganizationCasesResponse(
         organization_id=auth_ctx.organization.id,
         role=auth_ctx.principal.role,
-        cases=[
-            CaseSummaryResponse(
-                case_id=c.id,
-                organization_id=c.organization_id,
-                case_code=c.case_code,
-                external_reference=c.external_reference,
-                procedure_reference=c.procedure_reference,
-                readiness_state=c.readiness_state,
-                administrative_only=c.administrative_only,
-                clinical_approval=c.clinical_approval,
-                created_at=c.created_at,
-            )
-            for c in cases
-        ],
+        cases=[_to_case_summary(c, ops_by_case.get(c.id)) for c in cases],
     )
+
+
+@router.post(
+    "/{organization_id}/cases",
+    response_model=CaseSummaryResponse,
+    status_code=201,
+)
+def create_organization_case(
+    organization_id: str,
+    payload: CreateCaseRequest,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    _csrf: Annotated[AuthenticatedSessionPrincipal, Depends(require_csrf_protection)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.CASE_WRITE)),
+    ],
+) -> CaseSummaryResponse:
+    """Create a new tenant-scoped administrative DocumentCase (administrative_only=true)."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    existing = next(
+        (
+            c
+            for c in CaseAndDocumentRepository.list_cases(session, ctx)
+            if c.case_code == payload.case_code
+        ),
+        None,
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"DocumentCase with case_code '{payload.case_code}' already exists in organization.",
+        )
+    case = InstitutionalService.create_case(
+        session,
+        ctx,
+        DocumentCaseCreateInput(
+            case_code=payload.case_code,
+            external_reference=payload.external_reference,
+            procedure_reference=payload.procedure_reference,
+            declared_laterality=payload.declared_laterality,
+        ),
+    )
+    session.commit()
+    ops_by_case = CaseAndDocumentRepository.summarize_cases_operational_state(
+        session, ctx, cases=[case]
+    )
+    return _to_case_summary(case, ops_by_case.get(case.id))
+
+
+@router.get("/{organization_id}/cases/{case_id}", response_model=CaseSummaryResponse)
+def get_organization_case_detail(
+    organization_id: str,
+    case_id: str,
+    response: Response,
+    session: Annotated[Session, Depends(get_db_session)],
+    auth_ctx: Annotated[
+        AuthorizedMembershipContext,
+        Depends(require_org_permission(RbacPermission.CASE_READ)),
+    ],
+) -> CaseSummaryResponse:
+    """Retrieve a single tenant-scoped administrative case with operational state summary."""
+    _ = organization_id
+    _set_no_store(response)
+    ctx = _to_tenant_ctx(auth_ctx)
+    case = CaseAndDocumentRepository.get_case(session, ctx, case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"DocumentCase '{case_id}' was not found in organization.",
+        )
+    ops_by_case = CaseAndDocumentRepository.summarize_cases_operational_state(
+        session, ctx, cases=[case]
+    )
+    return _to_case_summary(case, ops_by_case.get(case.id))
 
 
 @router.get("/{organization_id}/members", response_model=OrganizationMembersResponse)

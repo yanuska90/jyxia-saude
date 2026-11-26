@@ -5,9 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.core.constants import OrganizationRole
+from app.core.constants import (
+    DEFAULT_CONSISTENCY_POLICY_VERSION,
+    HumanReviewAction,
+    OrganizationRole,
+)
+from app.schemas.tenant import validate_safe_metadata_text
 
 
 class UserOrganizationMembershipSummary(BaseModel):
@@ -102,10 +107,46 @@ class CaseSummaryResponse(BaseModel):
     case_code: str
     external_reference: str | None
     procedure_reference: str | None
+    declared_laterality: str | None = None
     readiness_state: str
+    active_documents_count: int = 0
+    active_versions_count: int = 0
+    reviewed_active_versions_count: int = 0
+    human_review_completed: bool = False
+    human_review_state: str = "awaiting_documents"
+    processing_status: str = "idle"
+    consistency_status: str = "not_evaluated"
+    has_conflict: bool = False
+    has_abstention: bool = False
+    latest_assessment_id: str | None = None
+    latest_assessment_sequence: int | None = None
     administrative_only: bool
     clinical_approval: bool
     created_at: datetime
+    updated_at: datetime | None = None
+
+
+class CreateCaseRequest(BaseModel):
+    """Strict tenant-scoped request to open an administrative DocumentCase."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    case_code: str = Field(min_length=3, max_length=80)
+    external_reference: str | None = Field(default=None, max_length=120)
+    procedure_reference: str | None = Field(default=None, max_length=120)
+    declared_laterality: str | None = Field(default=None, max_length=40)
+
+    @field_validator(
+        "case_code",
+        "external_reference",
+        "procedure_reference",
+        "declared_laterality",
+    )
+    @classmethod
+    def _check_safe_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_safe_metadata_text(value, field_name="case_metadata")
 
 
 class OrganizationCasesResponse(BaseModel):
@@ -490,5 +531,101 @@ class ConsistencyAssessmentDetailResponse(BaseModel):
     limitations: list[str]
     summary: dict[str, Any]
     assessed_at: datetime
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class CreateHumanReviewRequest(BaseModel):
+    """Strict append-only request to record an administrative human review on a document version.
+
+    Rejects any attempt to send reviewer_user_id, readiness_state, clinical_approval,
+    human_review_completed, or axis overrides (extra='forbid').
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action_type: HumanReviewAction = HumanReviewAction.OBSERVED
+    justification: str = Field(min_length=5, max_length=2000)
+    field_key: str | None = Field(default=None, max_length=80)
+    original_value: str | None = Field(default=None, max_length=500)
+    revised_value: str | None = Field(default=None, max_length=500)
+    evidence_reference_id: str | None = Field(default=None, min_length=8, max_length=64)
+    policy_version: str = Field(
+        default=DEFAULT_CONSISTENCY_POLICY_VERSION, min_length=3, max_length=64
+    )
+    enqueue_comparison: bool = True
+
+    @field_validator(
+        "justification",
+        "field_key",
+        "original_value",
+        "revised_value",
+        "policy_version",
+    )
+    @classmethod
+    def _check_safe_review_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_safe_metadata_text(value, field_name="human_review")
+
+
+class HumanReviewResponse(BaseModel):
+    """Immutable append-only record of an administrative human review on a document version."""
+
+    model_config = ConfigDict(frozen=True)
+
+    review_id: str
+    organization_id: str
+    case_id: str | None = None
+    document_id: str
+    document_version_id: str
+    version_number: int | None = None
+    reviewer_user_id: str
+    reviewer_display_name: str | None = None
+    reviewer_email: str | None = None
+    reviewer_role: str | None = None
+    action_type: str
+    field_key: str | None = None
+    original_value: str | None = None
+    revised_value: str | None = None
+    justification: str
+    evidence_reference_id: str | None = None
+    policy_version: str
+    created_at: datetime
+    idempotent_replay: bool = False
+    comparison_processing_run: ProcessingRunSummaryResponse | None = None
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class DocumentVersionHumanReviewsResponse(BaseModel):
+    """Append-only list of administrative human reviews recorded for a document version."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    case_id: str | None = None
+    document_id: str
+    document_version_id: str
+    version_number: int
+    is_current: bool
+    total: int
+    reviews: list[HumanReviewResponse]
+    administrative_only: bool = True
+    clinical_approval: bool = False
+
+
+class CaseHumanReviewsResponse(BaseModel):
+    """Append-only list of administrative human reviews across a DocumentCase."""
+
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str
+    case_id: str
+    active_document_versions_count: int
+    reviewed_active_versions_count: int
+    human_review_completed: bool
+    total: int
+    reviews: list[HumanReviewResponse]
     administrative_only: bool = True
     clinical_approval: bool = False

@@ -465,6 +465,182 @@ class CaseAndDocumentRepository:
         )
 
     @staticmethod
+    def summarize_cases_operational_state(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        cases: list[DocumentCase],
+    ) -> dict[str, dict[str, Any]]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        if not cases:
+            return {}
+        case_ids = [c.id for c in cases]
+        result: dict[str, dict[str, Any]] = {
+            c.id: {
+                "active_documents_count": 0,
+                "active_versions_count": 0,
+                "reviewed_active_versions_count": 0,
+                "human_review_completed": False,
+                "human_review_state": "awaiting_documents",
+                "processing_status": "idle",
+                "consistency_status": "not_evaluated",
+                "has_conflict": False,
+                "has_abstention": False,
+                "latest_assessment_id": None,
+                "latest_assessment_sequence": None,
+                "updated_at": c.updated_at,
+                "_active_version_ids": set(),
+            }
+            for c in cases
+        }
+
+        doc_rows = session.execute(
+            select(Document.case_id, Document.id, DocumentVersion.id, DocumentVersion.created_at)
+            .outerjoin(
+                DocumentVersion,
+                (DocumentVersion.organization_id == Document.organization_id)
+                & (DocumentVersion.document_id == Document.id)
+                & (DocumentVersion.is_current.is_(True)),
+            )
+            .where(
+                Document.organization_id == ctx.organization_id,
+                Document.case_id.in_(case_ids),
+                Document.discarded_at.is_(None),
+            )
+        ).all()
+        all_active_ver_ids: list[str] = []
+        for cid, _did, vid, v_created in doc_rows:
+            if cid not in result:
+                continue
+            entry = result[cid]
+            entry["active_documents_count"] += 1
+            if vid is not None:
+                entry["active_versions_count"] += 1
+                entry["_active_version_ids"].add(vid)
+                all_active_ver_ids.append(vid)
+                if v_created is not None and _as_utc(v_created) > _as_utc(entry["updated_at"]):
+                    entry["updated_at"] = v_created
+
+        if all_active_ver_ids:
+            rev_rows = session.execute(
+                select(HumanReview.document_version_id, func.max(HumanReview.created_at))
+                .where(
+                    HumanReview.organization_id == ctx.organization_id,
+                    HumanReview.document_version_id.in_(all_active_ver_ids),
+                )
+                .group_by(HumanReview.document_version_id)
+            ).all()
+            reviewed_ver_dates = {vid: r_dt for vid, r_dt in rev_rows}
+            for cid, entry in result.items():
+                active_vids = entry["_active_version_ids"]
+                matched = [vid for vid in active_vids if vid in reviewed_ver_dates]
+                entry["reviewed_active_versions_count"] = len(matched)
+                for vid in matched:
+                    r_dt = reviewed_ver_dates[vid]
+                    if r_dt is not None and _as_utc(r_dt) > _as_utc(entry["updated_at"]):
+                        entry["updated_at"] = r_dt
+
+        run_rows = session.execute(
+            select(
+                ProcessingRun.case_id,
+                ProcessingRun.status,
+                ProcessingRun.updated_at,
+            )
+            .where(
+                ProcessingRun.organization_id == ctx.organization_id,
+                ProcessingRun.case_id.in_(case_ids),
+            )
+            .order_by(ProcessingRun.created_at.asc(), ProcessingRun.id.asc())
+        ).all()
+        runs_by_case: dict[str, list[str]] = {cid: [] for cid in case_ids}
+        for cid, r_status, r_upd in run_rows:
+            if cid is None or cid not in result:
+                continue
+            runs_by_case[cid].append(r_status)
+            if r_upd is not None and _as_utc(r_upd) > _as_utc(result[cid]["updated_at"]):
+                result[cid]["updated_at"] = r_upd
+
+        assess_rows = session.execute(
+            select(
+                ConsistencyAssessment.case_id,
+                ConsistencyAssessment.id,
+                ConsistencyAssessment.assessment_sequence,
+                ConsistencyAssessment.automated_axes_outcome,
+                ConsistencyAssessment.readiness_state,
+                ConsistencyAssessment.human_review_completed,
+                ConsistencyAssessment.assessed_at,
+            )
+            .where(
+                ConsistencyAssessment.organization_id == ctx.organization_id,
+                ConsistencyAssessment.case_id.in_(case_ids),
+            )
+            .order_by(
+                ConsistencyAssessment.case_id.asc(),
+                ConsistencyAssessment.assessment_sequence.desc(),
+            )
+        ).all()
+        latest_assess_by_case: dict[str, Any] = {}
+        for row in assess_rows:
+            cid = row[0]
+            if cid not in latest_assess_by_case:
+                latest_assess_by_case[cid] = row
+
+        for cid, entry in result.items():
+            active_ver_cnt = entry["active_versions_count"]
+            rev_ver_cnt = entry["reviewed_active_versions_count"]
+            if active_ver_cnt == 0:
+                entry["human_review_completed"] = False
+                entry["human_review_state"] = "awaiting_documents"
+            elif rev_ver_cnt == 0:
+                entry["human_review_completed"] = False
+                entry["human_review_state"] = "pending"
+            elif rev_ver_cnt < active_ver_cnt:
+                entry["human_review_completed"] = False
+                entry["human_review_state"] = "partial"
+            else:
+                entry["human_review_completed"] = True
+                entry["human_review_state"] = "completed"
+
+            statuses = runs_by_case.get(cid, [])
+            if any(s in ACTIVE_PROCESSING_STATUSES for s in statuses):
+                entry["processing_status"] = "in_progress"
+            elif any(s == ProcessingStatus.FAILED.value for s in statuses):
+                entry["processing_status"] = "failed"
+            elif any(s == ProcessingStatus.ABSTAINED.value for s in statuses):
+                entry["processing_status"] = "abstained"
+            elif statuses:
+                entry["processing_status"] = "completed"
+            else:
+                entry["processing_status"] = "idle"
+
+            la = latest_assess_by_case.get(cid)
+            if la is not None:
+                _, a_id, a_seq, a_outcome, a_readiness, _a_hrc, a_dt = la
+                entry["latest_assessment_id"] = a_id
+                entry["latest_assessment_sequence"] = int(a_seq)
+                entry["consistency_status"] = str(a_outcome)
+                entry["has_conflict"] = (
+                    a_outcome in ("conflito", "conflict_detected")
+                    or a_readiness == "bloqueado"
+                )
+                entry["has_abstention"] = (
+                    a_outcome in ("abstencao", "abstention_required")
+                    or a_readiness == "abstencao"
+                )
+                if a_dt is not None and _as_utc(a_dt) > _as_utc(entry["updated_at"]):
+                    entry["updated_at"] = a_dt
+            else:
+                case_obj = next(c for c in cases if c.id == cid)
+                entry["has_conflict"] = case_obj.readiness_state == "bloqueado"
+                entry["has_abstention"] = case_obj.readiness_state == "abstencao"
+
+            entry.pop("_active_version_ids", None)
+
+        return result
+
+    @staticmethod
     def create_document(
         session: Session,
         ctx: TenantContext,
@@ -504,17 +680,23 @@ class CaseAndDocumentRepository:
         return document
 
     @staticmethod
-    def get_document(session: Session, ctx: TenantContext, document_id: str) -> Document | None:
+    def get_document(
+        session: Session,
+        ctx: TenantContext,
+        document_id: str,
+        *,
+        include_discarded: bool = False,
+    ) -> Document | None:
         apply_pg_rls_context(
             session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
         )
-        return session.scalar(
-            select(Document).where(
-                Document.id == document_id,
-                Document.organization_id == ctx.organization_id,
-                Document.discarded_at.is_(None),
-            )
+        stmt = select(Document).where(
+            Document.id == document_id,
+            Document.organization_id == ctx.organization_id,
         )
+        if not include_discarded:
+            stmt = stmt.where(Document.discarded_at.is_(None))
+        return session.scalar(stmt)
 
     @staticmethod
     def get_document_by_idempotency_key(
@@ -793,6 +975,59 @@ class CaseAndDocumentRepository:
         return evidence
 
     @staticmethod
+    def lock_document_version_for_review(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_id: str,
+        version_id: str,
+        case_id: str | None = None,
+    ) -> tuple[Document | None, DocumentVersion | None]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        is_pg = _is_pg_session(session)
+        if case_id is not None and is_pg:
+            session.execute(
+                select(DocumentCase.id)
+                .where(
+                    DocumentCase.organization_id == ctx.organization_id,
+                    DocumentCase.id == case_id,
+                )
+                .with_for_update()
+            ).first()
+
+        doc_stmt = select(Document).where(
+            Document.organization_id == ctx.organization_id,
+            Document.id == document_id,
+        )
+        if is_pg:
+            doc_stmt = doc_stmt.with_for_update()
+        doc = session.scalar(doc_stmt)
+        if doc is None:
+            return None, None
+
+        if doc.case_id is not None and doc.case_id != case_id and is_pg:
+            session.execute(
+                select(DocumentCase.id)
+                .where(
+                    DocumentCase.organization_id == ctx.organization_id,
+                    DocumentCase.id == doc.case_id,
+                )
+                .with_for_update()
+            ).first()
+
+        ver_stmt = select(DocumentVersion).where(
+            DocumentVersion.organization_id == ctx.organization_id,
+            DocumentVersion.document_id == doc.id,
+            DocumentVersion.id == version_id,
+        )
+        if is_pg:
+            ver_stmt = ver_stmt.with_for_update()
+        version = session.scalar(ver_stmt)
+        return doc, version
+
+    @staticmethod
     def create_human_review(
         session: Session,
         ctx: TenantContext,
@@ -838,6 +1073,96 @@ class CaseAndDocumentRepository:
         session.add(review)
         session.flush()
         return review
+
+    @staticmethod
+    def list_human_reviews_by_version(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        document_version_id: str,
+    ) -> list[tuple[HumanReview, Document, DocumentVersion, User | None, str | None]]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        rows = session.execute(
+            select(
+                HumanReview,
+                Document,
+                DocumentVersion,
+                User,
+                OrganizationMembership.role,
+            )
+            .join(
+                DocumentVersion,
+                (DocumentVersion.organization_id == HumanReview.organization_id)
+                & (DocumentVersion.id == HumanReview.document_version_id),
+            )
+            .join(
+                Document,
+                (Document.organization_id == DocumentVersion.organization_id)
+                & (Document.id == DocumentVersion.document_id),
+            )
+            .outerjoin(
+                User,
+                User.id == HumanReview.reviewer_user_id,
+            )
+            .outerjoin(
+                OrganizationMembership,
+                (OrganizationMembership.organization_id == HumanReview.organization_id)
+                & (OrganizationMembership.user_id == HumanReview.reviewer_user_id),
+            )
+            .where(
+                HumanReview.organization_id == ctx.organization_id,
+                HumanReview.document_version_id == document_version_id,
+            )
+            .order_by(HumanReview.created_at.asc(), HumanReview.id.asc())
+        ).all()
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+
+    @staticmethod
+    def list_human_reviews_by_case(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+    ) -> list[tuple[HumanReview, Document, DocumentVersion, User | None, str | None]]:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        rows = session.execute(
+            select(
+                HumanReview,
+                Document,
+                DocumentVersion,
+                User,
+                OrganizationMembership.role,
+            )
+            .join(
+                DocumentVersion,
+                (DocumentVersion.organization_id == HumanReview.organization_id)
+                & (DocumentVersion.id == HumanReview.document_version_id),
+            )
+            .join(
+                Document,
+                (Document.organization_id == DocumentVersion.organization_id)
+                & (Document.id == DocumentVersion.document_id),
+            )
+            .outerjoin(
+                User,
+                User.id == HumanReview.reviewer_user_id,
+            )
+            .outerjoin(
+                OrganizationMembership,
+                (OrganizationMembership.organization_id == HumanReview.organization_id)
+                & (OrganizationMembership.user_id == HumanReview.reviewer_user_id),
+            )
+            .where(
+                HumanReview.organization_id == ctx.organization_id,
+                Document.case_id == case_id,
+            )
+            .order_by(HumanReview.created_at.asc(), HumanReview.id.asc())
+        ).all()
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
 
 class AuditEventRepository:
@@ -1572,6 +1897,23 @@ class ProcessingQueueRepository:
                             .limit(1)
                         )
                         if integrity_ok is None:
+                            continue
+                    if (
+                        cand.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value
+                        and cand.case_id is not None
+                    ):
+                        running_compare = session.scalar(
+                            select(ProcessingRun.id)
+                            .where(
+                                ProcessingRun.organization_id == cand.organization_id,
+                                ProcessingRun.case_id == cand.case_id,
+                                ProcessingRun.step_type
+                                == ProcessingStepType.COMPARE_CONSISTENCY.value,
+                                ProcessingRun.status == ProcessingStatus.RUNNING.value,
+                            )
+                            .limit(1)
+                        )
+                        if running_compare is not None:
                             continue
                     chosen = cand
                     break
@@ -2722,8 +3064,69 @@ class ProcessingQueueRepository:
                 ProcessingRun.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value,
                 ProcessingRun.status.in_(ACTIVE_PROCESSING_STATUSES),
             )
+            .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
             .limit(1)
         )
+
+    @staticmethod
+    def get_unclaimed_case_compare_run(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+    ) -> ProcessingRun | None:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        return session.scalar(
+            select(ProcessingRun)
+            .where(
+                ProcessingRun.organization_id == ctx.organization_id,
+                ProcessingRun.case_id == case_id,
+                ProcessingRun.step_type == ProcessingStepType.COMPARE_CONSISTENCY.value,
+                ProcessingRun.status.in_(
+                    (ProcessingStatus.QUEUED.value, ProcessingStatus.RETRY_WAIT.value)
+                ),
+            )
+            .order_by(ProcessingRun.created_at.desc(), ProcessingRun.id.desc())
+            .limit(1)
+        )
+
+    @staticmethod
+    def case_has_assessment_reflecting_review(
+        session: Session,
+        ctx: TenantContext,
+        *,
+        case_id: str,
+        review_id: str,
+    ) -> bool:
+        apply_pg_rls_context(
+            session, organization_id=ctx.organization_id, user_id=ctx.actor_user_id
+        )
+        latest = session.scalar(
+            select(ConsistencyAssessment)
+            .where(
+                ConsistencyAssessment.organization_id == ctx.organization_id,
+                ConsistencyAssessment.case_id == case_id,
+            )
+            .order_by(
+                ConsistencyAssessment.assessment_sequence.desc(),
+                ConsistencyAssessment.created_at.desc(),
+            )
+            .limit(1)
+        )
+        if latest is None or not isinstance(latest.compared_snapshot_json, list):
+            return False
+        for doc_snap in latest.compared_snapshot_json:
+            if not isinstance(doc_snap, dict):
+                continue
+            for ver_snap in doc_snap.get("versions", []) or []:
+                if not isinstance(ver_snap, dict):
+                    continue
+                for rev_snap in ver_snap.get("human_reviews", []) or []:
+                    if isinstance(rev_snap, dict) and rev_snap.get("review_id") == review_id:
+                        return True
+        return False
 
     @staticmethod
     def get_latest_active_case_document_version(

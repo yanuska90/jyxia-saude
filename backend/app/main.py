@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import Engine
 
 from app.api.router import api_router
@@ -26,6 +26,54 @@ from app.db.session import create_db_engine, create_session_factory
 from app.services.storage import DocumentStoragePort, LocalControlledSyntheticStorage
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_INSTITUTIONAL_FRONTEND_DIR = _REPO_ROOT / "frontend" / "institutional"
+_PUBLIC_FRONTEND_DIR = _REPO_ROOT / "frontend" / "public"
+
+_INSTITUTIONAL_UI_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "worker-src 'self'; "
+    "style-src 'self'; "
+    "img-src 'self' blob: data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
+_INSTITUTIONAL_ASSET_ALLOWLIST: dict[str, tuple[Path, str]] = {
+    "index.html": (_INSTITUTIONAL_FRONTEND_DIR / "index.html", "text/html; charset=utf-8"),
+    "institutional.css": (
+        _INSTITUTIONAL_FRONTEND_DIR / "institutional.css",
+        "text/css; charset=utf-8",
+    ),
+    "institutional-core.mjs": (
+        _INSTITUTIONAL_FRONTEND_DIR / "institutional-core.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    "institutional-ui.mjs": (
+        _INSTITUTIONAL_FRONTEND_DIR / "institutional-ui.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    "assets/favicon.svg": (
+        _PUBLIC_FRONTEND_DIR / "assets" / "favicon.svg",
+        "image/svg+xml",
+    ),
+    "vendor/pdf.min.mjs": (
+        _PUBLIC_FRONTEND_DIR / "vendor" / "pdf.min.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    "vendor/pdf.worker.min.mjs": (
+        _PUBLIC_FRONTEND_DIR / "vendor" / "pdf.worker.min.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    "vendor/PDFJS-LICENSE.txt": (
+        _PUBLIC_FRONTEND_DIR / "vendor" / "PDFJS-LICENSE.txt",
+        "text/plain; charset=utf-8",
+    ),
+}
 
 
 def _build_default_storage(settings: Settings) -> LocalControlledSyntheticStorage:
@@ -154,6 +202,38 @@ def create_app(
             status_code=500,
             content={"detail": "Internal server error."},
         )
+
+    def _serve_institutional_asset(asset_key: str) -> FileResponse:
+        target = _INSTITUTIONAL_ASSET_ALLOWLIST.get(asset_key)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Institutional UI asset not found.")
+        file_path, media_type = target
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="Institutional UI asset not found.")
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+                "Referrer-Policy": "no-referrer",
+                "Content-Security-Policy": _INSTITUTIONAL_UI_CSP,
+            },
+        )
+
+    @application.get("/institutional", include_in_schema=False)
+    @application.get("/institutional/", include_in_schema=False)
+    def get_institutional_index() -> FileResponse:
+        return _serve_institutional_asset("index.html")
+
+    @application.get("/institutional/{asset_path:path}", include_in_schema=False)
+    def get_institutional_asset(asset_path: str) -> FileResponse:
+        cleaned = asset_path.strip().lstrip("/")
+        if not cleaned or cleaned == "index.html":
+            return _serve_institutional_asset("index.html")
+        return _serve_institutional_asset(cleaned)
 
     application.include_router(api_router)
     return application

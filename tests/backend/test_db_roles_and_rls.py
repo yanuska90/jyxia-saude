@@ -357,6 +357,7 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
             "processing_runs",
             "extracted_fields",
             "evidence_references",
+            "human_reviews",
             "consistency_assessments",
             "consistency_axis_results",
             "consistency_axis_evidences",
@@ -830,6 +831,38 @@ def test_postgresql_runtime_role_rls_security_definer_and_truncate_protection(
         )
         app_db.rollback()
 
+        # Verify PG16 RLS on human_reviews: Org A can record & read its review; Org B cannot see or mutate it
+        from app.core.constants import HumanReviewAction
+
+        ctx_rls_a = TenantContext(
+            organization_id=org_a_id,
+            actor_user_id=user_a_id,
+            session_token_hash="a" * 64,
+        )
+        rev_res = InstitutionalService.record_document_version_human_review(
+            app_db,
+            ctx_rls_a,
+            document_id=r1[0],
+            version_id=r1[1],
+            action_type=HumanReviewAction.OBSERVED,
+            justification="Conferencia administrativa PG16 RLS verificada.",
+            enqueue_comparison=False,
+        )
+        assert rev_res.review.reviewer_user_id == user_a_id
+        assert rev_res.review.organization_id == org_a_id
+
+        clear_pg_rls_context(app_db)
+        apply_pg_rls_context(app_db, organization_id=org_b_id, user_id=user_b_id)
+        apply_pg_identity_context(app_db, session_token_hash="b" * 64)
+        assert (
+            app_db.execute(
+                text("SELECT count(*) FROM human_reviews WHERE id = :rid"),
+                {"rid": rev_res.review.id},
+            ).scalar()
+            == 0
+        )
+        app_db.rollback()
+
         # Verify jyxia_app can revoke its own authenticated session via revoke_session, after which SELECT returns 0 rows
         IdentityAndSessionRepository.revoke_session(
             app_db,
@@ -900,6 +933,7 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
             "processing_runs",
             "extracted_fields",
             "evidence_references",
+            "human_reviews",
             "consistency_assessments",
             "consistency_axis_results",
             "consistency_axis_evidences",
@@ -1288,3 +1322,368 @@ def test_postgresql_worker_role_privilege_isolation_skip_locked_and_lease_recove
         assert [a.assessment_sequence for a, _ in assessments_a] == [2, 1]
     finally:
         owner_verify.close()
+
+    # 6. Etapa 3.3.5 Audit Hardening in Real PostgreSQL 16:
+    #    - P1-01: human_reviews append-only immutability (REVOKE UPDATE/DELETE/TRUNCATE + BEFORE UPDATE/DELETE/TRUNCATE triggers)
+    #    - P1-02: Real multi-session ThreadPoolExecutor concurrency & partial unique indexes on human_reviews
+    #    - P1-03: Single-transaction review+enqueue atomicity and queued re-evaluation while worker is running
+    from app.core.constants import HumanReviewAction
+    from app.schemas.tenant import DocumentCaseCreateInput
+    from app.services.consistency_engine import evaluate_case_consistency
+    from app.services.institutional_service import HumanReviewStateConflictError
+    from tests.backend.test_human_review_and_institutional_ui import _build_synthetic_selectable_pdf
+
+    coh_pdf1 = _build_synthetic_selectable_pdf(
+        [
+            "Tipo: solicitacao",
+            "Subfamilia: oftalmologia",
+            "Origem: Ambulatorio Sintetico Alpha",
+            "Paciente: Helena Sintetica Oliveira",
+            "Nascimento: 1975-08-14",
+            "Identificador: CPF-SYN-335-01",
+            "Emissao: 2026-10-10",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: TUSS",
+            "Codigo: 31309054",
+            "Lateralidade: OD",
+        ]
+    )
+    coh_pdf2 = _build_synthetic_selectable_pdf(
+        [
+            "Tipo: laudo",
+            "Subfamilia: oftalmologia",
+            "Origem: Centro Diagnostico Sintetico Alpha",
+            "Paciente: Helena Sintetica Oliveira",
+            "Nascimento: 1975-08-14",
+            "Identificador: CPF-SYN-335-01",
+            "Emissao: 2026-10-12",
+            "Procedimento: Facoemulsificacao com implante de LIO",
+            "Sistema: TUSS",
+            "Codigo: 31309054",
+            "Lateralidade: Olho Direito (OD)",
+        ]
+    )
+
+    # Setup second active reviewer in Org A and create a coherent 2-document case in Org A
+    owner_setup_hr = owner_factory()
+    try:
+        user_a2 = OrganizationRepository.create_user(
+            owner_setup_hr,
+            email="pg.rev2.a@jyxia.local",
+            display_name="PG Reviewer 2 A",
+            mfa_enrolled=True,
+        )
+        OrganizationRepository.assign_membership(
+            owner_setup_hr,
+            TenantContext(organization_id=org_a_id),
+            user_id=user_a2.id,
+            role=OrganizationRole.DOCUMENT_REVIEWER.value,
+        )
+        ext_a2 = IdentityAndSessionRepository.bind_external_identity(
+            owner_setup_hr,
+            user_id=user_a2.id,
+            issuer="https://idp.jyxia.local/realms/wrk",
+            subject="sub-wrk-a2",
+            email_at_binding=user_a2.email,
+        )
+        IdentityAndSessionRepository.create_auth_session(
+            owner_setup_hr,
+            user_id=user_a2.id,
+            external_identity_id=ext_a2.id,
+            active_organization_id=org_a_id,
+            session_token_hash="5" * 64,
+            csrf_token_hash="6" * 64,
+            auth_method="oidc_pkce_mfa",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now_utc,
+            oidc_auth_time=now_utc,
+            idle_expires_at=now_utc + timedelta(minutes=30),
+            absolute_expires_at=now_utc + timedelta(hours=8),
+            now=now_utc,
+        )
+        owner_setup_hr.commit()
+        user_a2_id = user_a2.id
+    finally:
+        owner_setup_hr.close()
+
+    ctx_rev1 = TenantContext(
+        organization_id=org_a_id,
+        actor_user_id=user_a_id,
+        session_token_hash="1" * 64,
+        source="authenticated_request",
+    )
+    ctx_rev2 = TenantContext(
+        organization_id=org_a_id,
+        actor_user_id=user_a2_id,
+        session_token_hash="5" * 64,
+        source="authenticated_request",
+    )
+
+    app_hr_setup = app_factory()
+    try:
+        hr_case = InstitutionalService.create_case(
+            app_hr_setup,
+            ctx_rev1,
+            DocumentCaseCreateInput(
+                case_code="PG16-HR-COERENTE-335",
+                procedure_reference="Facoemulsificacao com implante de LIO",
+                declared_laterality="OD",
+            ),
+        )
+        hr_ing1 = InstitutionalService.ingest_case_document(
+            app_hr_setup,
+            ctx_rev1,
+            storage=pg_storage,
+            case_id=hr_case.id,
+            content=coh_pdf1,
+            mime_type="application/pdf",
+            original_filename="pg-solicitacao.pdf",
+            document_kind=DocumentKind.PEDIDO,
+            source_label="pg_pedido",
+        )
+        hr_ing2 = InstitutionalService.ingest_case_document(
+            app_hr_setup,
+            ctx_rev1,
+            storage=pg_storage,
+            case_id=hr_case.id,
+            content=coh_pdf2,
+            mime_type="application/pdf",
+            original_filename="pg-biometria.pdf",
+            document_kind=DocumentKind.LAUDO,
+            source_label="pg_laudo",
+        )
+        hr_case_id = hr_case.id
+        hr_doc1_id, hr_ver1_id = hr_ing1.document.id, hr_ing1.version.id
+        hr_doc2_id, hr_ver2_id = hr_ing2.document.id, hr_ing2.version.id
+    finally:
+        app_hr_setup.close()
+
+    # Worker processes integrity + extraction + initial compare_consistency (readiness_state == 'pendente')
+    hr_worker = ProcessingWorker(worker_factory, pg_storage, settings, worker_id="pg-hr-worker")
+    hr_worker.process_one_cycle(max_jobs=15)
+
+    # 6A. P1-02 Concurrency Test 1: Two simultaneous identical review requests across independent PG sessions
+    def _submit_identical_review() -> tuple[str, str, bool]:
+        s = app_factory()
+        try:
+            res = InstitutionalService.record_document_version_human_review(
+                s,
+                ctx_rev1,
+                document_id=hr_doc1_id,
+                version_id=hr_ver1_id,
+                action_type=HumanReviewAction.OBSERVED,
+                justification="Conferencia concorrente identica no PostgreSQL 16.",
+            )
+            return ("ok", res.review.id, res.idempotent_replay)
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_id1 = pool.submit(_submit_identical_review)
+        f_id2 = pool.submit(_submit_identical_review)
+        r_id1 = f_id1.result()
+        r_id2 = f_id2.result()
+
+    assert r_id1[0] == "ok" and r_id2[0] == "ok"
+    assert r_id1[1] == r_id2[1], "Both concurrent identical submissions must resolve to the exact same review_id"
+    assert sorted([r_id1[2], r_id2[2]]) == [False, True], (
+        "Exactly one submission must create (idempotent_replay=False) and the other must replay (idempotent_replay=True)"
+    )
+    created_review_id = r_id1[1]
+
+    # 6B. P1-01 Immutability Verification in Real PostgreSQL 16 (jyxia_app, migration_owner, and jyxia_worker)
+    app_immut = app_factory()
+    try:
+        apply_pg_rls_context(app_immut, organization_id=org_a_id, user_id=user_a_id)
+        # SELECT works for jyxia_app
+        count_ver1 = app_immut.execute(
+            text("SELECT count(*) FROM human_reviews WHERE document_version_id = :vid"),
+            {"vid": hr_ver1_id},
+        ).scalar()
+        assert count_ver1 == 1
+
+        # Direct SQL UPDATE by jyxia_app MUST fail
+        with pytest.raises(Exception):
+            app_immut.execute(
+                text("UPDATE human_reviews SET justification = 'mutated by jyxia_app' WHERE id = :id"),
+                {"id": created_review_id},
+            )
+        app_immut.rollback()
+
+        # Direct SQL DELETE by jyxia_app MUST fail
+        apply_pg_rls_context(app_immut, organization_id=org_a_id, user_id=user_a_id)
+        with pytest.raises(Exception):
+            app_immut.execute(
+                text("DELETE FROM human_reviews WHERE id = :id"),
+                {"id": created_review_id},
+            )
+        app_immut.rollback()
+
+        # Direct SQL TRUNCATE by jyxia_app MUST fail
+        with pytest.raises(Exception):
+            app_immut.execute(text("TRUNCATE TABLE human_reviews"))
+        app_immut.rollback()
+    finally:
+        app_immut.close()
+
+    # Direct SQL UPDATE, DELETE, and TRUNCATE by migration_owner MUST ALSO fail via triggers
+    owner_immut = owner_factory()
+    try:
+        apply_pg_rls_context(owner_immut, organization_id=org_a_id, user_id=user_a_id)
+        with pytest.raises(Exception, match="strictly append-only"):
+            owner_immut.execute(
+                text("UPDATE human_reviews SET justification = 'mutated by owner' WHERE id = :id"),
+                {"id": created_review_id},
+            )
+        owner_immut.rollback()
+
+        apply_pg_rls_context(owner_immut, organization_id=org_a_id, user_id=user_a_id)
+        with pytest.raises(Exception, match="strictly append-only"):
+            owner_immut.execute(
+                text("DELETE FROM human_reviews WHERE id = :id"),
+                {"id": created_review_id},
+            )
+        owner_immut.rollback()
+
+        with pytest.raises(Exception, match="strictly append-only"):
+            owner_immut.execute(text("TRUNCATE TABLE human_reviews"))
+        owner_immut.rollback()
+    finally:
+        owner_immut.close()
+
+    # jyxia_worker remains strictly denied direct access to human_reviews
+    worker_immut = worker_factory()
+    try:
+        with pytest.raises(Exception):
+            worker_immut.execute(text("SELECT count(*) FROM human_reviews"))
+        worker_immut.rollback()
+    finally:
+        worker_immut.close()
+
+    # 6C. P1-03 + P1-02: Claim Comparison Run #1 (so it is RUNNING with pre-Review-2 snapshot),
+    #     then run two concurrent conflicting reviewers on Document 2 Version 1 while Run #1 is RUNNING!
+    app_claim_check = app_factory()
+    try:
+        unclaimed_r1 = ProcessingQueueRepository.get_unclaimed_case_compare_run(
+            app_claim_check, ctx_rev1, case_id=hr_case_id
+        )
+        assert unclaimed_r1 is not None
+        comp_run1_id = unclaimed_r1.id
+    finally:
+        app_claim_check.close()
+
+    _raw_hr_tok, hr_tok_hash = ProcessingQueueRepository.generate_lease_proof()
+    w_hr_sess = worker_factory()
+    try:
+        claimed_comp1 = ProcessingQueueRepository.claim_next_run(
+            w_hr_sess,
+            worker_id="pg-hr-active-worker",
+            lease_token_hash=hr_tok_hash,
+            lease_seconds=60,
+            step_type="compare_consistency",
+        )
+        assert claimed_comp1 is not None
+        assert claimed_comp1.run_id == comp_run1_id
+
+        snap_comp1, last_seq_comp1 = ProcessingQueueRepository.prepare_case_comparison_input(
+            w_hr_sess,
+            run_id=comp_run1_id,
+            worker_id="pg-hr-active-worker",
+            lease_token_hash=hr_tok_hash,
+            engine_version="3.3.4.1",
+            policy_version="2026.11-etapa-3.3.4",
+            max_issue_date_spread_days=180,
+        )
+    finally:
+        w_hr_sess.close()
+
+    # While comp_run1_id is RUNNING in PostgreSQL, two DIFFERENT reviewers concurrently submit a review on Document 2 Version 1
+    def _submit_reviewer_review(ctx_actor: TenantContext, just_text: str) -> tuple[str, str | None]:
+        s = app_factory()
+        try:
+            res = InstitutionalService.record_document_version_human_review(
+                s,
+                ctx_actor,
+                document_id=hr_doc2_id,
+                version_id=hr_ver2_id,
+                action_type=HumanReviewAction.OBSERVED,
+                justification=just_text,
+            )
+            return ("created", res.comparison_processing_run.id if res.comparison_processing_run else None)
+        except HumanReviewStateConflictError:
+            return ("conflict_409", None)
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_c1 = pool.submit(
+            _submit_reviewer_review,
+            ctx_rev1,
+            "Revisao concorrente do Revisor 1 na Versao 2 enquanto worker roda.",
+        )
+        f_c2 = pool.submit(
+            _submit_reviewer_review,
+            ctx_rev2,
+            "Revisao concorrente do Revisor 2 na Versao 2 enquanto worker roda.",
+        )
+        res_c1 = f_c1.result()
+        res_c2 = f_c2.result()
+
+    outcomes = sorted([res_c1[0], res_c2[0]])
+    assert outcomes == ["conflict_409", "created"], (
+        f"Expected one created and one conflict_409 across concurrent reviewers, got {outcomes}"
+    )
+    queued_comp2_id = res_c1[1] if res_c1[0] == "created" else res_c2[1]
+    assert queued_comp2_id is not None
+    assert queued_comp2_id != comp_run1_id, (
+        "A new queued compare_consistency run MUST be atomically created while comp_run1 is already running"
+    )
+
+    # Complete Run #1 (which had snapshot before Document 2 was reviewed -> readiness_state='pendente')
+    w_hr_done1 = worker_factory()
+    try:
+        eval_comp1 = evaluate_case_consistency(snap_comp1)
+        assert eval_comp1.human_review_completed is False
+        ProcessingQueueRepository.complete_comparison_run(
+            w_hr_done1,
+            run_id=comp_run1_id,
+            worker_id="pg-hr-active-worker",
+            lease_token_hash=hr_tok_hash,
+            evaluation=eval_comp1,
+            assessment_sequence=last_seq_comp1 + 1,
+        )
+    finally:
+        w_hr_done1.close()
+
+    # Now worker claims and runs queued_comp2_id -> case transitions to CONFERIDA without re-extracting PDFs!
+    hr_stats_after = hr_worker.process_one_cycle(max_jobs=5)
+    assert hr_stats_after.claimed == 1
+    assert hr_stats_after.succeeded == 1
+
+    app_final_hr = app_factory()
+    try:
+        final_hr_case = CaseAndDocumentRepository.get_case(app_final_hr, ctx_rev1, hr_case_id)
+        assert final_hr_case is not None
+        assert final_hr_case.readiness_state == CaseReadinessState.CONFERIDA.value
+
+        ver2_reviews = CaseAndDocumentRepository.list_human_reviews_by_version(
+            app_final_hr, ctx_rev1, document_version_id=hr_ver2_id
+        )
+        assert len(ver2_reviews) == 1
+
+        hr_assessments, hr_assess_total = ProcessingQueueRepository.list_case_consistency_assessments(
+            app_final_hr, ctx_rev1, case_id=hr_case_id
+        )
+        assert hr_assess_total == 3
+        assert hr_assessments[0][0].readiness_state == CaseReadinessState.CONFERIDA.value
+        assert hr_assessments[0][0].human_review_completed is True
+
+        # Confirm zero extra extract_pdf_text runs were created (still exactly 2 for the 2 documents)
+        hr_runs, _ = ProcessingQueueRepository.list_case_runs(
+            app_final_hr, ctx_rev1, case_id=hr_case_id, limit=50
+        )
+        assert len([r for r, _, _ in hr_runs if r.step_type == "extract_pdf_text"]) == 2
+        assert AuditEventRepository.verify_chain(app_final_hr, TenantContext(organization_id=org_a_id))
+    finally:
+        app_final_hr.close()

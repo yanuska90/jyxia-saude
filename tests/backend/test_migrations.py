@@ -81,6 +81,15 @@ def test_alembic_incremental_upgrade_downgrade_and_reupgrade_clean(
             diffs = compare_metadata(mc, Base.metadata)
             assert diffs == [], f"Unexpected metadata drift between models and migration: {diffs}"
 
+        # Incremental downgrade 0010 -> 0009
+        command.downgrade(cfg, "20261122_0009")
+        with engine.connect() as conn:
+            ver_0009 = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert ver_0009 == "20261122_0009"
+            hr_indexes_0009 = {idx["name"] for idx in inspect(conn).get_indexes("human_reviews")}
+            assert "uq_human_reviews_general_ver_action" not in hr_indexes_0009
+            assert "uq_human_reviews_field_ver_action" not in hr_indexes_0009
+
         # Incremental downgrade 0009 -> 0008
         command.downgrade(cfg, "20261122_0008")
         with engine.connect() as conn:

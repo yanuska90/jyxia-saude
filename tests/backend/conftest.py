@@ -28,6 +28,7 @@ _PG_TRUNCATE_STATEMENTS: tuple[str, ...] = (
     "SET LOCAL lock_timeout = '8s'",
     "ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_no_truncate",
     "ALTER TABLE security_auth_events DISABLE TRIGGER trg_security_auth_events_no_truncate",
+    "ALTER TABLE human_reviews DISABLE TRIGGER trg_human_reviews_no_truncate",
     (
         "TRUNCATE TABLE consistency_axis_evidences, consistency_axis_results, "
         "consistency_assessments, security_auth_events, auth_sessions, oidc_auth_states, "
@@ -35,6 +36,7 @@ _PG_TRUNCATE_STATEMENTS: tuple[str, ...] = (
         "extracted_fields, processing_runs, document_versions, documents, "
         "document_cases, organization_memberships, users, organizations CASCADE"
     ),
+    "ALTER TABLE human_reviews ENABLE TRIGGER trg_human_reviews_no_truncate",
     "ALTER TABLE security_auth_events ENABLE TRIGGER trg_security_auth_events_no_truncate",
     "ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_no_truncate",
 )
@@ -99,7 +101,7 @@ def migrated_engine(database_url: str) -> Generator[Engine, None, None]:
         try:
             with engine.begin() as conn:
                 ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-                already_head = ver == "20261122_0009"
+                already_head = ver == "20261125_0010"
         except SQLAlchemyError:
             already_head = False
 
