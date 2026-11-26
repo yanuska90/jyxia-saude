@@ -1,4 +1,4 @@
-# Dependências e Reprodutibilidade (`v3.2.0` + Backend Institucional `0.2.0` · Etapa 3.2)
+# Dependências e Reprodutibilidade (`v3.2.0` + Backend Institucional `0.2.0` · Etapa 3.3.5)
 
 ## 1. Frontend estático (`frontend/public/`, `frontend/lab/` e `tests/benchmark/`)
 
@@ -32,5 +32,5 @@
 ## 3. Provedor de identidade de desenvolvimento/CI e containers
 
 - **Keycloak `26.8.2` (`quay.io/keycloak/keycloak:26.8.2`, Apache-2.0):** utilizado apenas como IdP OIDC padrão de desenvolvimento local em [`compose.institutional.yaml`](../compose.institutional.yaml) (`127.0.0.1:8080`) e nos testes E2E reais em CI ([`.github/workflows/security.yml`](../.github/workflows/security.yml)), importando o realm sintético [`backend/keycloak/jyxia-dev-realm.json`](../backend/keycloak/jyxia-dev-realm.json) com PKCE `S256` e fluxo TOTP LoA 2 (`urn:jyxia:loa:mfa`).
-- As imagens [`Dockerfile.documental`](../Dockerfile.documental) e [`backend/Dockerfile`](../backend/Dockerfile) usam `python:3.13-slim` fixada por digest SHA-256 (`USER 10001`, `PYTHONSAFEPATH=1`), e [`compose.institutional.yaml`](../compose.institutional.yaml) usa `postgres:16-alpine` vinculado apenas a `127.0.0.1` com separação entre owner de migrações e role runtime `jyxia_app`.
+- As imagens [`Dockerfile.documental`](../Dockerfile.documental) e [`backend/Dockerfile`](../backend/Dockerfile) usam `python:3.13-slim` fixada por digest SHA-256 (`USER 10001`, `PYTHONSAFEPATH=1`), e [`compose.institutional.yaml`](../compose.institutional.yaml) usa `postgres:16-alpine` vinculado apenas a `127.0.0.1` com separação entre owner de migrações e roles runtime `jyxia_app` e `jyxia_worker`.
 - Em CI ([`.github/workflows/security.yml`](../.github/workflows/security.yml)), um ambiente virtual limpo instala `backend/requirements-dev.txt`, valida `tools/sync_backend_deps.py --check` e executa `pip-audit`.

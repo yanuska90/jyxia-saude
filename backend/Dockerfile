@@ -9,6 +9,9 @@ COPY backend/app ./backend/app
 COPY backend/migrations ./backend/migrations
 COPY backend/alembic.ini ./backend/alembic.ini
 COPY backend/pyproject.toml ./backend/pyproject.toml
+COPY frontend/institutional ./frontend/institutional
+COPY frontend/public/vendor ./frontend/public/vendor
+COPY frontend/public/assets/favicon.svg ./frontend/public/assets/favicon.svg
 
 RUN useradd --create-home --uid 10001 app \
     && mkdir -p /var/lib/jyxia/synthetic_storage \

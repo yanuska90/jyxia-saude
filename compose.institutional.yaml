@@ -111,6 +111,7 @@ services:
       backend:
         condition: service_healthy
     environment:
+      PYTHONPATH: /app/backend
       JYXIA_APP_NAME: ${JYXIA_APP_NAME:-JYXIA Institutional Foundation}
       JYXIA_ENV: ${JYXIA_ENV:-development}
       JYXIA_DEBUG: "false"
