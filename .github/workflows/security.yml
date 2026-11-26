@@ -171,3 +171,98 @@ jobs:
       - name: Parar container Keycloak efemero
         if: always()
         run: docker rm -f jyxia-keycloak-ci || true
+      - name: Construir imagem Docker institucional e validar assets/rotas em container descartavel
+        run: |
+          docker build -f backend/Dockerfile -t jyxia-institutional:ci .
+          docker run --rm --entrypoint sh jyxia-institutional:ci -eu -c '
+            for req in \
+              /app/frontend/institutional/index.html \
+              /app/frontend/institutional/institutional.css \
+              /app/frontend/institutional/institutional-core.mjs \
+              /app/frontend/institutional/institutional-ui.mjs \
+              /app/frontend/public/vendor/pdf.min.mjs \
+              /app/frontend/public/vendor/pdf.worker.min.mjs \
+              /app/frontend/public/vendor/PDFJS-LICENSE.txt \
+              /app/frontend/public/assets/favicon.svg; do
+              test -f "$req" || { echo "MISSING_REQUIRED_FILE: $req"; exit 1; }
+            done
+            for forbidden in \
+              /app/.env \
+              /app/.env.example \
+              /app/frontend/lab \
+              /app/frontend/public/fixtures \
+              /app/legacy \
+              /app/tests \
+              /app/docs \
+              /app/tools \
+              /app/.git; do
+              test ! -e "$forbidden" || { echo "FORBIDDEN_PATH_PRESENT: $forbidden"; exit 1; }
+            done
+            echo "DOCKER_IMAGE_FILES_AND_ISOLATION_OK: 8/8 required present, 9/9 forbidden absent"
+          '
+          docker run --rm --entrypoint python -e JYXIA_ENV=test jyxia-institutional:ci -c '
+          import subprocess, time, urllib.error, urllib.request
+          proc = subprocess.Popen(
+              ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+              cwd="/app/backend",
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+          )
+          try:
+              deadline = time.monotonic() + 20.0
+              while time.monotonic() < deadline:
+                  try:
+                      with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health/live", timeout=2) as r:
+                          if r.status == 200:
+                              break
+                  except Exception:
+                      if proc.poll() is not None:
+                          out = proc.stdout.read() if proc.stdout else ""
+                          raise RuntimeError(f"Uvicorn exited early ({proc.returncode}): {out}")
+                      time.sleep(0.25)
+              else:
+                  raise RuntimeError("Timeout waiting for in-container uvicorn /api/v1/health/live")
+
+              for path in (
+                  "/institutional/",
+                  "/institutional/index.html",
+                  "/institutional/institutional.css",
+                  "/institutional/institutional-core.mjs",
+                  "/institutional/institutional-ui.mjs",
+                  "/institutional/assets/favicon.svg",
+                  "/institutional/vendor/pdf.min.mjs",
+                  "/institutional/vendor/pdf.worker.min.mjs",
+                  "/institutional/vendor/PDFJS-LICENSE.txt",
+              ):
+                  with urllib.request.urlopen(f"http://127.0.0.1:8000{path}", timeout=5) as resp:
+                      assert resp.status == 200, f"{path} -> {resp.status}"
+                      cc = resp.headers.get("Cache-Control", "")
+                      xcto = resp.headers.get("X-Content-Type-Options", "")
+                      csp = resp.headers.get("Content-Security-Policy", "")
+                      assert "no-store" in cc, f"Missing no-store on {path}: {cc}"
+                      assert xcto == "nosniff", f"Missing nosniff on {path}: {xcto}"
+                      assert "script-src \x27self\x27" in csp, f"Missing CSP on {path}: {csp}"
+                      body = resp.read()
+                      assert len(body) > 0, f"Empty body for {path}"
+
+              for blocked in (
+                  "/institutional/../backend/alembic.ini",
+                  "/institutional/nonexistent.mjs",
+              ):
+                  try:
+                      urllib.request.urlopen(f"http://127.0.0.1:8000{blocked}", timeout=5)
+                      raise AssertionError(f"Expected 404 for {blocked}")
+                  except urllib.error.HTTPError as err:
+                      assert err.code == 404, f"Expected 404 for {blocked}, got {err.code}"
+              print("DOCKER_CONTAINER_HTTP_ROUTES_OK: 9/9 allowlisted 200 OK, 2/2 blocked 404")
+          finally:
+              proc.terminate()
+              try:
+                  proc.wait(timeout=5)
+              except Exception:
+                  proc.kill()
+          '
+      - name: Remover imagem Docker temporaria de CI
+        if: always()
+        run: docker rmi -f jyxia-institutional:ci || true

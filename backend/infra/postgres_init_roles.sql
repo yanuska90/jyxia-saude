@@ -1,4 +1,4 @@
--- Idempotent PostgreSQL runtime role provisioning for JYXIA Etapa 3.2+ / 3.3.2.
+-- Idempotent PostgreSQL runtime role provisioning for JYXIA Etapas 3.2 a 3.3.5.
 -- Usage with psql:
 --   psql -v ON_ERROR_STOP=1 -v jyxia_app_password='...' -v jyxia_worker_password='...' -f postgres_init_roles.sql
 --
@@ -7,7 +7,7 @@
 --   2. The HTTP API runtime role `jyxia_app` is strictly NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION.
 --   3. The background worker role `jyxia_worker` is strictly NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION
 --      and receives EXECUTE only on scoped queue/lease SECURITY DEFINER functions (zero direct table grants).
---   4. All table/function GRANTs are applied/refreshed by Alembic migrations 0003-0007.
+--   4. All table/function GRANTs are applied/refreshed by Alembic migrations 0003-0010.
 
 SELECT format(
     $$
