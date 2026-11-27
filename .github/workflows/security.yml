@@ -166,6 +166,7 @@ jobs:
         run: |
           set -o pipefail
           /tmp/jyxia-ci-venv/bin/python tools/serve_institutional_e2e_harness.py --self-test-fail-closed
+          /tmp/jyxia-ci-venv/bin/python tools/serve_institutional_e2e_harness.py --self-test-process-shutdown
           if ! node tests/e2e/test_institutional_e2e.mjs 2>&1 | tee /tmp/inst_e2e.log; then
             python3 -c "
           from pathlib import Path

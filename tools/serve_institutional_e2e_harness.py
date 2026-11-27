@@ -15,14 +15,20 @@ Supports:
 from __future__ import annotations
 
 import argparse
+import contextlib
 from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import signal
+import socket
+import subprocess
 import sys
 import tempfile
-from typing import Any, TextIO
+import threading
 import time
+from typing import Any, Callable, TextIO
+import urllib.request
 
 from fastapi import Request, Response
 from sqlalchemy import Engine, text
@@ -445,6 +451,355 @@ def _read_worker_log_tail(log_path: Path | None, *, max_chars: int = 4000) -> st
         return f"<failed to read worker log: {exc}>"
 
 
+class _GracefulShutdownInterrupted(Exception):
+    """Raised when a termination signal arrives while waiting for queue drainage before HTTP server start."""
+
+
+class _GracefulHarnessServer(uvicorn.Server):
+    """Uvicorn Server subclass whose `capture_signals` does not call `signal.raise_signal(SIGTERM)`
+    with `SIG_DFL` on exit, ensuring `server.run()` always returns to the caller's `finally:` block."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+def _parse_linux_proc_stat_content(raw_stat: str) -> dict[str, Any] | None:
+    """Parse `/proc/<pid>/stat` content safely even when `(comm)` contains spaces or parentheses."""
+    text_val = raw_stat.strip()
+    if not text_val:
+        return None
+    lpar = text_val.find("(")
+    rpar = text_val.rfind(")")
+    if lpar <= 0 or rpar <= lpar or rpar + 2 > len(text_val):
+        return None
+    try:
+        pid_val = int(text_val[:lpar].strip())
+        comm_val = text_val[lpar + 1 : rpar]
+        rest = text_val[rpar + 2 :].split()
+        if len(rest) < 20:
+            return None
+        state_code = rest[0]
+        ppid_val = int(rest[1])
+        starttime_ticks = int(rest[19])
+        return {
+            "pid": pid_val,
+            "comm": comm_val,
+            "state": state_code,
+            "ppid": ppid_val,
+            "starttime_ticks": starttime_ticks,
+        }
+    except Exception:
+        return None
+
+
+def _capture_pid_identity(
+    pid: int | None,
+    *,
+    expected_cmdline_token: str | None = None,
+    proc_root: Path | None = None,
+) -> dict[str, Any]:
+    """Capture immutable OS process identity attributes at startup to detect PID reuse later."""
+    if pid is None or int(pid) <= 0:
+        return {"pid": pid, "platform": sys.platform}
+    target_pid = int(pid)
+    identity: dict[str, Any] = {
+        "pid": target_pid,
+        "platform": sys.platform,
+        "expected_cmdline_token": expected_cmdline_token,
+        "proc_starttime_ticks": None,
+        "proc_cmdline": None,
+        "win32_creation_time": None,
+    }
+    effective_proc_root = proc_root if proc_root is not None else Path("/proc")
+    if proc_root is not None or (
+        sys.platform.startswith("linux") and effective_proc_root.is_dir()
+    ):
+        stat_path = effective_proc_root / str(target_pid) / "stat"
+        cmdline_path = effective_proc_root / str(target_pid) / "cmdline"
+        try:
+            parsed = _parse_linux_proc_stat_content(
+                stat_path.read_text(encoding="utf-8", errors="replace")
+            )
+            if parsed is not None:
+                identity["proc_starttime_ticks"] = int(parsed["starttime_ticks"])
+        except Exception:
+            pass
+        try:
+            raw_cmd = cmdline_path.read_bytes()
+            identity["proc_cmdline"] = (
+                raw_cmd.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            )
+        except Exception:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, target_pid)
+            if handle:
+                try:
+                    ct = ctypes.c_ulonglong(0)
+                    et = ctypes.c_ulonglong(0)
+                    kt = ctypes.c_ulonglong(0)
+                    ut = ctypes.c_ulonglong(0)
+                    if kernel32.GetProcessTimes(
+                        handle,
+                        ctypes.byref(ct),
+                        ctypes.byref(et),
+                        ctypes.byref(kt),
+                        ctypes.byref(ut),
+                    ):
+                        identity["win32_creation_time"] = int(ct.value)
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+    return identity
+
+
+def _inspect_pid_state(
+    pid: int | None,
+    expected_identity: dict[str, Any] | None = None,
+    *,
+    proc_root: Path | None = None,
+) -> dict[str, Any]:
+    """Inspect OS process state, differentiating active, zombie ('Z'), terminated, and reused PID."""
+    if pid is None or int(pid) <= 0:
+        return {
+            "pid": pid,
+            "classification": "terminated",
+            "alive": False,
+            "zombie": False,
+            "pid_reused": False,
+            "detail": "invalid_or_missing_pid",
+        }
+    target_pid = int(pid)
+    effective_proc_root = proc_root if proc_root is not None else Path("/proc")
+    use_procfs = proc_root is not None or (
+        sys.platform.startswith("linux") and effective_proc_root.is_dir()
+    )
+
+    if use_procfs:
+        stat_path = effective_proc_root / str(target_pid) / "stat"
+        cmdline_path = effective_proc_root / str(target_pid) / "cmdline"
+        try:
+            raw_stat = stat_path.read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+            return {
+                "pid": target_pid,
+                "classification": "terminated",
+                "alive": False,
+                "zombie": False,
+                "pid_reused": False,
+                "detail": "proc_stat_not_found",
+            }
+        except PermissionError:
+            pass
+        else:
+            parsed = _parse_linux_proc_stat_content(raw_stat)
+            if parsed is None:
+                return {
+                    "pid": target_pid,
+                    "classification": "terminated",
+                    "alive": False,
+                    "zombie": False,
+                    "pid_reused": False,
+                    "detail": "proc_stat_unparseable",
+                }
+            cmdline_val = ""
+            try:
+                raw_cmd = cmdline_path.read_bytes()
+                cmdline_val = (
+                    raw_cmd.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+                )
+            except Exception:
+                cmdline_val = ""
+
+            exp_start = (
+                expected_identity.get("proc_starttime_ticks")
+                if isinstance(expected_identity, dict)
+                else None
+            )
+            if exp_start is not None and int(exp_start) != int(parsed["starttime_ticks"]):
+                return {
+                    "pid": target_pid,
+                    "classification": "pid_reused",
+                    "alive": False,
+                    "zombie": False,
+                    "pid_reused": True,
+                    "proc_state": parsed["state"],
+                    "ppid": parsed["ppid"],
+                    "starttime_ticks": parsed["starttime_ticks"],
+                    "expected_starttime_ticks": int(exp_start),
+                    "cmdline": cmdline_val,
+                }
+
+            exp_token = (
+                expected_identity.get("expected_cmdline_token")
+                if isinstance(expected_identity, dict)
+                else None
+            )
+            state_code = str(parsed["state"])
+            if state_code == "Z":
+                return {
+                    "pid": target_pid,
+                    "classification": "zombie",
+                    "alive": False,
+                    "zombie": True,
+                    "pid_reused": False,
+                    "proc_state": state_code,
+                    "ppid": parsed["ppid"],
+                    "starttime_ticks": parsed["starttime_ticks"],
+                    "cmdline": cmdline_val,
+                }
+            if state_code in {"X", "x"}:
+                return {
+                    "pid": target_pid,
+                    "classification": "terminated",
+                    "alive": False,
+                    "zombie": False,
+                    "pid_reused": False,
+                    "proc_state": state_code,
+                    "ppid": parsed["ppid"],
+                    "starttime_ticks": parsed["starttime_ticks"],
+                }
+            if exp_start is None and exp_token and cmdline_val and exp_token not in cmdline_val:
+                return {
+                    "pid": target_pid,
+                    "classification": "pid_reused",
+                    "alive": False,
+                    "zombie": False,
+                    "pid_reused": True,
+                    "proc_state": state_code,
+                    "ppid": parsed["ppid"],
+                    "starttime_ticks": parsed["starttime_ticks"],
+                    "cmdline": cmdline_val,
+                }
+            return {
+                "pid": target_pid,
+                "classification": "active",
+                "alive": True,
+                "zombie": False,
+                "pid_reused": False,
+                "proc_state": state_code,
+                "ppid": parsed["ppid"],
+                "starttime_ticks": parsed["starttime_ticks"],
+                "cmdline": cmdline_val,
+            }
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            SYNCHRONIZE = 0x00100000
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, target_pid
+            )
+            if not handle:
+                return {
+                    "pid": target_pid,
+                    "classification": "terminated",
+                    "alive": False,
+                    "zombie": False,
+                    "pid_reused": False,
+                    "detail": "win32_open_process_failed",
+                }
+            try:
+                WAIT_OBJECT_0 = 0x00000000
+                res = kernel32.WaitForSingleObject(handle, 0)
+                if res == WAIT_OBJECT_0:
+                    return {
+                        "pid": target_pid,
+                        "classification": "terminated",
+                        "alive": False,
+                        "zombie": False,
+                        "pid_reused": False,
+                        "detail": "win32_wait_signaled",
+                    }
+                ct = ctypes.c_ulonglong(0)
+                et = ctypes.c_ulonglong(0)
+                kt = ctypes.c_ulonglong(0)
+                ut = ctypes.c_ulonglong(0)
+                creation_time: int | None = None
+                if kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(ct),
+                    ctypes.byref(et),
+                    ctypes.byref(kt),
+                    ctypes.byref(ut),
+                ):
+                    creation_time = int(ct.value)
+                exp_ct = (
+                    expected_identity.get("win32_creation_time")
+                    if isinstance(expected_identity, dict)
+                    else None
+                )
+                if (
+                    exp_ct is not None
+                    and creation_time is not None
+                    and int(exp_ct) != creation_time
+                ):
+                    return {
+                        "pid": target_pid,
+                        "classification": "pid_reused",
+                        "alive": False,
+                        "zombie": False,
+                        "pid_reused": True,
+                        "win32_creation_time": creation_time,
+                        "expected_win32_creation_time": int(exp_ct),
+                    }
+                return {
+                    "pid": target_pid,
+                    "classification": "active",
+                    "alive": True,
+                    "zombie": False,
+                    "pid_reused": False,
+                    "win32_creation_time": creation_time,
+                }
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception as exc:
+            return {
+                "pid": target_pid,
+                "classification": "terminated",
+                "alive": False,
+                "zombie": False,
+                "pid_reused": False,
+                "detail": f"win32_error:{exc}",
+            }
+
+    try:
+        os.kill(target_pid, 0)
+        return {
+            "pid": target_pid,
+            "classification": "active",
+            "alive": True,
+            "zombie": False,
+            "pid_reused": False,
+        }
+    except ProcessLookupError:
+        return {
+            "pid": target_pid,
+            "classification": "terminated",
+            "alive": False,
+            "zombie": False,
+            "pid_reused": False,
+        }
+    except PermissionError:
+        return {
+            "pid": target_pid,
+            "classification": "active",
+            "alive": True,
+            "zombie": False,
+            "pid_reused": False,
+        }
+
+
 def _start_worker_subprocess(
     *,
     app_db_url: str,
@@ -453,9 +808,8 @@ def _start_worker_subprocess(
     settings: Settings,
     worker_id: str,
     log_path: Path,
-) -> tuple[Any, TextIO]:
-    import subprocess
-
+    poll_interval_seconds: float = 0.15,
+) -> tuple[Any, TextIO, dict[str, Any]]:
     log_fh = open(log_path, "w+", encoding="utf-8")
     worker_env = _build_worker_subprocess_env(
         app_db_url=app_db_url,
@@ -464,10 +818,12 @@ def _start_worker_subprocess(
         settings=settings,
         worker_id=worker_id,
     )
+    worker_env["JYXIA_WORKER_POLL_INTERVAL_SECONDS"] = str(poll_interval_seconds)
     proc = subprocess.Popen(
         [sys.executable, "-m", "app.worker"],
         cwd=str(BACKEND_DIR),
         env=worker_env,
+        stdin=subprocess.DEVNULL,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
     )
@@ -483,7 +839,11 @@ def _start_worker_subprocess(
             f"Worker subprocess exited immediately during startup (code={proc.returncode}).\n"
             f"Worker log:\n{tail}"
         )
-    return proc, log_fh
+    worker_identity = _capture_pid_identity(
+        proc.pid,
+        expected_cmdline_token="app.worker",
+    )
+    return proc, log_fh, worker_identity
 
 
 def _stop_worker_subprocess(
@@ -491,28 +851,69 @@ def _stop_worker_subprocess(
     log_fh: TextIO | None,
     *,
     timeout_seconds: float = 5.0,
-) -> int | None:
-    exit_code: int | None = None
+    kill_timeout_seconds: float = 3.0,
+    expected_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    worker_pid: int | None = getattr(proc, "pid", None) if proc is not None else None
+    result: dict[str, Any] = {
+        "worker_pid": worker_pid,
+        "worker_shutdown_requested": False,
+        "worker_shutdown_confirmed": False,
+        "worker_forced_kill": False,
+        "worker_exit_code": None,
+        "worker_process_alive": False,
+        "worker_pid_state": "terminated",
+    }
     try:
         if proc is not None:
+            result["worker_shutdown_requested"] = True
             if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=timeout_seconds)
                 except Exception:
+                    result["worker_forced_kill"] = True
                     proc.kill()
-                    proc.wait(timeout=3.0)
+                    proc.wait(timeout=kill_timeout_seconds)
+
             exit_code = proc.poll()
             if exit_code is None:
-                raise RuntimeError(f"Worker subprocess PID {proc.pid} remained active after kill().")
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=1.0)
+                exit_code = proc.poll()
+
+            # Wait briefly for kernel process table / procfs entry to settle
+            settle_deadline = time.monotonic() + 2.0
+            pid_state = _inspect_pid_state(worker_pid, expected_identity)
+            while (
+                pid_state["alive"] or pid_state["zombie"]
+            ) and time.monotonic() < settle_deadline:
+                if hasattr(os, "waitpid") and worker_pid is not None:
+                    with contextlib.suppress(Exception):
+                        os.waitpid(int(worker_pid), getattr(os, "WNOHANG", 1))
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=0.1)
+                time.sleep(0.05)
+                pid_state = _inspect_pid_state(worker_pid, expected_identity)
+
+            is_alive_or_zombie = bool(pid_state["alive"] or pid_state["zombie"])
+            result["worker_exit_code"] = exit_code
+            result["worker_pid_state"] = str(pid_state["classification"])
+            result["worker_process_alive"] = is_alive_or_zombie
+            result["worker_shutdown_confirmed"] = bool(
+                exit_code is not None and not is_alive_or_zombie
+            )
+            if exit_code is None or is_alive_or_zombie:
+                raise RuntimeError(
+                    f"Worker subprocess PID {worker_pid} failed to terminate cleanly: "
+                    f"result={result}, pid_state={pid_state}"
+                )
     finally:
         if log_fh is not None:
-            try:
+            with contextlib.suppress(Exception):
                 log_fh.flush()
                 log_fh.close()
-            except Exception:
-                pass
-    return exit_code
+    return result
 
 
 def _inspect_cases_queue_snapshot(
@@ -635,12 +1036,15 @@ def wait_for_cases_queue_drained(
     worker_log_path: Path | None = None,
     timeout_seconds: float = 25.0,
     poll_interval_seconds: float = 0.15,
+    should_abort: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Poll database until all expected case runs are terminal, lease-free, and assessments exist."""
     deadline = time.monotonic() + timeout_seconds
     last_snapshot: dict[str, Any] = {}
 
     while time.monotonic() < deadline:
+        if should_abort is not None and should_abort():
+            raise _GracefulShutdownInterrupted("Shutdown signal received while draining queue.")
         if worker_proc is not None and worker_proc.poll() is not None:
             tail = _read_worker_log_tail(worker_log_path)
             raise RuntimeError(
@@ -659,6 +1063,8 @@ def wait_for_cases_queue_drained(
             session.rollback()
             session.close()
 
+        if should_abort is not None and should_abort():
+            raise _GracefulShutdownInterrupted("Shutdown signal received while draining queue.")
         time.sleep(poll_interval_seconds)
 
     tail = _read_worker_log_tail(worker_log_path)
@@ -919,37 +1325,12 @@ def _write_report_file(report_path: Path | None, payload: dict[str, Any]) -> Non
         pass
 
 
-def _is_pid_running(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            SYNCHRONIZE = 0x00100000
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = kernel32.OpenProcess(
-                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
-            )
-            if not handle:
-                return False
-            try:
-                WAIT_OBJECT_0 = 0x00000000
-                res = kernel32.WaitForSingleObject(handle, 0)
-                return res != WAIT_OBJECT_0
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:
-            return False
-    else:
-        try:
-            os.kill(int(pid), 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+def _is_pid_running(
+    pid: int | None,
+    expected_identity: dict[str, Any] | None = None,
+) -> bool:
+    info = _inspect_pid_state(pid, expected_identity)
+    return bool(info.get("alive") or info.get("zombie"))
 
 
 def _run_self_test_fail_closed() -> None:
@@ -1071,8 +1452,10 @@ def _run_self_test_sqlite_lifecycle(
 
         worker_proc = None
         worker_log_fh = None
+        worker_identity: dict[str, Any] | None = None
+        stop_info: dict[str, Any] = {}
         try:
-            worker_proc, worker_log_fh = _start_worker_subprocess(
+            worker_proc, worker_log_fh, worker_identity = _start_worker_subprocess(
                 app_db_url=db_cfg["app_db_url"],
                 worker_db_url=db_cfg["worker_db_url"],
                 storage_dir=storage_dir,
@@ -1151,22 +1534,353 @@ def _run_self_test_sqlite_lifecycle(
             assert final_snap[case_b_id]["latest_readiness_state"] == "bloqueado"
             assert final_snap[case_b_id]["latest_human_review_completed"] is True
         finally:
-            exit_code = _stop_worker_subprocess(worker_proc, worker_log_fh, timeout_seconds=5.0)
+            stop_info = _stop_worker_subprocess(
+                worker_proc,
+                worker_log_fh,
+                timeout_seconds=5.0,
+                expected_identity=worker_identity,
+            )
             engine.dispose()
 
-        assert exit_code is not None, "Worker subprocess did not terminate cleanly."
-        assert not _is_pid_running(worker_pid), f"Worker PID {worker_pid} still running after stop."
+        assert stop_info["worker_shutdown_confirmed"] is True, (
+            f"Worker did not stop cleanly: {stop_info}"
+        )
+        assert stop_info["worker_process_alive"] is False, f"Worker still alive: {stop_info}"
+        assert not _is_pid_running(worker_pid, worker_identity), (
+            f"Worker PID {worker_pid} still running after stop."
+        )
         print(
             json.dumps(
                 {
                     "status": "SQLITE_MULTIPROCESS_LIFECYCLE_OK",
                     "worker_pid": worker_pid,
-                    "worker_exit_code": exit_code,
+                    "worker_exit_code": stop_info["worker_exit_code"],
+                    "worker_shutdown_confirmed": stop_info["worker_shutdown_confirmed"],
                     "case_a_readiness": final_snap[case_a_id]["latest_readiness_state"],
                     "case_b_readiness": final_snap[case_b_id]["latest_readiness_state"],
                 }
             )
         )
+
+
+def _find_free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _send_graceful_termination_to_harness_subprocess(proc: subprocess.Popen[Any]) -> str:
+    """Send POSIX SIGTERM on Linux/macOS, or stdin SHUTDOWN / CTRL_BREAK_EVENT on Windows."""
+    if sys.platform != "win32":
+        proc.send_signal(signal.SIGTERM)
+        return "SIGTERM"
+    if proc.stdin is not None:
+        with contextlib.suppress(Exception):
+            proc.stdin.write(b"SHUTDOWN\n")
+            proc.stdin.flush()
+            proc.stdin.close()
+            return "WIN32_STDIN_SHUTDOWN"
+    ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if ctrl_break is not None:
+        proc.send_signal(ctrl_break)
+        return "CTRL_BREAK_EVENT"
+    proc.terminate()
+    return "WIN32_TERMINATE"
+
+
+def _run_self_test_process_shutdown() -> None:
+    """Mandatory regression test for POSIX SIGTERM / multiprocess shutdown lifecycle and edge cases:
+    1. Linux `/proc/<pid>/stat` parser & PID state classification (`active`, `zombie`, `terminated`, `pid_reused`).
+    2. Worker shutdown timeout & fallback to `kill()` (`SIGKILL`) when worker ignores `SIGTERM`.
+    3. Shutdown during active queue processing (`stage='worker_started'`, before initial drain completes).
+    4. Normal live HTTP harness + post-E2E-failure shutdown via `SIGTERM` (POSIX) / graceful signal (Windows),
+       verifying `finally` execution, `worker_shutdown_confirmed=True`, `worker_process_alive=False`,
+       zero orphan processes, and `_verify_post_e2e_report` validation.
+    """
+    # 1. Verify Linux /proc/<pid>/stat parser & PID classifier (active, zombie 'Z', pid_reused, terminated)
+    with tempfile.TemporaryDirectory(
+        prefix="jyxia-procfs-test-", ignore_cleanup_errors=True
+    ) as ptmp:
+        fake_proc = Path(ptmp)
+        pid_dir = fake_proc / "4215"
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        # Field 3 = state ('S'), Field 4 = ppid (4211), Field 22 = starttime (987654)
+        stat_fields_after_comm = [
+            "S", "4211", "4211", "4211", "0", "-1", "4194304",
+            "120", "0", "0", "0", "15", "3", "0", "0", "20", "0", "1", "0", "987654",
+            "12345678", "1024",
+        ]
+        (pid_dir / "stat").write_text(
+            f"4215 (python -m (app.worker)) {' '.join(stat_fields_after_comm)}\n",
+            encoding="utf-8",
+        )
+        (pid_dir / "cmdline").write_bytes(b"/usr/bin/python\x00-m\x00app.worker\x00")
+
+        ident = _capture_pid_identity(
+            4215,
+            expected_cmdline_token="app.worker",
+            proc_root=fake_proc,
+        )
+        assert ident["proc_starttime_ticks"] == 987654, ident
+
+        st_active = _inspect_pid_state(4215, ident, proc_root=fake_proc)
+        assert st_active["classification"] == "active" and st_active["alive"] is True, st_active
+
+        # Simulate zombie ('Z') state for the same process starttime
+        zombie_fields = list(stat_fields_after_comm)
+        zombie_fields[0] = "Z"
+        (pid_dir / "stat").write_text(
+            f"4215 (python) {' '.join(zombie_fields)}\n",
+            encoding="utf-8",
+        )
+        st_zombie = _inspect_pid_state(4215, ident, proc_root=fake_proc)
+        assert st_zombie["classification"] == "zombie" and st_zombie["zombie"] is True, st_zombie
+        assert st_zombie["alive"] is False, st_zombie
+
+        # Simulate PID reuse (different starttime_ticks = 999999)
+        reused_fields = list(stat_fields_after_comm)
+        reused_fields[0] = "R"
+        reused_fields[19] = "999999"
+        (pid_dir / "stat").write_text(
+            f"4215 (other_service) {' '.join(reused_fields)}\n",
+            encoding="utf-8",
+        )
+        st_reused = _inspect_pid_state(4215, ident, proc_root=fake_proc)
+        assert st_reused["classification"] == "pid_reused" and st_reused["pid_reused"] is True, (
+            st_reused
+        )
+        assert st_reused["alive"] is False and st_reused["zombie"] is False, st_reused
+
+        # Simulate terminated process (no /proc/4215/stat)
+        (pid_dir / "stat").unlink()
+        st_term = _inspect_pid_state(4215, ident, proc_root=fake_proc)
+        assert st_term["classification"] == "terminated" and st_term["alive"] is False, st_term
+
+    # 2. Verify worker shutdown timeout and fallback to kill() (SIGKILL) when worker ignores SIGTERM
+    with tempfile.TemporaryDirectory(
+        prefix="jyxia-kill-fallback-", ignore_cleanup_errors=True
+    ) as ktmp:
+        klog_path = Path(ktmp) / "stubborn_worker.log"
+        klog_fh = open(klog_path, "w+", encoding="utf-8")
+        stubborn_code = (
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "if hasattr(signal, 'SIGINT'): signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+            "while True:\n"
+            "    time.sleep(0.2)\n"
+        )
+        stubborn_proc = subprocess.Popen(
+            [sys.executable, "-c", stubborn_code],
+            stdin=subprocess.DEVNULL,
+            stdout=klog_fh,
+            stderr=subprocess.STDOUT,
+        )
+        time.sleep(0.25)
+        assert stubborn_proc.poll() is None, "Stubborn worker exited prematurely"
+        stubborn_ident = _capture_pid_identity(stubborn_proc.pid)
+        kill_res = _stop_worker_subprocess(
+            stubborn_proc,
+            klog_fh,
+            timeout_seconds=0.35,
+            kill_timeout_seconds=3.0,
+            expected_identity=stubborn_ident,
+        )
+        assert kill_res["worker_shutdown_requested"] is True, kill_res
+        assert kill_res["worker_shutdown_confirmed"] is True, kill_res
+        assert kill_res["worker_process_alive"] is False, kill_res
+        assert kill_res["worker_exit_code"] is not None, kill_res
+        if sys.platform != "win32":
+            assert kill_res["worker_forced_kill"] is True, (
+                f"Expected worker_forced_kill=True on POSIX when SIGTERM is ignored, got: {kill_res}"
+            )
+        post_kill_state = _inspect_pid_state(stubborn_proc.pid, stubborn_ident)
+        assert not (post_kill_state["alive"] or post_kill_state["zombie"]), post_kill_state
+
+    # 3. Verify shutdown during active processing (before initial queue drain finishes)
+    with tempfile.TemporaryDirectory(
+        prefix="jyxia-midproc-shutdown-", ignore_cleanup_errors=True
+    ) as mtmp:
+        mreport_path = Path(mtmp) / "midproc_report.json"
+        mout_path = Path(mtmp) / "midproc_harness.log"
+        mport = _find_free_tcp_port()
+        sub_env = dict(os.environ)
+        sub_env.pop("JYXIA_DATABASE_URL", None)
+        sub_env.pop("JYXIA_WORKER_DATABASE_URL", None)
+        sub_env.pop("JYXIA_MIGRATION_DATABASE_URL", None)
+        sub_env["JYXIA_E2E_REQUIRE_POSTGRES"] = "0"
+
+        with open(mout_path, "w+", encoding="utf-8") as mout_fh:
+            mproc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--port",
+                    str(mport),
+                    "--report-file",
+                    str(mreport_path),
+                    "--worker-poll-interval",
+                    "1.5",
+                ],
+                cwd=str(ROOT),
+                env=sub_env,
+                stdin=subprocess.PIPE if sys.platform == "win32" else subprocess.DEVNULL,
+                stdout=mout_fh,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                appear_deadline = time.monotonic() + 15.0
+                mid_report: dict[str, Any] = {}
+                while time.monotonic() < appear_deadline:
+                    if mreport_path.exists():
+                        with contextlib.suppress(Exception):
+                            mid_report = json.loads(mreport_path.read_text(encoding="utf-8"))
+                            if mid_report.get("worker_process_started") is True:
+                                break
+                    if mproc.poll() is not None:
+                        mout_fh.flush()
+                        out = _read_worker_log_tail(mout_path)
+                        raise RuntimeError(
+                            f"Harness exited early during mid-processing test: {out}"
+                        )
+                    time.sleep(0.05)
+                else:
+                    mout_fh.flush()
+                    out = _read_worker_log_tail(mout_path)
+                    raise RuntimeError(
+                        f"Timeout waiting for harness to start worker in mid-processing test:\n{out}"
+                    )
+
+                mid_worker_pid = mid_report["worker_pid"]
+                mid_worker_ident = mid_report.get("worker_proc_identity")
+                _send_graceful_termination_to_harness_subprocess(mproc)
+                mproc.wait(timeout=12.0)
+            finally:
+                if mproc.poll() is None:
+                    mproc.kill()
+                    mproc.wait(timeout=3.0)
+
+        final_mid_report = json.loads(mreport_path.read_text(encoding="utf-8"))
+        assert final_mid_report.get("stage") == "shutdown_complete", final_mid_report
+        assert final_mid_report.get("finally_block_executed") is True, final_mid_report
+        assert final_mid_report.get("worker_shutdown_requested") is True, final_mid_report
+        assert final_mid_report.get("worker_shutdown_confirmed") is True, final_mid_report
+        assert final_mid_report.get("worker_process_alive") is False, final_mid_report
+        assert final_mid_report.get("worker_exit_code") is not None, final_mid_report
+        mid_w_state = _inspect_pid_state(mid_worker_pid, mid_worker_ident)
+        assert not (mid_w_state["alive"] or mid_w_state["zombie"]), mid_w_state
+
+    # 4. Verify live HTTP harness readiness + SIGTERM / post-E2E-failure shutdown + --verify-report
+    with tempfile.TemporaryDirectory(
+        prefix="jyxia-http-shutdown-", ignore_cleanup_errors=True
+    ) as htmp:
+        hreport_path = Path(htmp) / "http_shutdown_report.json"
+        hout_path = Path(htmp) / "http_harness.log"
+        hport = _find_free_tcp_port()
+        sub_env = dict(os.environ)
+        sub_env.pop("JYXIA_DATABASE_URL", None)
+        sub_env.pop("JYXIA_WORKER_DATABASE_URL", None)
+        sub_env.pop("JYXIA_MIGRATION_DATABASE_URL", None)
+        sub_env["JYXIA_E2E_REQUIRE_POSTGRES"] = "0"
+
+        sig_used = "UNKNOWN"
+        with open(hout_path, "w+", encoding="utf-8") as hout_fh:
+            hproc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--port",
+                    str(hport),
+                    "--report-file",
+                    str(hreport_path),
+                ],
+                cwd=str(ROOT),
+                env=sub_env,
+                stdin=subprocess.PIPE if sys.platform == "win32" else subprocess.DEVNULL,
+                stdout=hout_fh,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                http_deadline = time.monotonic() + 30.0
+                while time.monotonic() < http_deadline:
+                    try:
+                        with urllib.request.urlopen(
+                            f"http://127.0.0.1:{hport}/api/v1/health/live", timeout=1.5
+                        ) as resp:
+                            if resp.status == 200:
+                                break
+                    except Exception:
+                        if hproc.poll() is not None:
+                            hout_fh.flush()
+                            out = _read_worker_log_tail(hout_path)
+                            raise RuntimeError(
+                                f"Harness exited early before HTTP readiness (code={hproc.returncode}):\n{out}"
+                            )
+                        time.sleep(0.15)
+                else:
+                    hout_fh.flush()
+                    out = _read_worker_log_tail(hout_path)
+                    raise RuntimeError(
+                        f"Timeout waiting for harness HTTP readiness in shutdown test:\n{out}"
+                    )
+
+                live_report = json.loads(hreport_path.read_text(encoding="utf-8"))
+                live_harness_pid = int(live_report["harness_pid"])
+                live_worker_pid = int(live_report["worker_pid"])
+                live_worker_ident = live_report.get("worker_proc_identity")
+                live_harness_ident = live_report.get("harness_proc_identity")
+
+                assert live_report.get("worker_process_started") is True, live_report
+                assert live_report.get("worker_process_alive") is True, live_report
+                assert live_report.get("worker_shutdown_confirmed") is False, live_report
+                assert _inspect_pid_state(live_worker_pid, live_worker_ident)["alive"] is True
+
+                # Send graceful termination signal (SIGTERM on POSIX) before human reviews (also covers E2E failure abort)
+                sig_used = _send_graceful_termination_to_harness_subprocess(hproc)
+                hproc.wait(timeout=12.0)
+            finally:
+                if hproc.poll() is None:
+                    hproc.kill()
+                    hproc.wait(timeout=3.0)
+
+        assert hproc.returncode == 0, (
+            f"Expected harness returncode 0 after {sig_used}, got {hproc.returncode}"
+        )
+        final_http_report = json.loads(hreport_path.read_text(encoding="utf-8"))
+        assert final_http_report.get("stage") == "shutdown_complete", final_http_report
+        assert final_http_report.get("finally_block_executed") is True, final_http_report
+        assert final_http_report.get("worker_process_started") is True, final_http_report
+        assert final_http_report.get("worker_shutdown_requested") is True, final_http_report
+        assert final_http_report.get("worker_shutdown_confirmed") is True, final_http_report
+        assert final_http_report.get("worker_process_alive") is False, final_http_report
+        assert final_http_report.get("worker_exit_code") is not None, final_http_report
+
+        w_final = _inspect_pid_state(live_worker_pid, live_worker_ident)
+        h_final = _inspect_pid_state(live_harness_pid, live_harness_ident)
+        assert not (w_final["alive"] or w_final["zombie"]), w_final
+        assert not (h_final["alive"] or h_final["zombie"]), h_final
+
+        # Also validate through _verify_post_e2e_report (with allow_unreviewed_cases=True)
+        _verify_post_e2e_report(
+            hreport_path,
+            require_postgres=False,
+            allow_unreviewed_cases=True,
+        )
+
+    print(
+        json.dumps(
+            {
+                "status": "HARNESS_PROCESS_SHUTDOWN_SELF_TEST_OK",
+                "platform": sys.platform,
+                "signal_tested": sig_used,
+                "scenarios_verified": [
+                    "proc_stat_parser_active_zombie_reused_terminated",
+                    "worker_sigterm_timeout_sigkill_fallback",
+                    "shutdown_during_active_processing",
+                    "normal_and_failed_e2e_http_harness_sigterm_shutdown",
+                ],
+            }
+        )
+    )
 
 
 def _verify_post_e2e_report(
@@ -1175,6 +1889,7 @@ def _verify_post_e2e_report(
     require_postgres: bool,
     drain_timeout: float = 15.0,
     drain_interval: float = 0.15,
+    allow_unreviewed_cases: bool = False,
 ) -> None:
     """Verify post-E2E report, process termination, and live PostgreSQL 16 drained queue state."""
     deadline = time.monotonic() + 10.0
@@ -1186,21 +1901,64 @@ def _verify_post_e2e_report(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     worker_pid = report.get("worker_pid")
     harness_pid = report.get("harness_pid")
+    worker_identity = report.get("worker_proc_identity")
+    harness_identity = report.get("harness_proc_identity")
 
-    # Wait for both harness and worker subprocess to exit completely
+    # Wait for both harness and worker subprocess to exit completely and finalize report
     proc_deadline = time.monotonic() + 10.0
     while time.monotonic() < proc_deadline:
-        if not _is_pid_running(worker_pid) and not _is_pid_running(harness_pid):
+        w_state = _inspect_pid_state(worker_pid, worker_identity)
+        h_state = _inspect_pid_state(harness_pid, harness_identity)
+        with contextlib.suppress(Exception):
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        if (
+            not (w_state["alive"] or w_state["zombie"])
+            and not (h_state["alive"] or h_state["zombie"])
+            and report.get("stage") == "shutdown_complete"
+        ):
             break
         time.sleep(0.15)
 
-    if _is_pid_running(worker_pid):
-        raise RuntimeError(f"Orphan worker subprocess PID {worker_pid} is still active after E2E!")
-    if _is_pid_running(harness_pid):
-        raise RuntimeError(f"Harness process PID {harness_pid} is still active after E2E!")
+    w_state = _inspect_pid_state(worker_pid, worker_identity)
+    if w_state["alive"] or w_state["zombie"]:
+        raise RuntimeError(
+            f"Orphan worker subprocess PID {worker_pid} is still {w_state['classification']} "
+            f"after E2E! Details: {json.dumps(w_state, ensure_ascii=False)}"
+        )
+    h_state = _inspect_pid_state(harness_pid, harness_identity)
+    if h_state["alive"] or h_state["zombie"]:
+        raise RuntimeError(
+            f"Harness process PID {harness_pid} is still {h_state['classification']} "
+            f"after E2E! Details: {json.dumps(h_state, ensure_ascii=False)}"
+        )
 
-    # Re-read report in case harness updated it during its finally block
+    # Re-read report after processes have exited
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("worker_process_started") is not True:
+        raise RuntimeError(
+            f"Expected worker_process_started=True in report, got: {report.get('worker_process_started')}"
+        )
+    if report.get("worker_shutdown_requested") is not True:
+        raise RuntimeError(
+            f"Expected worker_shutdown_requested=True in report, got: {report.get('worker_shutdown_requested')}"
+        )
+    if report.get("worker_shutdown_confirmed") is not True:
+        raise RuntimeError(
+            f"Expected worker_shutdown_confirmed=True in report, got: {report.get('worker_shutdown_confirmed')}"
+        )
+    if report.get("worker_process_alive") is not False:
+        raise RuntimeError(
+            f"Expected worker_process_alive=False in report, got: {report.get('worker_process_alive')}"
+        )
+    if report.get("worker_exit_code") is None:
+        raise RuntimeError("Expected non-null worker_exit_code in report after shutdown.")
+    if report.get("finally_block_executed") is not True:
+        raise RuntimeError("Harness finally block was not executed before exit.")
+    if report.get("stage") != "shutdown_complete":
+        raise RuntimeError(
+            f"Expected final report stage='shutdown_complete', got '{report.get('stage')}'."
+        )
+
     db_info = report.get("db_info") or {}
     db_mode = db_info.get("db_mode")
 
@@ -1255,15 +2013,16 @@ def _verify_post_e2e_report(
             app_engine.dispose()
     else:
         live_snap = report.get("cases_snapshot") or {}
-        if not report.get("e2e_cases_drained_verified"):
-            raise RuntimeError(
-                f"Cases queue drainage was not verified during E2E run: {json.dumps(report)}"
-            )
-        for cid, c_info in live_snap.items():
-            if not c_info.get("drained") or not c_info.get("latest_human_review_completed"):
+        if not allow_unreviewed_cases:
+            if not report.get("e2e_cases_drained_verified"):
                 raise RuntimeError(
-                    f"Case {cid} did not finish with drained=True and human_review_completed=True: {c_info}"
+                    f"Cases queue drainage was not verified during E2E run: {json.dumps(report)}"
                 )
+            for cid, c_info in live_snap.items():
+                if not c_info.get("drained") or not c_info.get("latest_human_review_completed"):
+                    raise RuntimeError(
+                        f"Case {cid} did not finish with drained=True and human_review_completed=True: {c_info}"
+                    )
 
     print(
         json.dumps(
@@ -1276,7 +2035,13 @@ def _verify_post_e2e_report(
                 "force_rls_verified": db_info.get("force_rls_verified"),
                 "alembic_version": db_info.get("alembic_version"),
                 "worker_pid": worker_pid,
+                "worker_process_started": report.get("worker_process_started"),
+                "worker_shutdown_requested": report.get("worker_shutdown_requested"),
+                "worker_shutdown_confirmed": report.get("worker_shutdown_confirmed"),
+                "worker_exit_code": report.get("worker_exit_code"),
                 "worker_process_alive": False,
+                "worker_pid_state": w_state["classification"],
+                "harness_pid_state": h_state["classification"],
                 "cases_drained": live_snap,
             }
         )
@@ -1307,8 +2072,14 @@ def main() -> None:
         type=float,
         default=float(os.environ.get("JYXIA_E2E_DRAIN_INTERVAL_SECONDS", "0.15")),
     )
+    parser.add_argument(
+        "--worker-poll-interval",
+        type=float,
+        default=0.15,
+    )
     parser.add_argument("--self-test-fail-closed", action="store_true")
     parser.add_argument("--self-test-sqlite-lifecycle", action="store_true")
+    parser.add_argument("--self-test-process-shutdown", action="store_true")
     parser.add_argument("--verify-report", default=None)
     args = parser.parse_args()
 
@@ -1323,6 +2094,10 @@ def main() -> None:
         )
         return
 
+    if args.self_test_process_shutdown:
+        _run_self_test_process_shutdown()
+        return
+
     if args.verify_report:
         _verify_post_e2e_report(
             Path(args.verify_report),
@@ -1334,8 +2109,94 @@ def main() -> None:
 
     report_path = Path(args.report_file) if args.report_file else None
     run_uid = new_uuid()[:8]
+    harness_pid = os.getpid()
+    harness_identity = _capture_pid_identity(
+        harness_pid,
+        expected_cmdline_token="serve_institutional_e2e_harness.py",
+    )
 
-    with tempfile.TemporaryDirectory(prefix="jyxia-inst-e2e-335-") as tmp:
+    shutdown_state: dict[str, Any] = {
+        "signal_received": None,
+        "phase": "startup",
+        "server": None,
+    }
+
+    def _request_harness_shutdown(reason: str) -> None:
+        if shutdown_state["signal_received"] is None:
+            shutdown_state["signal_received"] = reason
+        srv = shutdown_state.get("server")
+        if srv is not None:
+            srv.should_exit = True
+
+    def _handle_termination_signal(signum: int, _frame: Any) -> None:
+        try:
+            sig_name = signal.Signals(signum).name
+        except Exception:
+            sig_name = f"SIG_{signum}"
+        if shutdown_state.get("phase") == "cleanup":
+            return
+        _request_harness_shutdown(sig_name)
+
+    handled_signals = [
+        sig
+        for sig in (
+            getattr(signal, "SIGINT", None),
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGBREAK", None),
+        )
+        if sig is not None
+    ]
+    original_signal_handlers: dict[int, Any] = {}
+    for sig in handled_signals:
+        with contextlib.suppress(Exception):
+            original_signal_handlers[sig] = signal.signal(sig, _handle_termination_signal)
+
+    if sys.platform == "win32":
+
+        def _win32_stdin_shutdown_watcher() -> None:
+            with contextlib.suppress(Exception):
+                import ctypes
+                from ctypes import wintypes
+                import msvcrt
+
+                h_stdin = msvcrt.get_osfhandle(sys.stdin.fileno())
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                buf = b""
+                while shutdown_state.get("phase") != "cleanup":
+                    avail = wintypes.DWORD(0)
+                    ok = kernel32.PeekNamedPipe(
+                        wintypes.HANDLE(h_stdin),
+                        None,
+                        0,
+                        None,
+                        ctypes.byref(avail),
+                        None,
+                    )
+                    if not ok:
+                        err = ctypes.get_last_error()
+                        # ERROR_BROKEN_PIPE (109) means parent closed the stdin pipe
+                        if err == 109 and buf:
+                            _request_harness_shutdown("WIN32_STDIN_SHUTDOWN")
+                        return
+                    if avail.value > 0:
+                        chunk = os.read(sys.stdin.fileno(), int(avail.value))
+                        if not chunk:
+                            return
+                        buf += chunk
+                        if b"SHUTDOWN" in buf.upper():
+                            _request_harness_shutdown("WIN32_STDIN_SHUTDOWN")
+                            return
+                    time.sleep(0.1)
+
+        threading.Thread(
+            target=_win32_stdin_shutdown_watcher,
+            name="jyxia-win32-stdin-shutdown",
+            daemon=True,
+        ).start()
+
+    with tempfile.TemporaryDirectory(
+        prefix="jyxia-inst-e2e-335-", ignore_cleanup_errors=True
+    ) as tmp:
         tmp_path = Path(tmp)
         db_cfg = _resolve_and_validate_db_urls(
             require_postgres=bool(args.require_postgres),
@@ -1366,6 +2227,8 @@ def main() -> None:
         bootstrap_engine: Engine | None = None
         worker_proc: Any | None = None
         worker_log_fh: TextIO | None = None
+        worker_identity: dict[str, Any] | None = None
+        seeded: dict[str, Any] | None = None
         report_payload: dict[str, Any] = {}
 
         try:
@@ -1414,14 +2277,44 @@ def main() -> None:
             case_b_id: str = seeded["case_b_id"]
 
             # Start the single real worker subprocess (`python -m app.worker`)
-            worker_proc, worker_log_fh = _start_worker_subprocess(
+            worker_proc, worker_log_fh, worker_identity = _start_worker_subprocess(
                 app_db_url=app_db_url,
                 worker_db_url=worker_db_url,
                 storage_dir=storage_dir,
                 settings=settings,
                 worker_id=f"e2e-worker-{run_uid}",
                 log_path=worker_log_path,
+                poll_interval_seconds=args.worker_poll_interval,
             )
+
+            report_payload = {
+                "stage": "worker_started",
+                "run_uid": run_uid,
+                "harness_pid": harness_pid,
+                "harness_proc_identity": harness_identity,
+                "worker_pid": worker_proc.pid,
+                "worker_proc_identity": worker_identity,
+                "worker_process_started": True,
+                "worker_shutdown_requested": False,
+                "worker_shutdown_confirmed": False,
+                "worker_forced_kill": False,
+                "worker_terminated_cleanly": False,
+                "worker_exit_code": None,
+                "worker_process_alive": True,
+                "worker_pid_state": "active",
+                "finally_block_executed": False,
+                "harness_shutdown_signal": None,
+                "db_info": db_info,
+                "organization_id": seeded["organization_id"],
+                "reviewer_user_id": seeded["reviewer_user_id"],
+                "session_token_hash": seeded["session_token_hash"],
+                "case_a_id": case_a_id,
+                "case_b_id": case_b_id,
+                "initial_drain_ok": False,
+                "e2e_cases_drained_verified": False,
+                "cases_snapshot": {},
+            }
+            _write_report_file(report_path, report_payload)
 
             # Wait for the worker subprocess to drain initial seeded integrity + extraction + comparison runs
             initial_snap = wait_for_cases_queue_drained(
@@ -1445,6 +2338,7 @@ def main() -> None:
                 worker_log_path=worker_log_path,
                 timeout_seconds=args.drain_timeout,
                 poll_interval_seconds=args.drain_interval,
+                should_abort=lambda: shutdown_state["signal_received"] is not None,
             )
 
             post_e2e_expectations = {
@@ -1464,24 +2358,13 @@ def main() -> None:
                 },
             }
 
-            report_payload = {
-                "stage": "initial_seed_drained",
-                "run_uid": run_uid,
-                "harness_pid": os.getpid(),
-                "worker_pid": worker_proc.pid,
-                "db_info": db_info,
-                "organization_id": seeded["organization_id"],
-                "reviewer_user_id": seeded["reviewer_user_id"],
-                "session_token_hash": seeded["session_token_hash"],
-                "case_a_id": case_a_id,
-                "case_b_id": case_b_id,
-                "initial_drain_ok": True,
-                "e2e_cases_drained_verified": False,
-                "worker_terminated_cleanly": False,
-                "worker_exit_code": None,
-                "cases_snapshot": initial_snap,
-            }
+            report_payload["stage"] = "initial_seed_drained"
+            report_payload["initial_drain_ok"] = True
+            report_payload["cases_snapshot"] = initial_snap
             _write_report_file(report_path, report_payload)
+
+            if shutdown_state["signal_received"] is not None:
+                raise _GracefulShutdownInterrupted("Shutdown requested prior to HTTP server start.")
 
             app = create_app(settings, engine=app_engine, storage=storage)
 
@@ -1528,6 +2411,7 @@ def main() -> None:
                                 worker_log_path=worker_log_path,
                                 timeout_seconds=args.drain_timeout,
                                 poll_interval_seconds=args.drain_interval,
+                                should_abort=lambda: shutdown_state["signal_received"] is not None,
                             )
                             report_payload["stage"] = "e2e_cases_drained"
                             report_payload["e2e_cases_drained_verified"] = True
@@ -1535,18 +2419,41 @@ def main() -> None:
                             _write_report_file(report_path, report_payload)
                 return response
 
-            uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+            config = uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=args.port,
+                log_level="warning",
+                timeout_graceful_shutdown=5,
+            )
+            server = _GracefulHarnessServer(config)
+            shutdown_state["server"] = server
+            shutdown_state["phase"] = "serving"
+            if shutdown_state["signal_received"] is not None:
+                server.should_exit = True
+            else:
+                server.run()
+        except _GracefulShutdownInterrupted:
+            pass
         finally:
+            shutdown_state["phase"] = "cleanup"
             if bootstrap_engine is not None:
-                bootstrap_engine.dispose()
+                with contextlib.suppress(Exception):
+                    bootstrap_engine.dispose()
 
-            # Attempt final queue drainage verification before stopping worker subprocess
-            if report_payload and not report_payload.get("e2e_cases_drained_verified"):
+            # Capture a final non-blocking snapshot of case runs before stopping the worker
+            if (
+                report_payload
+                and seeded is not None
+                and not report_payload.get("e2e_cases_drained_verified")
+            ):
+                snap_sess = None
                 try:
-                    final_snap = wait_for_cases_queue_drained(
-                        app_factory=create_session_factory(app_engine),
-                        ctx=seeded["ctx"],
-                        case_expectations={
+                    snap_sess = create_session_factory(app_engine)()
+                    _, latest_snap = _inspect_cases_queue_snapshot(
+                        snap_sess,
+                        seeded["ctx"],
+                        {
                             seeded["case_a_id"]: {
                                 "case_code": "CASO-E2E-COERENTE-A",
                                 "expected_docs": 2,
@@ -1558,23 +2465,50 @@ def main() -> None:
                                 "min_assessments": 1,
                             },
                         },
-                        worker_proc=worker_proc,
-                        worker_log_path=worker_log_path,
-                        timeout_seconds=min(args.drain_timeout, 10.0),
-                        poll_interval_seconds=args.drain_interval,
                     )
-                    report_payload["cases_snapshot"] = final_snap
+                    report_payload["cases_snapshot"] = latest_snap
                 except Exception:
                     pass
+                finally:
+                    if snap_sess is not None:
+                        with contextlib.suppress(Exception):
+                            snap_sess.rollback()
+                            snap_sess.close()
 
-            exit_code = _stop_worker_subprocess(worker_proc, worker_log_fh, timeout_seconds=5.0)
+            stop_info = _stop_worker_subprocess(
+                worker_proc,
+                worker_log_fh,
+                timeout_seconds=5.0,
+                kill_timeout_seconds=3.0,
+                expected_identity=worker_identity,
+            )
+            with contextlib.suppress(Exception):
+                app_engine.dispose()
+
             if report_payload:
                 report_payload["stage"] = "shutdown_complete"
-                report_payload["worker_terminated_cleanly"] = exit_code is not None
-                report_payload["worker_exit_code"] = exit_code
+                report_payload["finally_block_executed"] = True
+                report_payload["harness_shutdown_signal"] = (
+                    shutdown_state.get("signal_received") or "normal_return"
+                )
+                report_payload["worker_shutdown_requested"] = stop_info[
+                    "worker_shutdown_requested"
+                ]
+                report_payload["worker_shutdown_confirmed"] = stop_info[
+                    "worker_shutdown_confirmed"
+                ]
+                report_payload["worker_forced_kill"] = stop_info["worker_forced_kill"]
+                report_payload["worker_terminated_cleanly"] = stop_info[
+                    "worker_shutdown_confirmed"
+                ]
+                report_payload["worker_exit_code"] = stop_info["worker_exit_code"]
+                report_payload["worker_process_alive"] = stop_info["worker_process_alive"]
+                report_payload["worker_pid_state"] = stop_info["worker_pid_state"]
                 _write_report_file(report_path, report_payload)
 
-            app_engine.dispose()
+            for sig, orig_handler in original_signal_handlers.items():
+                with contextlib.suppress(Exception):
+                    signal.signal(sig, orig_handler)
 
 
 if __name__ == "__main__":

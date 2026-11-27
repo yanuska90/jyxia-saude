@@ -138,6 +138,75 @@ async function waitForCondition(cdp, jsExpr, timeoutMs = 12000) {
   throw new Error(`Timeout aguardando condição E2E: ${jsExpr}`);
 }
 
+async function stopChildProcessGracefully(
+  proc,
+  {
+    label = 'subprocess',
+    timeoutMs = 10000,
+    killTimeoutMs = 5000,
+    sendWin32StdinShutdown = false,
+  } = {}
+) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    return {
+      exitCode: proc?.exitCode ?? null,
+      signalCode: proc?.signalCode ?? null,
+      forcedKill: false,
+    };
+  }
+
+  const closePromise = new Promise((resolve) => {
+    proc.once('close', (code, signal) => {
+      resolve({ exitCode: code, signalCode: signal });
+    });
+  });
+
+  if (process.platform === 'win32' && sendWin32StdinShutdown) {
+    try {
+      proc.stdin?.write('SHUTDOWN\n');
+      proc.stdin?.end();
+    } catch {}
+  } else {
+    try {
+      proc.kill('SIGTERM');
+    } catch {}
+  }
+
+  let timerId = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timerId = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+  });
+
+  const firstOutcome = await Promise.race([closePromise, timeoutPromise]);
+  if (timerId) clearTimeout(timerId);
+
+  if (firstOutcome && firstOutcome.timedOut) {
+    try {
+      proc.kill('SIGKILL');
+    } catch {}
+    let killTimerId = null;
+    const killTimeoutPromise = new Promise((resolve) => {
+      killTimerId = setTimeout(() => resolve({ killTimedOut: true }), killTimeoutMs);
+    });
+    const finalOutcome = await Promise.race([closePromise, killTimeoutPromise]);
+    if (killTimerId) clearTimeout(killTimerId);
+    if (finalOutcome && finalOutcome.killTimedOut) {
+      throw new Error(
+        `${label} (PID ${proc.pid}) did not terminate even after SIGKILL fallback.`
+      );
+    }
+    return {
+      ...finalOutcome,
+      forcedKill: true,
+    };
+  }
+
+  return {
+    ...firstOutcome,
+    forcedKill: false,
+  };
+}
+
 async function main() {
   const httpPort = 8045;
   const cdpPort = 9255;
@@ -149,6 +218,7 @@ async function main() {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'jyxia-inst-cdp-'));
 
   let serverStderr = '';
+  const isWin = process.platform === 'win32';
   const serverProc = spawn(
     pythonBin,
     [
@@ -160,8 +230,9 @@ async function main() {
       '--csrf-token',
       csrfToken,
     ],
-    { cwd: ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] }
+    { cwd: ROOT_DIR, stdio: [isWin ? 'pipe' : 'ignore', 'pipe', 'pipe'] }
   );
+  serverProc.stdout?.on('data', () => {});
   serverProc.stderr.on('data', (chunk) => {
     serverStderr += chunk.toString();
   });
@@ -457,14 +528,25 @@ async function main() {
   } finally {
     if (cdp) cdp.close();
     if (browserProc) {
-      try {
-        browserProc.kill();
-      } catch {}
+      await stopChildProcessGracefully(browserProc, {
+        label: 'Headless browser',
+        timeoutMs: 3000,
+        killTimeoutMs: 2000,
+        sendWin32StdinShutdown: false,
+      }).catch(() => {});
     }
-    try {
-      serverProc.kill();
-    } catch {}
+    const serverShutdown = await stopChildProcessGracefully(serverProc, {
+      label: 'Institutional E2E harness server',
+      timeoutMs: 10000,
+      killTimeoutMs: 5000,
+      sendWin32StdinShutdown: true,
+    });
     await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+    if (serverShutdown.forcedKill) {
+      throw new Error(
+        `Institutional E2E harness server required SIGKILL fallback after graceful shutdown timeout.\nServer stderr:\n${serverStderr}`
+      );
+    }
   }
 }
 
