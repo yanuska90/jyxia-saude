@@ -155,11 +155,19 @@ jobs:
           node-version: "24"
       - name: Provisionar Chrome headless no runner CI
         uses: browser-actions/setup-chrome@v1
-      - name: Executar E2E institucional headless (FastAPI + Worker + PDF.js via CDP com sessao pre-semeada)
+      - name: Executar E2E institucional headless (FastAPI + Worker subprocesso + PostgreSQL 16 RLS + Keycloak 26.8.2 OIDC MFA + PDF.js via CDP)
         env:
           JYXIA_PYTHON_BIN: /tmp/jyxia-ci-venv/bin/python
+          JYXIA_E2E_REQUIRE_POSTGRES: "1"
+          JYXIA_E2E_REQUIRE_KEYCLOAK: "1"
+          JYXIA_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_WORKER_DATABASE_URL: postgresql+psycopg://jyxia_worker:jyxia_ci_worker_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test
+          JYXIA_E2E_REPORT_FILE: /tmp/jyxia_inst_e2e_report.json
         run: |
           set -o pipefail
+          /tmp/jyxia-ci-venv/bin/python tools/serve_institutional_e2e_harness.py --self-test-fail-closed
+          /tmp/jyxia-ci-venv/bin/python tools/serve_institutional_e2e_harness.py --self-test-process-shutdown
           if ! node tests/e2e/test_institutional_e2e.mjs 2>&1 | tee /tmp/inst_e2e.log; then
             python3 -c "
           from pathlib import Path
@@ -168,6 +176,7 @@ jobs:
           " || true
             exit 1
           fi
+          /tmp/jyxia-ci-venv/bin/python tools/serve_institutional_e2e_harness.py --verify-report /tmp/jyxia_inst_e2e_report.json
       - name: Parar container Keycloak efemero
         if: always()
         run: docker rm -f jyxia-keycloak-ci || true
