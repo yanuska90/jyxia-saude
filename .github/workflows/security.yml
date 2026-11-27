@@ -155,10 +155,11 @@ jobs:
           node-version: "24"
       - name: Provisionar Chrome headless no runner CI
         uses: browser-actions/setup-chrome@v1
-      - name: Executar E2E institucional headless (FastAPI + Worker subprocesso + PostgreSQL 16 RLS + PDF.js via CDP)
+      - name: Executar E2E institucional headless (FastAPI + Worker subprocesso + PostgreSQL 16 RLS + Keycloak 26.8.2 OIDC MFA + PDF.js via CDP)
         env:
           JYXIA_PYTHON_BIN: /tmp/jyxia-ci-venv/bin/python
           JYXIA_E2E_REQUIRE_POSTGRES: "1"
+          JYXIA_E2E_REQUIRE_KEYCLOAK: "1"
           JYXIA_DATABASE_URL: postgresql+psycopg://jyxia_app:jyxia_ci_app_ephemeral_pw@127.0.0.1:5432/jyxia_test
           JYXIA_WORKER_DATABASE_URL: postgresql+psycopg://jyxia_worker:jyxia_ci_worker_ephemeral_pw@127.0.0.1:5432/jyxia_test
           JYXIA_MIGRATION_DATABASE_URL: postgresql+psycopg://jyxia:jyxia_ci_ephemeral_pw@127.0.0.1:5432/jyxia_test

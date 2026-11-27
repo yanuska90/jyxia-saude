@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,7 @@ from app.core.constants import (  # noqa: E402
     ProcessingStatus,
     ProcessingStepType,
 )
+from app.core.oidc import StandardOidcProviderAdapter  # noqa: E402
 from app.core.session_crypto import hmac_token_digest  # noqa: E402
 from app.db.base import Base, new_uuid  # noqa: E402
 from app.db.session import (  # noqa: E402
@@ -62,7 +64,10 @@ from app.db.session import (  # noqa: E402
 )
 from app.main import create_app  # noqa: E402
 import app.models.entities  # noqa: F401, E402
-from app.repositories.identity import IdentityAndSessionRepository  # noqa: E402
+from app.repositories.identity import (  # noqa: E402
+    IdentityAndSessionRepository,
+    SecurityAuditRepository,
+)
 from app.repositories.institutional import (  # noqa: E402
     OrganizationRepository,
     ProcessingQueueRepository,
@@ -194,6 +199,129 @@ def _resolve_and_validate_db_urls(
         "app_db_url": sqlite_url,
         "worker_db_url": sqlite_url,
         "migration_db_url": sqlite_url,
+    }
+
+
+_REQUIRED_KEYCLOAK_ENV_KEYS: tuple[str, ...] = (
+    "JYXIA_KEYCLOAK_E2E_URL",
+    "JYXIA_KEYCLOAK_CLIENT_ID",
+    "JYXIA_KEYCLOAK_CLIENT_SECRET",
+    "JYXIA_KEYCLOAK_MFA_USER_SUB",
+    "JYXIA_KEYCLOAK_MFA_USERNAME",
+    "JYXIA_KEYCLOAK_MFA_PASSWORD",
+    "JYXIA_KEYCLOAK_MFA_TOTP_SECRET",
+)
+
+
+def _resolve_and_validate_keycloak_config(
+    *,
+    require_keycloak: bool,
+    require_postgres: bool,
+    env_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Validate OIDC/Keycloak configuration with fail-closed semantics when Keycloak is required."""
+    src = env_map if env_map is not None else os.environ
+    kc_url = src.get("JYXIA_KEYCLOAK_E2E_URL", "").strip().rstrip("/")
+
+    if require_keycloak:
+        if not require_postgres:
+            raise RuntimeError(
+                "JYXIA_E2E_REQUIRE_KEYCLOAK=1 requires JYXIA_E2E_REQUIRE_POSTGRES=1 "
+                "(SQLite or pre-seeded fallback is strictly forbidden)."
+            )
+        for key in _REQUIRED_KEYCLOAK_ENV_KEYS:
+            if not src.get(key, "").strip():
+                raise RuntimeError(
+                    f"JYXIA_E2E_REQUIRE_KEYCLOAK=1: missing mandatory {key}."
+                )
+        if not (kc_url.startswith("http://") or kc_url.startswith("https://")):
+            raise RuntimeError(
+                "JYXIA_E2E_REQUIRE_KEYCLOAK=1: JYXIA_KEYCLOAK_E2E_URL must be an HTTP/HTTPS OIDC issuer URL."
+            )
+        return {
+            "auth_mode": "keycloak_oidc_mfa",
+            "oidc_enabled": True,
+            "oidc_issuer": kc_url,
+            "oidc_client_id": src["JYXIA_KEYCLOAK_CLIENT_ID"].strip(),
+            "oidc_client_secret": src["JYXIA_KEYCLOAK_CLIENT_SECRET"].strip(),
+            "mfa_user_sub": src["JYXIA_KEYCLOAK_MFA_USER_SUB"].strip(),
+            "mfa_username": src["JYXIA_KEYCLOAK_MFA_USERNAME"].strip(),
+        }
+
+    if kc_url:
+        for key in _REQUIRED_KEYCLOAK_ENV_KEYS:
+            if not src.get(key, "").strip():
+                raise RuntimeError(
+                    f"JYXIA_KEYCLOAK_E2E_URL is set but mandatory {key} is missing."
+                )
+        if not (kc_url.startswith("http://") or kc_url.startswith("https://")):
+            raise RuntimeError(
+                "JYXIA_KEYCLOAK_E2E_URL must be an HTTP/HTTPS OIDC issuer URL."
+            )
+        return {
+            "auth_mode": "keycloak_oidc_mfa",
+            "oidc_enabled": True,
+            "oidc_issuer": kc_url,
+            "oidc_client_id": src["JYXIA_KEYCLOAK_CLIENT_ID"].strip(),
+            "oidc_client_secret": src["JYXIA_KEYCLOAK_CLIENT_SECRET"].strip(),
+            "mfa_user_sub": src["JYXIA_KEYCLOAK_MFA_USER_SUB"].strip(),
+            "mfa_username": src["JYXIA_KEYCLOAK_MFA_USERNAME"].strip(),
+        }
+
+    return {
+        "auth_mode": "preseeded_bff_session",
+        "oidc_enabled": False,
+        "oidc_issuer": "https://idp.jyxia.local/realms/e2e",
+        "oidc_client_id": None,
+        "oidc_client_secret": None,
+        "mfa_user_sub": None,
+        "mfa_username": None,
+    }
+
+
+def _verify_keycloak_environment(*, oidc_issuer: str) -> dict[str, Any]:
+    """Actively probe live Keycloak OIDC discovery and JWKS endpoints before starting harness."""
+    discovery_url = f"{oidc_issuer.rstrip('/')}/.well-known/openid-configuration"
+    try:
+        with urllib.request.urlopen(discovery_url, timeout=5.0) as resp:
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"Keycloak OIDC discovery returned HTTP {resp.status} at {discovery_url}"
+                )
+            disc = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to reach live Keycloak 26.8.2 OIDC discovery at {discovery_url}: {exc}"
+        ) from exc
+
+    actual_issuer = str(disc.get("issuer") or "").strip().rstrip("/")
+    if actual_issuer != oidc_issuer.rstrip("/"):
+        raise RuntimeError(
+            f"Keycloak issuer mismatch: expected '{oidc_issuer}', got '{actual_issuer}'."
+        )
+    pkce_methods = disc.get("code_challenge_methods_supported") or []
+    if "S256" not in pkce_methods:
+        raise RuntimeError(
+            f"Keycloak discovery does not advertise PKCE S256 support: {pkce_methods}"
+        )
+    jwks_uri = str(disc.get("jwks_uri") or "").strip()
+    if not jwks_uri:
+        raise RuntimeError("Keycloak discovery payload missing jwks_uri.")
+    try:
+        with urllib.request.urlopen(jwks_uri, timeout=5.0) as jresp:
+            jwks = json.loads(jresp.read().decode("utf-8"))
+            keys = jwks.get("keys") or []
+            if not keys:
+                raise RuntimeError("Keycloak JWKS endpoint returned empty keys list.")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to verify Keycloak JWKS at {jwks_uri}: {exc}") from exc
+
+    return {
+        "oidc_issuer": actual_issuer,
+        "authorization_endpoint": disc.get("authorization_endpoint"),
+        "token_endpoint": disc.get("token_endpoint"),
+        "jwks_keys_count": len(keys),
+        "pkce_s256_verified": True,
     }
 
 
@@ -1075,6 +1203,31 @@ def wait_for_cases_queue_drained(
     )
 
 
+UI_UPLOAD_CASE_CODE = "CASO-UI-UPLOAD-336"
+UI_UPLOAD_FILENAME = "solicitacao-ui-upload-336.pdf"
+SECONDARY_ORG_CASE_CODE = "CASO-ORG2-ISOLADO"
+
+
+def _build_ui_upload_synthetic_pdf() -> tuple[bytes, str]:
+    pdf_bytes = _build_synthetic_selectable_pdf(
+        [
+            "Tipo: solicitacao",
+            "Subfamilia: oftalmologia",
+            "Origem: Ambulatorio Upload UI E2E",
+            "Paciente: Beatriz Sintetica Upload",
+            "Nascimento: 1982-04-19",
+            "Identificador: CPF-SYN-336-UI",
+            "Emissao: 2026-10-18",
+            "Procedimento: Facoemulsificacao com implante de lente intraocular",
+            "Sistema: TUSS",
+            "Codigo: 31309054",
+            "Lateralidade: OD",
+        ]
+    )
+    sha256_hex = hashlib.sha256(pdf_bytes).hexdigest()
+    return pdf_bytes, sha256_hex
+
+
 def _seed_harness_data(
     *,
     bootstrap_factory: sessionmaker[Session],
@@ -1084,30 +1237,97 @@ def _seed_harness_data(
     session_token: str,
     csrf_token: str,
     run_uid: str,
+    auth_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bootstrap identity via privileged session, then create cases/documents strictly via app_factory."""
+    """Bootstrap identity via privileged session, then create cases/documents strictly via app_factory.
+
+    In `keycloak_oidc_mfa` mode, ZERO `auth_sessions` rows are created for the test reviewer user
+    (forcing real browser OIDC + PKCE S256 + TOTP MFA authentication). An internal fixture-seeding
+    operator account is used strictly for seeding initial cases and polling queue drainage under
+    `jyxia_app` FORCE ROW LEVEL SECURITY.
+    """
+    effective_auth = auth_cfg or {"auth_mode": "preseeded_bff_session", "oidc_enabled": False}
+    is_keycloak_oidc = effective_auth.get("auth_mode") == "keycloak_oidc_mfa"
+
     sess_hash = hmac_token_digest(
         session_token, secret=settings.session_secret, context="session_token"
     )
     csrf_hash = hmac_token_digest(
         csrf_token, secret=settings.csrf_secret, context="csrf_token"
     )
+    seed_sess_token = f"internal-seed-operator-session-{run_uid}-{new_uuid()}"
+    seed_csrf_token = f"internal-seed-operator-csrf-{run_uid}-{new_uuid()}"
+    seed_sess_hash = hmac_token_digest(
+        seed_sess_token, secret=settings.session_secret, context="session_token"
+    )
+    seed_csrf_hash = hmac_token_digest(
+        seed_csrf_token, secret=settings.csrf_secret, context="csrf_token"
+    )
+    seed_b_sess_token = f"internal-seed-operator-orgb-session-{run_uid}-{new_uuid()}"
+    seed_b_sess_hash = hmac_token_digest(
+        seed_b_sess_token, secret=settings.session_secret, context="session_token"
+    )
+
+    oidc_issuer = str(
+        effective_auth.get("oidc_issuer") or "https://idp.jyxia.local/realms/e2e"
+    ).strip()
+    oidc_subject = (
+        str(effective_auth["mfa_user_sub"]).strip()
+        if is_keycloak_oidc
+        else f"sub-e2e-reviewer-335-{run_uid}"
+    )
+    reviewer_email = (
+        f"{effective_auth['mfa_username']}.{run_uid}@jyxia.local"
+        if is_keycloak_oidc
+        else f"revisor.e2e.{run_uid}@jyxia.local"
+    )
 
     bootstrap_db = bootstrap_factory()
     try:
-        # Remove any stale test session with identical token hash from a prior run on the same DB
+        # Remove any stale test session or previous external_identity binding for the same OIDC subject
         bootstrap_db.execute(
             text("DELETE FROM auth_sessions WHERE session_token_hash = :h"),
             {"h": sess_hash},
         )
+        old_user_ids = [
+            str(r[0])
+            for r in bootstrap_db.execute(
+                text(
+                    "SELECT user_id FROM external_identities WHERE issuer = :iss AND subject = :sub"
+                ),
+                {"iss": oidc_issuer, "sub": oidc_subject},
+            ).fetchall()
+        ]
+        for old_uid in old_user_ids:
+            bootstrap_db.execute(
+                text("DELETE FROM auth_sessions WHERE user_id = :u"), {"u": old_uid}
+            )
+            bootstrap_db.execute(
+                text("DELETE FROM external_identities WHERE user_id = :u"), {"u": old_uid}
+            )
+            bootstrap_db.execute(
+                text("DELETE FROM organization_memberships WHERE user_id = :u"), {"u": old_uid}
+            )
+
         org = OrganizationRepository.create_organization(
             bootstrap_db,
-            slug=f"hospital-sintetico-335-{run_uid}",
-            name=f"Hospital Sintetico JYXIA {run_uid}",
+            slug=f"a-hospital-sintetico-335-{run_uid}",
+            name=f"A - Hospital Sintetico JYXIA {run_uid}",
         )
+        secondary_org = OrganizationRepository.create_organization(
+            bootstrap_db,
+            slug=f"b-clinica-isolada-336-{run_uid}",
+            name=f"B - Clinica Regional Isolada JYXIA {run_uid}",
+        )
+        unassociated_org = OrganizationRepository.create_organization(
+            bootstrap_db,
+            slug=f"c-org-nao-associada-336-{run_uid}",
+            name=f"C - Organizacao Externa Nao Associada {run_uid}",
+        )
+
         reviewer = OrganizationRepository.create_user(
             bootstrap_db,
-            email=f"revisor.e2e.{run_uid}@jyxia.local",
+            email=reviewer_email,
             display_name="Dra. Clara Revisora (Sintetica)",
             mfa_enrolled=True,
         )
@@ -1117,21 +1337,72 @@ def _seed_harness_data(
             user_id=reviewer.id,
             role=OrganizationRole.ORG_ADMIN.value,
         )
+        OrganizationRepository.assign_membership(
+            bootstrap_db,
+            TenantContext(organization_id=secondary_org.id),
+            user_id=reviewer.id,
+            role=OrganizationRole.ORG_ADMIN.value,
+        )
         ext = IdentityAndSessionRepository.bind_external_identity(
             bootstrap_db,
             user_id=reviewer.id,
-            issuer="https://idp.jyxia.local/realms/e2e",
-            subject=f"sub-e2e-reviewer-335-{run_uid}",
+            issuer=oidc_issuer,
+            subject=oidc_subject,
             email_at_binding=reviewer.email,
         )
+
         now = datetime.now(timezone.utc)
+        if not is_keycloak_oidc:
+            IdentityAndSessionRepository.create_auth_session(
+                bootstrap_db,
+                user_id=reviewer.id,
+                external_identity_id=ext.id,
+                active_organization_id=org.id,
+                session_token_hash=sess_hash,
+                csrf_token_hash=csrf_hash,
+                auth_method="oidc_authorization_code_pkce",
+                acr="urn:jyxia:loa:mfa",
+                amr_json=["pwd", "otp"],
+                mfa_verified_at=now,
+                oidc_auth_time=now,
+                idle_expires_at=now + timedelta(minutes=30),
+                absolute_expires_at=now + timedelta(hours=8),
+                now=now,
+            )
+
+        # Internal harness operator account used strictly for seeding initial fixtures and queue drainage checks
+        seed_operator = OrganizationRepository.create_user(
+            bootstrap_db,
+            email=f"seed.operator.{run_uid}@jyxia.local",
+            display_name="Operador Interno de Semeadura E2E",
+            mfa_enrolled=True,
+        )
+        OrganizationRepository.assign_membership(
+            bootstrap_db,
+            TenantContext(organization_id=org.id),
+            user_id=seed_operator.id,
+            role=OrganizationRole.ORG_ADMIN.value,
+        )
+        OrganizationRepository.assign_membership(
+            bootstrap_db,
+            TenantContext(organization_id=secondary_org.id),
+            user_id=seed_operator.id,
+            role=OrganizationRole.ORG_ADMIN.value,
+        )
+        seed_ext = IdentityAndSessionRepository.bind_external_identity(
+            bootstrap_db,
+            user_id=seed_operator.id,
+            issuer="https://idp.jyxia.local/realms/harness-seed",
+            subject=f"sub-harness-seed-operator-{run_uid}",
+            email_at_binding=seed_operator.email,
+        )
         IdentityAndSessionRepository.create_auth_session(
             bootstrap_db,
-            user_id=reviewer.id,
-            external_identity_id=ext.id,
+            user_id=seed_operator.id,
+            external_identity_id=seed_ext.id,
             active_organization_id=org.id,
-            session_token_hash=sess_hash,
-            csrf_token_hash=csrf_hash,
+            session_token_hash=seed_sess_hash,
+            csrf_token_hash=seed_csrf_hash,
             auth_method="oidc_authorization_code_pkce",
             acr="urn:jyxia:loa:mfa",
             amr_json=["pwd", "otp"],
@@ -1141,30 +1412,75 @@ def _seed_harness_data(
             absolute_expires_at=now + timedelta(hours=8),
             now=now,
         )
+        IdentityAndSessionRepository.create_auth_session(
+            bootstrap_db,
+            user_id=seed_operator.id,
+            external_identity_id=seed_ext.id,
+            active_organization_id=secondary_org.id,
+            session_token_hash=seed_b_sess_hash,
+            csrf_token_hash=seed_csrf_hash,
+            auth_method="oidc_authorization_code_pkce",
+            acr="urn:jyxia:loa:mfa",
+            amr_json=["pwd", "otp"],
+            mfa_verified_at=now,
+            oidc_auth_time=now,
+            idle_expires_at=now + timedelta(minutes=30),
+            absolute_expires_at=now + timedelta(hours=8),
+            now=now,
+        )
+
         bootstrap_db.commit()
         org_id = str(org.id)
+        secondary_org_id = str(secondary_org.id)
+        unassociated_org_id = str(unassociated_org.id)
         reviewer_id = str(reviewer.id)
+        seed_operator_id = str(seed_operator.id)
     finally:
         bootstrap_db.close()
 
-    ctx = TenantContext(
+    seed_ctx_a = TenantContext(
         organization_id=org_id,
-        actor_user_id=reviewer_id,
-        session_token_hash=sess_hash,
+        actor_user_id=seed_operator_id,
+        session_token_hash=seed_sess_hash,
+        source="authenticated_request",
+    )
+    seed_ctx_b = TenantContext(
+        organization_id=secondary_org_id,
+        actor_user_id=seed_operator_id,
+        session_token_hash=seed_b_sess_hash,
         source="authenticated_request",
     )
 
-    def _bind_app_tx(sess: Session) -> None:
-        apply_pg_identity_context(sess, session_token_hash=sess_hash)
-        apply_pg_rls_context(sess, organization_id=org_id, user_id=reviewer_id)
+    def _bind_app_tx(sess: Session, target_ctx: TenantContext = seed_ctx_a) -> None:
+        apply_pg_identity_context(sess, session_token_hash=target_ctx.session_token_hash)
+        apply_pg_rls_context(
+            sess,
+            organization_id=target_ctx.organization_id,
+            user_id=target_ctx.actor_user_id,
+        )
 
     app_db = app_factory()
     try:
+        # Isolated case in Secondary Organization B (must never leak into Organization A)
+        _bind_app_tx(app_db, seed_ctx_b)
+        case_org2 = InstitutionalService.create_case(
+            app_db,
+            seed_ctx_b,
+            DocumentCaseCreateInput(
+                case_code=SECONDARY_ORG_CASE_CODE,
+                procedure_reference="TUSS:31309054",
+                external_reference=f"GUIA-ORG2-{run_uid}",
+                declared_laterality="OE",
+            ),
+        )
+        app_db.commit()
+        secondary_org_case_id = str(case_org2.id)
+
         # Scenario A: Coherent 4-axis case (awaiting human review -> transitions to conferida)
-        _bind_app_tx(app_db)
+        _bind_app_tx(app_db, seed_ctx_a)
         case_a = InstitutionalService.create_case(
             app_db,
-            ctx,
+            seed_ctx_a,
             DocumentCaseCreateInput(
                 case_code="CASO-E2E-COERENTE-A",
                 procedure_reference="TUSS:31309054",
@@ -1175,10 +1491,10 @@ def _seed_harness_data(
         app_db.commit()
         case_a_id = str(case_a.id)
 
-        _bind_app_tx(app_db)
+        _bind_app_tx(app_db, seed_ctx_a)
         ing_a1 = InstitutionalService.ingest_case_document(
             app_db,
-            ctx,
+            seed_ctx_a,
             storage=storage,
             case_id=case_a_id,
             content=_build_synthetic_selectable_pdf(
@@ -1202,10 +1518,10 @@ def _seed_harness_data(
             source_label="Solicitacao Medica A",
         )
 
-        _bind_app_tx(app_db)
+        _bind_app_tx(app_db, seed_ctx_a)
         ing_a2 = InstitutionalService.ingest_case_document(
             app_db,
-            ctx,
+            seed_ctx_a,
             storage=storage,
             case_id=case_a_id,
             content=_build_synthetic_selectable_pdf(
@@ -1230,10 +1546,10 @@ def _seed_harness_data(
         )
 
         # Scenario B: Conflicting Laterality (OD vs OE -> remains bloqueado even after human review)
-        _bind_app_tx(app_db)
+        _bind_app_tx(app_db, seed_ctx_a)
         case_b = InstitutionalService.create_case(
             app_db,
-            ctx,
+            seed_ctx_a,
             DocumentCaseCreateInput(
                 case_code="CASO-E2E-CONFLITO-B",
                 procedure_reference="TUSS:31309054",
@@ -1243,10 +1559,10 @@ def _seed_harness_data(
         app_db.commit()
         case_b_id = str(case_b.id)
 
-        _bind_app_tx(app_db)
+        _bind_app_tx(app_db, seed_ctx_a)
         ing_b1 = InstitutionalService.ingest_case_document(
             app_db,
-            ctx,
+            seed_ctx_a,
             storage=storage,
             case_id=case_b_id,
             content=_build_synthetic_selectable_pdf(
@@ -1268,10 +1584,10 @@ def _seed_harness_data(
             source_label="Solicitacao OD",
         )
 
-        _bind_app_tx(app_db)
+        _bind_app_tx(app_db, seed_ctx_a)
         ing_b2 = InstitutionalService.ingest_case_document(
             app_db,
-            ctx,
+            seed_ctx_a,
             storage=storage,
             case_id=case_b_id,
             content=_build_synthetic_selectable_pdf(
@@ -1293,11 +1609,21 @@ def _seed_harness_data(
             source_label="Laudo Divergente OE",
         )
 
+        ui_pdf_bytes, ui_pdf_sha256 = _build_ui_upload_synthetic_pdf()
+
         return {
+            "auth_mode": effective_auth.get("auth_mode", "preseeded_bff_session"),
+            "oidc_issuer": oidc_issuer,
+            "oidc_subject": oidc_subject,
             "organization_id": org_id,
+            "secondary_organization_id": secondary_org_id,
+            "unassociated_organization_id": unassociated_org_id,
+            "secondary_org_case_id": secondary_org_case_id,
             "reviewer_user_id": reviewer_id,
-            "session_token_hash": sess_hash,
-            "ctx": ctx,
+            "seed_operator_user_id": seed_operator_id,
+            "session_token_hash": seed_sess_hash,
+            "preseeded_reviewer_session_token_hash": None if is_keycloak_oidc else sess_hash,
+            "ctx": seed_ctx_a,
             "case_a_id": case_a_id,
             "case_b_id": case_b_id,
             "case_a_versions": [
@@ -1308,6 +1634,11 @@ def _seed_harness_data(
                 (str(ing_b1.document.id), str(ing_b1.version.id)),
                 (str(ing_b2.document.id), str(ing_b2.version.id)),
             ],
+            "ui_upload_pdf_bytes": ui_pdf_bytes,
+            "expected_ui_upload_sha256": ui_pdf_sha256,
+            "expected_ui_upload_bytes": len(ui_pdf_bytes),
+            "expected_ui_case_code": UI_UPLOAD_CASE_CODE,
+            "expected_ui_upload_filename": UI_UPLOAD_FILENAME,
         }
     finally:
         app_db.close()
@@ -1334,7 +1665,7 @@ def _is_pid_running(
 
 
 def _run_self_test_fail_closed() -> None:
-    """Verify fail-closed rejection when JYXIA_E2E_REQUIRE_POSTGRES=1 and PG URLs are missing/SQLite."""
+    """Verify fail-closed rejection when JYXIA_E2E_REQUIRE_POSTGRES=1 or JYXIA_E2E_REQUIRE_KEYCLOAK=1."""
     for bad_env, expected_msg in (
         ({}, "missing mandatory JYXIA_DATABASE_URL"),
         (
@@ -1369,6 +1700,51 @@ def _run_self_test_fail_closed() -> None:
                 ) from exc
         else:
             raise AssertionError(f"Expected RuntimeError for invalid config: {bad_env}")
+
+    # Verify fail-closed rejection when JYXIA_E2E_REQUIRE_KEYCLOAK=1
+    base_kc_env = {
+        "JYXIA_KEYCLOAK_E2E_URL": "http://127.0.0.1:8080/realms/jyxia-dev",
+        "JYXIA_KEYCLOAK_CLIENT_ID": "jyxia-backend-dev",
+        "JYXIA_KEYCLOAK_CLIENT_SECRET": "secret",
+        "JYXIA_KEYCLOAK_MFA_USER_SUB": "sub-123",
+        "JYXIA_KEYCLOAK_MFA_USERNAME": "kc_mfa_user",
+        "JYXIA_KEYCLOAK_MFA_PASSWORD": "pw",
+        "JYXIA_KEYCLOAK_MFA_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
+    }
+    for req_pg, kc_env_override, expected_kc_msg in (
+        (False, base_kc_env, "requires JYXIA_E2E_REQUIRE_POSTGRES=1"),
+        (True, {}, "missing mandatory JYXIA_KEYCLOAK_E2E_URL"),
+        (
+            True,
+            {**base_kc_env, "JYXIA_KEYCLOAK_CLIENT_SECRET": ""},
+            "missing mandatory JYXIA_KEYCLOAK_CLIENT_SECRET",
+        ),
+        (
+            True,
+            {**base_kc_env, "JYXIA_KEYCLOAK_MFA_TOTP_SECRET": ""},
+            "missing mandatory JYXIA_KEYCLOAK_MFA_TOTP_SECRET",
+        ),
+        (
+            True,
+            {**base_kc_env, "JYXIA_KEYCLOAK_E2E_URL": "ftp://invalid-issuer"},
+            "must be an HTTP/HTTPS OIDC issuer URL",
+        ),
+    ):
+        try:
+            _resolve_and_validate_keycloak_config(
+                require_keycloak=True,
+                require_postgres=req_pg,
+                env_map=kc_env_override,
+            )
+        except RuntimeError as exc:
+            if expected_kc_msg not in str(exc):
+                raise AssertionError(
+                    f"Expected '{expected_kc_msg}' in error, got: {exc}"
+                ) from exc
+        else:
+            raise AssertionError(
+                f"Expected RuntimeError for invalid Keycloak config: {kc_env_override}"
+            )
 
     # If live PostgreSQL URLs are present in environment, also verify wrong-role rejection
     mig_url = os.environ.get("JYXIA_MIGRATION_DATABASE_URL", "").strip()
@@ -1707,7 +2083,9 @@ def _run_self_test_process_shutdown() -> None:
         sub_env.pop("JYXIA_DATABASE_URL", None)
         sub_env.pop("JYXIA_WORKER_DATABASE_URL", None)
         sub_env.pop("JYXIA_MIGRATION_DATABASE_URL", None)
+        sub_env.pop("JYXIA_KEYCLOAK_E2E_URL", None)
         sub_env["JYXIA_E2E_REQUIRE_POSTGRES"] = "0"
+        sub_env["JYXIA_E2E_REQUIRE_KEYCLOAK"] = "0"
 
         with open(mout_path, "w+", encoding="utf-8") as mout_fh:
             mproc = subprocess.Popen(
@@ -1780,7 +2158,9 @@ def _run_self_test_process_shutdown() -> None:
         sub_env.pop("JYXIA_DATABASE_URL", None)
         sub_env.pop("JYXIA_WORKER_DATABASE_URL", None)
         sub_env.pop("JYXIA_MIGRATION_DATABASE_URL", None)
+        sub_env.pop("JYXIA_KEYCLOAK_E2E_URL", None)
         sub_env["JYXIA_E2E_REQUIRE_POSTGRES"] = "0"
+        sub_env["JYXIA_E2E_REQUIRE_KEYCLOAK"] = "0"
 
         sig_used = "UNKNOWN"
         with open(hout_path, "w+", encoding="utf-8") as hout_fh:
@@ -1883,15 +2263,430 @@ def _run_self_test_process_shutdown() -> None:
     )
 
 
+def _collect_database_audit_verification(
+    *,
+    owner_engine: Engine,
+    app_engine: Engine,
+    report_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Query the relational database directly to verify all 9 persistence & audit tables from Section 6."""
+    reviewer_id = str(report_meta["reviewer_user_id"])
+    org_a_id = str(report_meta["organization_id"])
+    org_b_id = str(report_meta["secondary_organization_id"])
+    org_unassoc_id = str(report_meta["unassociated_organization_id"])
+    oidc_issuer = str(report_meta.get("oidc_issuer") or "")
+    expected_ui_case_code = str(report_meta.get("expected_ui_case_code") or UI_UPLOAD_CASE_CODE)
+    expected_ui_sha256 = str(report_meta.get("expected_ui_upload_sha256") or "")
+    expected_ui_bytes = int(report_meta.get("expected_ui_upload_bytes") or 0)
+    expected_ui_filename = str(
+        report_meta.get("expected_ui_upload_filename") or UI_UPLOAD_FILENAME
+    )
+
+    owner_factory = create_session_factory(owner_engine)
+    db = owner_factory()
+    try:
+        # 1. oidc_auth_states
+        oidc_states_rows = db.execute(
+            text(
+                "SELECT id, issuer, redirect_uri, next_path, consumed_at, expires_at "
+                "FROM oidc_auth_states WHERE issuer = :iss ORDER BY created_at DESC"
+            ),
+            {"iss": oidc_issuer},
+        ).fetchall()
+        consumed_oidc_states = [
+            {
+                "id": str(r[0]),
+                "issuer": str(r[1]),
+                "redirect_uri": str(r[2]),
+                "next_path": r[3],
+                "consumed_at": str(r[4]) if r[4] is not None else None,
+            }
+            for r in oidc_states_rows
+            if r[4] is not None
+        ]
+
+        # 2. auth_sessions for reviewer_id
+        sess_rows = db.execute(
+            text(
+                "SELECT id, active_organization_id, auth_method, acr, amr_json, "
+                "mfa_verified_at, revoked_at, revocation_reason, session_token_hash "
+                "FROM auth_sessions WHERE user_id = :uid ORDER BY created_at ASC"
+            ),
+            {"uid": reviewer_id},
+        ).fetchall()
+        sessions_list: list[dict[str, Any]] = []
+        last_revoked_hash: str | None = None
+        for sr in sess_rows:
+            raw_amr = sr[4]
+            if isinstance(raw_amr, str):
+                with contextlib.suppress(Exception):
+                    raw_amr = json.loads(raw_amr)
+            amr_list = list(raw_amr) if isinstance(raw_amr, (list, tuple)) else []
+            if sr[6] is not None:
+                last_revoked_hash = str(sr[8])
+            sessions_list.append(
+                {
+                    "session_id": str(sr[0]),
+                    "active_organization_id": str(sr[1]) if sr[1] is not None else None,
+                    "auth_method": str(sr[2]),
+                    "acr": str(sr[3]),
+                    "amr": amr_list,
+                    "mfa_verified": sr[5] is not None,
+                    "revoked": sr[6] is not None,
+                    "revocation_reason": str(sr[7]) if sr[7] is not None else None,
+                }
+            )
+        active_unrevoked_sessions = [s for s in sessions_list if not s["revoked"]]
+        rotated_sessions = [
+            s
+            for s in sessions_list
+            if s["revocation_reason"] == "rotated_on_organization_select"
+        ]
+        logout_revoked_sessions = [
+            s for s in sessions_list if s["revocation_reason"] == "explicit_logout"
+        ]
+
+        # 3. security_auth_events & chain integrity
+        chain_check = SecurityAuditRepository.verify_chain_detailed(db)
+        sec_events_rows = db.execute(
+            text(
+                "SELECT event_type, outcome, reason_code, user_id, organization_id "
+                "FROM security_auth_events ORDER BY sequence_number ASC"
+            )
+        ).fetchall()
+        user_sec_events = [
+            {
+                "event_type": str(r[0]),
+                "outcome": str(r[1]),
+                "reason_code": str(r[2]),
+                "organization_id": str(r[4]) if r[4] is not None else None,
+            }
+            for r in sec_events_rows
+            if str(r[3] or "") == reviewer_id or str(r[0]) == "OIDC_LOGIN_STARTED"
+        ]
+        event_types_seen = [e["event_type"] for e in user_sec_events]
+
+        # 4. organizations & memberships
+        memberships_rows = db.execute(
+            text(
+                "SELECT organization_id, role, status FROM organization_memberships "
+                "WHERE user_id = :uid"
+            ),
+            {"uid": reviewer_id},
+        ).fetchall()
+        active_member_orgs = {
+            str(r[0]): {"role": str(r[1]), "status": str(r[2])}
+            for r in memberships_rows
+            if str(r[2]) == "active"
+        }
+        org_b_cases = [
+            str(r[0])
+            for r in db.execute(
+                text("SELECT case_code FROM document_cases WHERE organization_id = :oid"),
+                {"oid": org_b_id},
+            ).fetchall()
+        ]
+
+        # 5. document_cases in Org A (including UI-created case)
+        org_a_cases_rows = db.execute(
+            text(
+                "SELECT id, case_code, readiness_state, procedure_reference, declared_laterality "
+                "FROM document_cases WHERE organization_id = :oid"
+            ),
+            {"oid": org_a_id},
+        ).fetchall()
+        org_a_cases_by_code = {
+            str(r[1]): {
+                "case_id": str(r[0]),
+                "case_code": str(r[1]),
+                "readiness_state": str(r[2]),
+                "procedure_reference": r[3],
+                "declared_laterality": r[4],
+            }
+            for r in org_a_cases_rows
+        }
+        ui_case_info = org_a_cases_by_code.get(expected_ui_case_code)
+        ui_case_id = ui_case_info["case_id"] if ui_case_info else None
+
+        # 6. document_versions for UI-uploaded PDF
+        ui_versions: list[dict[str, Any]] = []
+        ui_runs: list[dict[str, Any]] = []
+        ui_assessments: list[dict[str, Any]] = []
+        if ui_case_id:
+            ver_rows = db.execute(
+                text(
+                    "SELECT dv.id, dv.version_number, dv.original_filename, dv.mime_type, "
+                    "dv.byte_size, dv.sha256_hex "
+                    "FROM document_versions dv "
+                    "JOIN documents d ON d.id = dv.document_id "
+                    "WHERE d.organization_id = :oid AND d.case_id = :cid"
+                ),
+                {"oid": org_a_id, "cid": ui_case_id},
+            ).fetchall()
+            ui_versions = [
+                {
+                    "version_id": str(r[0]),
+                    "version_number": int(r[1]),
+                    "original_filename": str(r[2]),
+                    "mime_type": str(r[3]),
+                    "byte_size": int(r[4]),
+                    "sha256_hex": str(r[5]),
+                }
+                for r in ver_rows
+            ]
+            run_rows = db.execute(
+                text(
+                    "SELECT pr.id, pr.step_type, pr.status, pr.lease_token_hash, pr.lease_expires_at "
+                    "FROM processing_runs pr "
+                    "LEFT JOIN document_versions dv ON dv.id = pr.document_version_id AND dv.organization_id = pr.organization_id "
+                    "LEFT JOIN documents d ON d.id = dv.document_id AND d.organization_id = dv.organization_id "
+                    "WHERE pr.organization_id = :oid AND (pr.case_id = :cid OR d.case_id = :cid)"
+                ),
+                {"oid": org_a_id, "cid": ui_case_id},
+            ).fetchall()
+            ui_runs = [
+                {
+                    "run_id": str(r[0]),
+                    "step_type": str(r[1]),
+                    "status": str(r[2]),
+                    "has_active_lease": r[3] is not None or r[4] is not None,
+                }
+                for r in run_rows
+            ]
+            assess_rows = db.execute(
+                text(
+                    "SELECT id, assessment_sequence, readiness_state, human_review_completed "
+                    "FROM consistency_assessments WHERE organization_id = :oid AND case_id = :cid "
+                    "ORDER BY assessment_sequence ASC"
+                ),
+                {"oid": org_a_id, "cid": ui_case_id},
+            ).fetchall()
+            ui_assessments = [
+                {
+                    "assessment_id": str(r[0]),
+                    "sequence": int(r[1]),
+                    "readiness_state": str(r[2]),
+                    "human_review_completed": bool(r[3]),
+                }
+                for r in assess_rows
+            ]
+
+        # 8. human_reviews persisted by reviewer_id in Org A
+        hr_rows = db.execute(
+            text(
+                "SELECT hr.id, d.case_id, hr.document_version_id, hr.reviewer_user_id, hr.action_type "
+                "FROM human_reviews hr "
+                "JOIN document_versions dv ON dv.id = hr.document_version_id AND dv.organization_id = hr.organization_id "
+                "JOIN documents d ON d.id = dv.document_id AND d.organization_id = dv.organization_id "
+                "WHERE hr.organization_id = :oid AND hr.reviewer_user_id = :uid"
+            ),
+            {"oid": org_a_id, "uid": reviewer_id},
+        ).fetchall()
+        human_reviews_summary = [
+            {
+                "review_id": str(r[0]),
+                "case_id": str(r[1]),
+                "version_id": str(r[2]),
+                "reviewer_user_id": str(r[3]),
+                "action_type": str(r[4]),
+            }
+            for r in hr_rows
+        ]
+    finally:
+        db.close()
+
+    # Verify revoked session is blocked under jyxia_app FORCE RLS in PostgreSQL
+    revoked_session_rls_blocked = True
+    if last_revoked_hash and app_engine.dialect.name == "postgresql":
+        app_sess = create_session_factory(app_engine)()
+        try:
+            apply_pg_identity_context(app_sess, session_token_hash=last_revoked_hash)
+            apply_pg_rls_context(app_sess, organization_id=org_a_id, user_id=reviewer_id)
+            vis_sess = int(
+                app_sess.execute(text("SELECT count(*) FROM auth_sessions")).scalar() or 0
+            )
+            vis_cases = int(
+                app_sess.execute(
+                    text("SELECT count(*) FROM document_cases WHERE organization_id = :oid"),
+                    {"oid": org_a_id},
+                ).scalar()
+                or 0
+            )
+            revoked_session_rls_blocked = vis_sess == 0 and vis_cases == 0
+        finally:
+            app_sess.rollback()
+            app_sess.close()
+
+    return {
+        "auth_mode": report_meta.get("auth_mode"),
+        "oidc_consumed_states_count": len(consumed_oidc_states),
+        "oidc_consumed_states": consumed_oidc_states,
+        "reviewer_sessions_total": len(sessions_list),
+        "reviewer_active_unrevoked_sessions": len(active_unrevoked_sessions),
+        "reviewer_rotated_sessions_count": len(rotated_sessions),
+        "reviewer_logout_revoked_sessions_count": len(logout_revoked_sessions),
+        "reviewer_sessions": sessions_list,
+        "revoked_session_rls_blocked": revoked_session_rls_blocked,
+        "security_audit_chain_valid": chain_check.valid,
+        "security_audit_event_count": chain_check.event_count,
+        "security_event_types_seen": event_types_seen,
+        "active_member_org_ids": sorted(active_member_orgs.keys()),
+        "unassociated_org_has_membership": org_unassoc_id in active_member_orgs,
+        "secondary_org_cases": org_b_cases,
+        "ui_created_case": ui_case_info,
+        "ui_uploaded_versions": ui_versions,
+        "expected_ui_upload_sha256": expected_ui_sha256,
+        "expected_ui_upload_bytes": expected_ui_bytes,
+        "expected_ui_upload_filename": expected_ui_filename,
+        "ui_processing_runs": ui_runs,
+        "ui_assessments": ui_assessments,
+        "human_reviews_count": len(human_reviews_summary),
+    }
+
+
+def _assert_database_audit_verification(
+    audit_ver: dict[str, Any],
+    *,
+    require_keycloak: bool,
+    org_a_id: str,
+    org_b_id: str,
+) -> None:
+    """Enforce all Section 6 database audit and persistence assertions."""
+    auth_mode = audit_ver.get("auth_mode")
+    if require_keycloak and auth_mode != "keycloak_oidc_mfa":
+        raise RuntimeError(
+            f"JYXIA_E2E_REQUIRE_KEYCLOAK=1: expected auth_mode='keycloak_oidc_mfa', got '{auth_mode}'."
+        )
+
+    # 1. oidc_auth_states (mandatory when running in keycloak_oidc_mfa mode)
+    if auth_mode == "keycloak_oidc_mfa":
+        if int(audit_ver.get("oidc_consumed_states_count") or 0) < 1:
+            raise RuntimeError(
+                f"Expected consumed oidc_auth_states row with consumed_at filled: {audit_ver}"
+            )
+
+    # 2. auth_sessions
+    sessions = audit_ver.get("reviewer_sessions") or []
+    if len(sessions) < 3:
+        raise RuntimeError(
+            f"Expected >= 3 auth_sessions (initial + org switch rotations), got {len(sessions)}: {sessions}"
+        )
+    if int(audit_ver.get("reviewer_active_unrevoked_sessions") or 0) != 0:
+        raise RuntimeError(
+            f"Expected 0 active unrevoked sessions for reviewer after logout, got: {sessions}"
+        )
+    if int(audit_ver.get("reviewer_rotated_sessions_count") or 0) < 2:
+        raise RuntimeError(
+            f"Expected >= 2 rotated sessions (rotated_on_organization_select), got: {sessions}"
+        )
+    if int(audit_ver.get("reviewer_logout_revoked_sessions_count") or 0) < 1:
+        raise RuntimeError(
+            f"Expected explicit_logout revoked session after #btn-logout, got: {sessions}"
+        )
+    if audit_ver.get("revoked_session_rls_blocked") is not True:
+        raise RuntimeError(
+            "Revoked session token was not blocked by PostgreSQL FORCE ROW LEVEL SECURITY!"
+        )
+    for s in sessions:
+        if s.get("acr") != "urn:jyxia:loa:mfa":
+            raise RuntimeError(f"Session has unexpected MFA acr: {s}")
+        amr = s.get("amr") or []
+        if not any(f in amr for f in ("otp", "totp", "hwk", "fido", "webauthn", "mfa")):
+            raise RuntimeError(f"Session lacks second-factor AMR claim: {s}")
+        if auth_mode == "keycloak_oidc_mfa" and s.get("auth_method") != "oidc_pkce_mfa":
+            raise RuntimeError(f"Expected auth_method='oidc_pkce_mfa', got: {s}")
+
+    # 3. security_auth_events
+    if audit_ver.get("security_audit_chain_valid") is not True:
+        raise RuntimeError(f"Security audit hash chain verification failed: {audit_ver}")
+    seen_events = set(audit_ver.get("security_event_types_seen") or [])
+    required_events = {
+        "ORG_CONTEXT_SELECTED",
+        "CROSS_TENANT_ACCESS_DENIED",
+        "ORG_SELECTION_DENIED",
+        "AUTH_LOGOUT_SUCCEEDED",
+    }
+    if auth_mode == "keycloak_oidc_mfa":
+        required_events.update({"OIDC_LOGIN_STARTED", "AUTH_LOGIN_SUCCEEDED"})
+    missing_events = required_events - seen_events
+    if missing_events:
+        raise RuntimeError(
+            f"Missing required security_auth_events {sorted(missing_events)} (seen={sorted(seen_events)})"
+        )
+
+    # 4. organizations & isolation
+    member_orgs = set(audit_ver.get("active_member_org_ids") or [])
+    if member_orgs != {org_a_id, org_b_id}:
+        raise RuntimeError(
+            f"Expected active memberships in exactly {[org_a_id, org_b_id]}, got {sorted(member_orgs)}"
+        )
+    if audit_ver.get("unassociated_org_has_membership") is not False:
+        raise RuntimeError("Reviewer unexpectedly holds membership in unassociated organization!")
+    if audit_ver.get("secondary_org_cases") != [SECONDARY_ORG_CASE_CODE]:
+        raise RuntimeError(
+            f"Secondary organization cases isolation mismatch: {audit_ver.get('secondary_org_cases')}"
+        )
+
+    # 5. document_cases (UI-created case)
+    ui_case = audit_ver.get("ui_created_case")
+    if not ui_case or ui_case.get("case_code") != UI_UPLOAD_CASE_CODE:
+        raise RuntimeError(f"UI-created case {UI_UPLOAD_CASE_CODE} not found in DB: {audit_ver}")
+
+    # 6. document_versions (UI-uploaded PDF)
+    ui_versions = audit_ver.get("ui_uploaded_versions") or []
+    if len(ui_versions) != 1:
+        raise RuntimeError(
+            f"Expected 1 uploaded document version in {UI_UPLOAD_CASE_CODE}, got: {ui_versions}"
+        )
+    uv = ui_versions[0]
+    if (
+        uv.get("sha256_hex") != audit_ver.get("expected_ui_upload_sha256")
+        or uv.get("byte_size") != audit_ver.get("expected_ui_upload_bytes")
+        or uv.get("original_filename") != audit_ver.get("expected_ui_upload_filename")
+        or uv.get("mime_type") != "application/pdf"
+        or uv.get("version_number") != 1
+    ):
+        raise RuntimeError(f"UI-uploaded document version metadata/SHA-256 mismatch: {uv}")
+
+    # 7. processing_runs for UI-uploaded PDF
+    ui_runs = audit_ver.get("ui_processing_runs") or []
+    succeeded_steps = {
+        r["step_type"]
+        for r in ui_runs
+        if r.get("status") == "succeeded" and not r.get("has_active_lease")
+    }
+    expected_steps = {
+        ProcessingStepType.VERIFY_OBJECT_INTEGRITY.value,
+        ProcessingStepType.EXTRACT_PDF_TEXT.value,
+        ProcessingStepType.COMPARE_CONSISTENCY.value,
+    }
+    if not expected_steps.issubset(succeeded_steps):
+        raise RuntimeError(
+            f"UI-uploaded PDF did not complete all 3 worker processing steps: runs={ui_runs}"
+        )
+
+    # 8. human_reviews & 9. consistency_assessments
+    if int(audit_ver.get("human_reviews_count") or 0) < 4:
+        raise RuntimeError(
+            f"Expected >= 4 human_reviews persisted by reviewer, got {audit_ver.get('human_reviews_count')}"
+        )
+    ui_assessments = audit_ver.get("ui_assessments") or []
+    if len(ui_assessments) < 1:
+        raise RuntimeError(
+            f"Expected consistency assessment for UI-uploaded case {UI_UPLOAD_CASE_CODE}, got: {ui_assessments}"
+        )
+
+
 def _verify_post_e2e_report(
     report_path: Path,
     *,
     require_postgres: bool,
+    require_keycloak: bool = False,
     drain_timeout: float = 15.0,
     drain_interval: float = 0.15,
     allow_unreviewed_cases: bool = False,
 ) -> None:
-    """Verify post-E2E report, process termination, and live PostgreSQL 16 drained queue state."""
+    """Verify post-E2E report, process termination, and live PostgreSQL 16 drained queue & audit state."""
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline and not report_path.exists():
         time.sleep(0.15)
@@ -1961,6 +2756,7 @@ def _verify_post_e2e_report(
 
     db_info = report.get("db_info") or {}
     db_mode = db_info.get("db_mode")
+    audit_ver = report.get("db_audit_verification") or {}
 
     if require_postgres:
         if db_mode != "postgresql":
@@ -1974,14 +2770,19 @@ def _verify_post_e2e_report(
         if db_info.get("alembic_version") != EXPECTED_ALEMBIC_HEAD:
             raise RuntimeError(f"Unexpected alembic_version: {db_info.get('alembic_version')}")
 
-        # Live PostgreSQL 16 query as jyxia_app confirming final drained state of both cases
+        # Live PostgreSQL 16 query as jyxia_app confirming final drained state of all cases
         app_url = os.environ["JYXIA_DATABASE_URL"].strip()
+        mig_url = os.environ.get("JYXIA_MIGRATION_DATABASE_URL", "").strip() or app_url
         app_engine = create_db_engine(app_url)
+        owner_engine = create_db_engine(mig_url)
         try:
             app_factory = create_session_factory(app_engine)
+            seed_actor_id = str(
+                report.get("seed_operator_user_id") or report["reviewer_user_id"]
+            )
             ctx = TenantContext(
                 organization_id=str(report["organization_id"]),
-                actor_user_id=str(report["reviewer_user_id"]),
+                actor_user_id=seed_actor_id,
                 session_token_hash=str(report["session_token_hash"]),
                 source="authenticated_request",
             )
@@ -2009,8 +2810,15 @@ def _verify_post_e2e_report(
                 timeout_seconds=drain_timeout,
                 poll_interval_seconds=drain_interval,
             )
+            if not allow_unreviewed_cases:
+                audit_ver = _collect_database_audit_verification(
+                    owner_engine=owner_engine,
+                    app_engine=app_engine,
+                    report_meta=report,
+                )
         finally:
             app_engine.dispose()
+            owner_engine.dispose()
     else:
         live_snap = report.get("cases_snapshot") or {}
         if not allow_unreviewed_cases:
@@ -2024,11 +2832,25 @@ def _verify_post_e2e_report(
                         f"Case {cid} did not finish with drained=True and human_review_completed=True: {c_info}"
                     )
 
+    if report.get("db_audit_verification_error"):
+        raise RuntimeError(
+            f"Database audit verification collection failed during shutdown: {report['db_audit_verification_error']}"
+        )
+
+    if not allow_unreviewed_cases:
+        _assert_database_audit_verification(
+            audit_ver,
+            require_keycloak=require_keycloak,
+            org_a_id=str(report["organization_id"]),
+            org_b_id=str(report["secondary_organization_id"]),
+        )
+
     print(
         json.dumps(
             {
                 "status": "POST_E2E_VERIFICATION_PASSED",
                 "db_mode": db_mode,
+                "auth_mode": report.get("auth_mode"),
                 "backend_db_user": db_info.get("backend_db_user"),
                 "worker_db_user": db_info.get("worker_db_user"),
                 "pg_server_version_num": db_info.get("pg_server_version_num"),
@@ -2042,6 +2864,25 @@ def _verify_post_e2e_report(
                 "worker_process_alive": False,
                 "worker_pid_state": w_state["classification"],
                 "harness_pid_state": h_state["classification"],
+                "db_audit_verification": {
+                    "oidc_consumed_states_count": audit_ver.get("oidc_consumed_states_count"),
+                    "reviewer_sessions_total": audit_ver.get("reviewer_sessions_total"),
+                    "reviewer_active_unrevoked_sessions": audit_ver.get(
+                        "reviewer_active_unrevoked_sessions"
+                    ),
+                    "reviewer_rotated_sessions_count": audit_ver.get(
+                        "reviewer_rotated_sessions_count"
+                    ),
+                    "reviewer_logout_revoked_sessions_count": audit_ver.get(
+                        "reviewer_logout_revoked_sessions_count"
+                    ),
+                    "revoked_session_rls_blocked": audit_ver.get("revoked_session_rls_blocked"),
+                    "security_audit_chain_valid": audit_ver.get("security_audit_chain_valid"),
+                    "security_event_types_seen": audit_ver.get("security_event_types_seen"),
+                    "ui_created_case": audit_ver.get("ui_created_case"),
+                    "ui_uploaded_versions": audit_ver.get("ui_uploaded_versions"),
+                    "human_reviews_count": audit_ver.get("human_reviews_count"),
+                },
                 "cases_drained": live_snap,
             }
         )
@@ -2059,8 +2900,17 @@ def main() -> None:
         default=_is_truthy_env(os.environ.get("JYXIA_E2E_REQUIRE_POSTGRES")),
     )
     parser.add_argument(
+        "--require-keycloak",
+        action="store_true",
+        default=_is_truthy_env(os.environ.get("JYXIA_E2E_REQUIRE_KEYCLOAK")),
+    )
+    parser.add_argument(
         "--report-file",
         default=os.environ.get("JYXIA_E2E_REPORT_FILE", "").strip() or None,
+    )
+    parser.add_argument(
+        "--ui-upload-pdf-file",
+        default=os.environ.get("JYXIA_E2E_UI_UPLOAD_PDF_FILE", "").strip() or None,
     )
     parser.add_argument(
         "--drain-timeout",
@@ -2102,12 +2952,14 @@ def main() -> None:
         _verify_post_e2e_report(
             Path(args.verify_report),
             require_postgres=bool(args.require_postgres),
+            require_keycloak=bool(args.require_keycloak),
             drain_timeout=args.drain_timeout,
             drain_interval=args.drain_interval,
         )
         return
 
     report_path = Path(args.report_file) if args.report_file else None
+    ui_upload_pdf_path = Path(args.ui_upload_pdf_file) if args.ui_upload_pdf_file else None
     run_uid = new_uuid()[:8]
     harness_pid = os.getpid()
     harness_identity = _capture_pid_identity(
@@ -2202,6 +3054,10 @@ def main() -> None:
             require_postgres=bool(args.require_postgres),
             sqlite_fallback_path=tmp_path / "inst_e2e.sqlite3",
         )
+        auth_cfg = _resolve_and_validate_keycloak_config(
+            require_keycloak=bool(args.require_keycloak),
+            require_postgres=bool(args.require_postgres),
+        )
         db_mode: str = db_cfg["db_mode"]
         app_db_url: str = db_cfg["app_db_url"]
         worker_db_url: str = db_cfg["worker_db_url"]
@@ -2210,8 +3066,13 @@ def main() -> None:
         storage_dir = tmp_path / "synthetic_storage"
         worker_log_path = tmp_path / "worker_subprocess.log"
 
+        is_keycloak_oidc = auth_cfg["auth_mode"] == "keycloak_oidc_mfa"
+        keycloak_info: dict[str, Any] | None = None
+        if is_keycloak_oidc:
+            keycloak_info = _verify_keycloak_environment(oidc_issuer=auth_cfg["oidc_issuer"])
+
         settings = Settings(
-            env="test",
+            env="development" if is_keycloak_oidc else "test",
             app_base_url=f"http://127.0.0.1:{args.port}",
             database_url=app_db_url,
             worker_database_url=worker_db_url,
@@ -2220,7 +3081,26 @@ def main() -> None:
             session_secret="E2E_Session_Hmac_Aead_Key_32_Bytes_Minimum_335!",
             csrf_secret="E2E_Csrf_Hmac_Key_32_Bytes_Minimum_Value_335!",
             session_cookie_secure=False,
-            oidc_enabled=False,
+            oidc_enabled=bool(is_keycloak_oidc),
+            oidc_allow_http_dev=bool(is_keycloak_oidc),
+            oidc_issuer=auth_cfg["oidc_issuer"] if is_keycloak_oidc else None,
+            oidc_client_id=auth_cfg["oidc_client_id"] if is_keycloak_oidc else None,
+            oidc_client_secret=auth_cfg["oidc_client_secret"] if is_keycloak_oidc else None,
+            oidc_redirect_uri=(
+                f"http://127.0.0.1:{args.port}/api/v1/auth/callback"
+                if is_keycloak_oidc
+                else None
+            ),
+            oidc_post_logout_redirect_uri=(
+                f"http://127.0.0.1:{args.port}/institutional/"
+                if is_keycloak_oidc
+                else None
+            ),
+            oidc_mfa_required=True,
+            oidc_require_both_acr_and_amr=True,
+            oidc_allowed_acr=("urn:jyxia:loa:mfa",),
+            oidc_allowed_amr=("otp", "totp", "hwk", "fido", "webauthn", "mfa"),
+            oidc_max_auth_age_seconds=3600,
         )
 
         app_engine = create_db_engine(app_db_url)
@@ -2257,20 +3137,20 @@ def main() -> None:
                 max_bytes=settings.max_document_bytes,
             )
 
-            try:
-                seeded = _seed_harness_data(
-                    bootstrap_factory=bootstrap_factory,
-                    app_factory=app_factory,
-                    storage=storage,
-                    settings=settings,
-                    session_token=args.session_token,
-                    csrf_token=args.csrf_token,
-                    run_uid=run_uid,
-                )
-            finally:
-                if bootstrap_engine is not None:
-                    bootstrap_engine.dispose()
-                    bootstrap_engine = None
+            seeded = _seed_harness_data(
+                bootstrap_factory=bootstrap_factory,
+                app_factory=app_factory,
+                storage=storage,
+                settings=settings,
+                session_token=args.session_token,
+                csrf_token=args.csrf_token,
+                run_uid=run_uid,
+                auth_cfg=auth_cfg,
+            )
+
+            if ui_upload_pdf_path is not None:
+                ui_upload_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                ui_upload_pdf_path.write_bytes(seeded["ui_upload_pdf_bytes"])
 
             ctx: TenantContext = seeded["ctx"]
             case_a_id: str = seeded["case_a_id"]
@@ -2290,6 +3170,10 @@ def main() -> None:
             report_payload = {
                 "stage": "worker_started",
                 "run_uid": run_uid,
+                "auth_mode": seeded["auth_mode"],
+                "oidc_issuer": seeded["oidc_issuer"],
+                "oidc_subject": seeded["oidc_subject"],
+                "keycloak_info": keycloak_info,
                 "harness_pid": harness_pid,
                 "harness_proc_identity": harness_identity,
                 "worker_pid": worker_proc.pid,
@@ -2306,13 +3190,22 @@ def main() -> None:
                 "harness_shutdown_signal": None,
                 "db_info": db_info,
                 "organization_id": seeded["organization_id"],
+                "secondary_organization_id": seeded["secondary_organization_id"],
+                "unassociated_organization_id": seeded["unassociated_organization_id"],
+                "secondary_org_case_id": seeded["secondary_org_case_id"],
                 "reviewer_user_id": seeded["reviewer_user_id"],
+                "seed_operator_user_id": seeded["seed_operator_user_id"],
                 "session_token_hash": seeded["session_token_hash"],
                 "case_a_id": case_a_id,
                 "case_b_id": case_b_id,
+                "expected_ui_case_code": seeded["expected_ui_case_code"],
+                "expected_ui_upload_filename": seeded["expected_ui_upload_filename"],
+                "expected_ui_upload_sha256": seeded["expected_ui_upload_sha256"],
+                "expected_ui_upload_bytes": seeded["expected_ui_upload_bytes"],
                 "initial_drain_ok": False,
                 "e2e_cases_drained_verified": False,
                 "cases_snapshot": {},
+                "db_audit_verification": {},
             }
             _write_report_file(report_path, report_payload)
 
@@ -2366,7 +3259,13 @@ def main() -> None:
             if shutdown_state["signal_received"] is not None:
                 raise _GracefulShutdownInterrupted("Shutdown requested prior to HTTP server start.")
 
-            app = create_app(settings, engine=app_engine, storage=storage)
+            oidc_adapter = StandardOidcProviderAdapter(settings) if is_keycloak_oidc else None
+            app = create_app(
+                settings,
+                engine=app_engine,
+                storage=storage,
+                oidc_adapter=oidc_adapter,
+            )
 
             @app.middleware("http")
             async def _track_queue_drainage_for_report(
@@ -2437,9 +3336,6 @@ def main() -> None:
             pass
         finally:
             shutdown_state["phase"] = "cleanup"
-            if bootstrap_engine is not None:
-                with contextlib.suppress(Exception):
-                    bootstrap_engine.dispose()
 
             # Capture a final non-blocking snapshot of case runs before stopping the worker
             if (
@@ -2475,6 +3371,21 @@ def main() -> None:
                             snap_sess.rollback()
                             snap_sess.close()
 
+            if report_payload and seeded is not None:
+                try:
+                    effective_owner_engine = (
+                        bootstrap_engine if bootstrap_engine is not None else app_engine
+                    )
+                    report_payload["db_audit_verification"] = (
+                        _collect_database_audit_verification(
+                            owner_engine=effective_owner_engine,
+                            app_engine=app_engine,
+                            report_meta=report_payload,
+                        )
+                    )
+                except Exception as exc:
+                    report_payload["db_audit_verification_error"] = str(exc)
+
             stop_info = _stop_worker_subprocess(
                 worker_proc,
                 worker_log_fh,
@@ -2482,6 +3393,9 @@ def main() -> None:
                 kill_timeout_seconds=3.0,
                 expected_identity=worker_identity,
             )
+            if bootstrap_engine is not None:
+                with contextlib.suppress(Exception):
+                    bootstrap_engine.dispose()
             with contextlib.suppress(Exception):
                 app_engine.dispose()
 

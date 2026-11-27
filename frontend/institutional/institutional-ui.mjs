@@ -163,7 +163,7 @@ async function apiFetch(path, { method = 'GET', body = null, headers = {}, isBin
   });
 
   if (res.status === 401) {
-    state.authenticated = false;
+    resetAuthenticatedWorkspaceState();
     renderAuthGate();
     const errData = await res.json().catch(() => ({}));
     throw new Error(errData.detail || 'Sessão expirada ou não autenticada (401). Faça login via OIDC + MFA.');
@@ -547,7 +547,9 @@ async function openCaseWorkspace(caseId) {
 
     renderCaseWorkspace();
     if (state.selectedVersionId) {
-      await selectDocumentVersionForInspection(state.selectedDocumentId, state.selectedVersionId);
+      await selectDocumentVersionForInspection(state.selectedDocumentId, state.selectedVersionId, {
+        preserveLoadedPdf: !isNewCase,
+      });
     }
   } catch (err) {
     if (loadSeq === state.workspaceLoadSeq) {
@@ -1010,7 +1012,7 @@ function renderSideBySideComparison() {
   }
 }
 
-async function selectDocumentVersionForInspection(documentId, versionId) {
+async function selectDocumentVersionForInspection(documentId, versionId, { preserveLoadedPdf = false } = {}) {
   state.selectedDocumentId = documentId;
   state.selectedVersionId = versionId;
   renderCaseDocumentsTable();
@@ -1020,6 +1022,16 @@ async function selectDocumentVersionForInspection(documentId, versionId) {
 
   renderVersionExtractedFields(bundle);
   renderVersionHumanReviewForm(bundle);
+  const canvasWrap = document.getElementById('pdf-canvas-wrapper');
+  if (
+    preserveLoadedPdf &&
+    state.pdfLoadedVersionId === versionId &&
+    state.pdfDoc &&
+    canvasWrap &&
+    !canvasWrap.hidden
+  ) {
+    return;
+  }
   await loadPdfIntoViewer(bundle.document, bundle.version);
 }
 
@@ -1389,6 +1401,109 @@ async function highlightFieldEvidenceOnPdf(documentId, versionId, evidenceInfo) 
   }
 }
 
+function resetAuthenticatedWorkspaceState() {
+  if (state.pdfActiveLoadToken) {
+    try {
+      state.pdfLoadSequencer.clearDocument(state.pdfActiveLoadToken);
+    } catch (_e) {
+      // ignore
+    }
+  }
+  if (state.pdfDoc && typeof state.pdfDoc.destroy === 'function') {
+    try {
+      state.pdfDoc.destroy();
+    } catch (_e) {
+      // ignore
+    }
+  }
+  state.authenticated = false;
+  state.sessionStatus = null;
+  state.userProfile = null;
+  state.organizations = [];
+  state.activeOrgId = null;
+  state.activeMembership = null;
+
+  state.cases = [];
+  state.activeFilterId = 'all';
+  state.searchQuery = '';
+
+  state.selectedCaseId = null;
+  state.selectedCaseSummary = null;
+  state.caseDocuments = [];
+  state.caseProcessingRuns = [];
+  state.caseAssessments = [];
+  state.selectedAssessmentId = null;
+  state.selectedAssessmentDetail = null;
+  state.caseReviews = null;
+  state.versionBundles.clear();
+
+  state.selectedDocumentId = null;
+  state.selectedVersionId = null;
+  state.compareDocAId = null;
+  state.compareDocBId = null;
+  state.workspaceLoadInFlight = false;
+
+  state.pdfDoc = null;
+  state.pdfLoadedVersionId = null;
+  state.pdfActiveLoadToken = null;
+  state.pdfPageNum = 1;
+  state.pdfPageCount = 0;
+  state.activeHighlights = [];
+
+  for (const id of [
+    'cases-table-body',
+    'case-documents-tbody',
+    'version-extracted-fields-tbody',
+    'case-human-reviews-list',
+    'pdf-bbox-overlay-layer',
+    'org-select',
+    'assessment-history-select',
+    'compare-doc-a-select',
+    'compare-doc-b-select',
+    'side-by-side-tbody',
+    'four-axes-grid',
+    'case-pipeline-stages',
+    'case-processing-runs-tbody',
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.replaceChildren();
+  }
+  for (const id of ['user-display-name', 'user-role-badge', 'active-org-caption', 'workspace-case-title']) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '—';
+  }
+  const workspace = document.getElementById('case-workspace');
+  if (workspace) workspace.hidden = true;
+  const canvasWrap = document.getElementById('pdf-canvas-wrapper');
+  if (canvasWrap) canvasWrap.hidden = true;
+  const canvas = document.getElementById('pdf-render-canvas');
+  if (canvas) {
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, '__JYXIA_INST_DEBUG_STATE__', {
+    configurable: false,
+    enumerable: false,
+    get() {
+      return Object.freeze({
+        authenticated: Boolean(state.authenticated),
+        hasUserProfile: Boolean(state.userProfile),
+        organizationsCount: Array.isArray(state.organizations) ? state.organizations.length : 0,
+        activeOrgId: state.activeOrgId || null,
+        casesCount: Array.isArray(state.cases) ? state.cases.length : 0,
+        selectedCaseId: state.selectedCaseId || null,
+        versionBundlesCount: state.versionBundles instanceof Map ? state.versionBundles.size : 0,
+        hasPdfDoc: Boolean(state.pdfDoc),
+      });
+    },
+  });
+}
+
 async function bootstrapSession() {
   try {
     const sessionData = await apiFetch('/api/v1/auth/session');
@@ -1408,11 +1523,26 @@ async function bootstrapSession() {
       ? orgsResp.organizations
       : [];
     state.organizations = orgList;
-    state.activeOrgId =
+
+    let serverActiveOrgId =
+      sessionData.active_organization_id ||
       me.active_organization_id ||
       orgsResp?.active_organization_id ||
-      state.organizations[0]?.organization_id ||
       null;
+
+    // When a user belongs to 2+ organizations, OIDC login leaves active_organization_id=null
+    // on the server until POST /api/v1/auth/select-organization binds the initial tenant context.
+    if (!serverActiveOrgId && state.organizations.length > 0) {
+      const initialOrgId = state.organizations[0].organization_id;
+      const selResp = await apiFetch('/api/v1/auth/select-organization', {
+        method: 'POST',
+        body: { organization_id: initialOrgId },
+      });
+      serverActiveOrgId = selResp?.active_organization_id || initialOrgId;
+      state.userProfile.active_organization_id = serverActiveOrgId;
+    }
+
+    state.activeOrgId = serverActiveOrgId;
     state.activeMembership =
       state.organizations.find((o) => o.organization_id === state.activeOrgId) || null;
 
@@ -1424,7 +1554,7 @@ async function bootstrapSession() {
       }
     }
   } catch (_err) {
-    state.authenticated = false;
+    resetAuthenticatedWorkspaceState();
     renderAuthGate();
   }
 }
@@ -1464,8 +1594,7 @@ function wireEventListeners() {
     } catch (_e) {
       // ignore
     }
-    state.authenticated = false;
-    state.selectedCaseId = null;
+    resetAuthenticatedWorkspaceState();
     renderAuthGate();
     showAlert('Sessão institucional encerrada.', 'info');
   });

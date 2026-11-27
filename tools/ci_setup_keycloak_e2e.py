@@ -132,6 +132,35 @@ def main() -> int:
             raise RuntimeError("Client jyxia-backend-dev not found after realm import.")
         mfa_client = mfa_clients[0]
         mfa_client["secret"] = mfa_client_secret
+        redirect_uris = list(mfa_client.get("redirectUris") or [])
+        for uri in (
+            "http://127.0.0.1:8000/api/v1/auth/callback",
+            "http://localhost:8000/api/v1/auth/callback",
+            "http://127.0.0.1:8045/api/v1/auth/callback",
+            "http://localhost:8045/api/v1/auth/callback",
+        ):
+            if uri not in redirect_uris:
+                redirect_uris.append(uri)
+        mfa_client["redirectUris"] = redirect_uris
+
+        web_origins = list(mfa_client.get("webOrigins") or [])
+        for origin in (
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+            "http://127.0.0.1:8045",
+            "http://localhost:8045",
+        ):
+            if origin not in web_origins:
+                web_origins.append(origin)
+        mfa_client["webOrigins"] = web_origins
+
+        attrs = dict(mfa_client.get("attributes") or {})
+        attrs["post.logout.redirect.uris"] = (
+            "http://127.0.0.1:8000/*##http://localhost:8000/*##"
+            "http://127.0.0.1:8045/*##http://localhost:8045/*"
+        )
+        mfa_client["attributes"] = attrs
+
         put_res = client.put(
             f"{admin_realm}/clients/{mfa_client['id']}", json=mfa_client, headers=headers
         )
